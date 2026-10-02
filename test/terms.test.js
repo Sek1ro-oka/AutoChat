@@ -29,9 +29,8 @@ function event(text, overrides = {}) {
     message: [{ type: 'text', data: { text } }], ...overrides };
 }
 
-test('input blocks refuse and trigger keywords echo without model, history or charges', async t => {
-  for (const [text, expected] of [['包含禁词的问题', RULE_REPLY], ['请给我暗号', '暗号'],
-    ['a secret question', 'SECRET'], ['a block question', RULE_REPLY]]) {
+test('input blocks refuse without model, history or charges', async t => {
+  for (const [text, expected] of [['包含禁词的问题', RULE_REPLY], ['a block question', RULE_REPLY]]) {
     const f = fixture(t);
     await f.bot.ingest(event(text), f.send);
     await f.bot.ingest(event(text), f.send);
@@ -51,7 +50,7 @@ test('group rules require mention by default and optional unmentioned matching s
   assert.equal(defaultBot.sent.length, 0);
   await defaultBot.bot.ingest(event('暗号', { ...group, message_id: 2,
     message: [{ type: 'at', data: { qq: '10000001' } }, { type: 'text', data: { text: '暗号' } }] }), defaultBot.send);
-  assert.equal(defaultBot.sent[0].params.message[0].data.text, '暗号');
+  assert.equal(defaultBot.sent[0].params.message[0].data.text, '正常回答');
 
   const f = fixture(t, { GROUP_KEYWORD_WITHOUT_AT: 'true' });
   await f.bot.ingest(event('暗号', group), f.send);
@@ -61,7 +60,8 @@ test('group rules require mention by default and optional unmentioned matching s
   await f.bot.ingest(event('暗号', { user_id: 10000005 }), f.send);
   assert.equal(f.sent.length, 2);
   assert.ok(f.sent.every(item => item.action === 'send_group_msg' && item.params.group_id === 10000003));
-  assert.equal(f.calls(), 0);
+  assert.equal(f.calls(), 1);
+  assert.equal(f.requests[0].at(-1).content, '暗号');
 });
 
 test('rules respect disabled replies and rate limits', async t => {
@@ -71,8 +71,8 @@ test('rules respect disabled replies and rate limits', async t => {
   assert.equal(f.sent.length, 0);
   f.store.set('enabled', '1');
   for (let id = 2; id <= 6; id++) await f.bot.ingest(event('暗号', { message_id: id }), f.send);
-  assert.equal(f.sent.filter(item => item.params.message[0].data.text === '暗号').length, 2);
-  assert.equal(f.calls(), 0);
+  assert.equal(f.sent.filter(item => item.params.message[0].data.text === '正常回答').length, 2);
+  assert.equal(f.calls(), 2);
 });
 
 test('output block terms use fixed reply and retain actual cost; trigger terms are input-only', async t => {
@@ -94,18 +94,19 @@ test('empty terms leave normal questions enabled and malformed group option is r
   assert.throws(() => loadConfig({ ...env, GROUP_KEYWORD_WITHOUT_AT: 'yes' }), /GROUP_KEYWORD_WITHOUT_AT/);
 });
 
-test('block takes priority and multiple triggers use configured order', async t => {
+test('block takes priority and multiple trigger matches produce one model request for full text', async t => {
   const f = fixture(t);
   await f.bot.ingest(event('暗号里面包含禁词'), f.send);
   await f.bot.ingest(event('SECRET以及暗号', { message_id: 2 }), f.send);
   assert.equal(f.sent[0].params.message[0].data.text, RULE_REPLY);
-  assert.equal(f.sent[1].params.message[0].data.text, '暗号');
-  assert.equal(f.calls(), 0);
+  assert.equal(f.sent[1].params.message[0].data.text, '正常回答');
+  assert.equal(f.calls(), 1);
+  assert.equal(f.requests[0].at(-1).content, 'SECRET以及暗号');
 });
 
-test('blocked and triggered turns preserve existing history and never reach later model context in private or group', async t => {
+test('blocked turns preserve existing history and never reach later model context in private or group', async t => {
   for (const group of [false, true]) {
-    for (const ruleText of ['包含禁词的这一整条消息', '包含暗号的这一整条消息']) {
+    for (const ruleText of ['包含禁词的这一整条消息']) {
       const f = fixture(t);
       const user = group ? 10000004 : 10000002;
       const key = group ? 'group:10000003:10000004' : 'private:10000002';
@@ -128,5 +129,42 @@ test('blocked and triggered turns preserve existing history and never reach late
       }
       assert.ok(f.store.history(key).every(item => !item.content.includes(ruleText) && !item.content.includes(RULE_REPLY)));
     }
+  }
+});
+
+test('keywords invoke persona model on full input, preserve context, charge budget and do not repeat duplicate events', async t => {
+  for (const group of [false, true]) {
+    const f = fixture(t, { GROUP_KEYWORD_WITHOUT_AT: 'true' });
+    const key = group ? 'group:10000003:10000004' : 'private:10000002';
+    const make = (text, messageId, mention = true) => event(text, {
+      message_id: messageId, user_id: group ? 10000004 : 10000002,
+      ...(group ? { message_type: 'group', group_id: 10000003,
+        message: [...(mention ? [{ type: 'at', data: { qq: '10000001' } }] : []), { type: 'text', data: { text } }] } : {}),
+    });
+    await f.bot.ingest(make('先前正常问题', 1), f.send);
+    const triggered = make('secret：请根据之前的聊天回答完整问题', 2, false);
+    await f.bot.ingest(triggered, f.send);
+    await f.bot.ingest(triggered, f.send);
+    assert.equal(f.calls(), 2);
+    assert.equal(f.sent[1].params.message[0].data.text, '正常回答');
+    assert.equal(f.requests[1][0].content, f.config.systemPrompt);
+    assert.equal(f.requests[1].at(-1).content, 'secret：请根据之前的聊天回答完整问题');
+    assert.equal(f.requests[1].length, 4);
+    assert.equal(f.store.history(key).length, 4);
+    await f.bot.ingest(make('继续追问', 3), f.send);
+    assert.equal(f.requests[2].length, 6);
+    assert.equal(f.requests[2][3].content, 'secret：请根据之前的聊天回答完整问题');
+    assert.equal(f.store.balance(budgetDay(now), f.config.budgetMicro).used, 30);
+  }
+});
+
+test('unmentioned group keywords respect budget exhaustion and group pause', async t => {
+  for (const disabled of [false, true]) {
+    const f = fixture(t, { GROUP_KEYWORD_WITHOUT_AT: 'true', DAILY_BUDGET_CNY: '0.000001' });
+    if (disabled) f.store.set('groupEnabled', '0');
+    await f.bot.ingest(event('暗号：问题', { message_type: 'group', group_id: 10000003, user_id: 10000004 }), f.send);
+    assert.equal(f.calls(), 0);
+    assert.equal(f.sent.length, disabled ? 0 : 1);
+    if (!disabled) assert.match(f.sent[0].params.message[0].data.text, /预算/);
   }
 });

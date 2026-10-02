@@ -1,6 +1,6 @@
 import { budgetDay } from './store.js';
 import { estimateInput, costMicro, prepareMessages, usageCost } from './model.js';
-import { containsTerm, findTerm, matchesInputRule, RULE_REPLY } from './terms.js';
+import { containsTerm, matchesInputRule, RULE_REPLY } from './terms.js';
 import { isGroupManagementCommand, manageGroup } from './group-management.js';
 
 const HELP = '私聊直接发送文本；群聊请@机器人。/帮助 /状态 /清空。消息与当前会话上下文会发送给配置的模型服务商。';
@@ -135,8 +135,6 @@ export class Bot {
     if (text === '/清空') { store.clear(message.key); return reply('已清空当前会话。'); }
     if (store.setting('enabled', '1') !== '1' || (message.group && store.setting('groupEnabled', '1') !== '1')) return;
     if (this.blocked(text)) return reply(RULE_REPLY);
-    const trigger = findTerm(text, config.triggerTerms);
-    if (trigger !== undefined) return reply(trigger);
     if (!text || text === '/帮助') return reply(HELP);
     if (text.startsWith('/')) return reply('未知命令。发送 /帮助 查看用法。');
     let messages;

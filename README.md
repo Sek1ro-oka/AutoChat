@@ -16,14 +16,14 @@ AI 回复可能不准确或包含不恰当表达；默认角色带调侃和毒�
 - 私聊会话持久化；群成员会话独立，每 72 小时统一清理。
 - 每日人民币 1 元预算，预留与用量保守结算，重启不重置。
 - 本地管理命令、事件去重、限流、断线重连；模型输出仅作为文本发送。
-- 违禁词命中回复“我是什么都不会告诉你的”；触发关键词回显命中的词句。输入命中不调用模型，整条消息和本地回复不写入 AI 上下文。配置方法见 [配置与服务管理](docs/configuration.md)。
+- 违禁词命中回复“我是什么都不会告诉你的”，不调用模型、不写入 AI 上下文；关键词可像 @ 一样触发正常大模型对话，使用完整消息与上下文并计入预算。配置方法见 [配置与服务管理](docs/configuration.md)。
 - 可选私聊群管理：配置的控制者可执行禁言、解除禁言，开关 `GROUP_MANAGEMENT_ENABLED` 默认关闭；执行前检查群白名单和机器人权限。
 
 ## 一键部署（Windows x64）
 
-下载 [AutoChat v0.1.3 Windows 部署包](downloads/AutoChat-v0.1.3-windows.zip)，完整解压后双击 **deploy.cmd**。联网下载并校验 Node.js／NapCat，首次引导填写账号和密钥，然后后台启动。先安装 [QQ NT](https://im.qq.com/)，首次用机器人账号扫码登录；详细步骤见 [部署手册](docs/local-setup.md)。这是联网部署包，不含个人密钥、账号会话或聊天数据。
+下载 [AutoChat v0.1.4 Windows 部署包](downloads/AutoChat-v0.1.4-windows.zip)，完整解压后双击 **deploy.cmd**。联网下载并校验 Node.js／NapCat，首次引导填写账号和密钥，然后后台启动。先安装 [QQ NT](https://im.qq.com/)，首次用机器人账号扫码登录；详细步骤见 [部署手册](docs/local-setup.md)。这是联网部署包，不含个人密钥、账号会话或聊天数据。
 
-修改 `.env` 或人设后双击 **restart.cmd**，停止机器人双击 **stop.cmd**。每天 1 元为所有用户共用预算。压缩包校验值见 [SHA-256](downloads/AutoChat-v0.1.3-windows.zip.sha256)。
+修改 `.env` 或人设后双击 **restart.cmd**，停止机器人双击 **stop.cmd**。每天 1 元为所有用户共用预算。压缩包校验值见 [SHA-256](downloads/AutoChat-v0.1.4-windows.zip.sha256)。
 
 开发者运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package.ps1` 可重建压缩包；打包采用文件白名单，附带锁定版本的 `ws` 和许可证。
 
