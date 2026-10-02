@@ -60,6 +60,8 @@ export function loadConfig(env = process.env) {
   const config = {
     botId: id('BOT_QQ'), privateUser, privateUsers: Object.freeze(privateUsers),
     groupId: groupIds[0], groupIds: Object.freeze(groupIds),
+    groupManagerId: env.PRIVATE_USER_QQ?.trim() ? id('PRIVATE_USER_QQ') : privateUser,
+    groupManagementEnabled: (env.GROUP_MANAGEMENT_ENABLED || 'false').trim() === 'true',
     adminId: env.ADMIN_QQ?.trim() ? id('ADMIN_QQ') : privateUser,
     wsUrl: wsUrl.href, onebotToken: required('ONEBOT_ACCESS_TOKEN'),
     apiKey: required('DEEPSEEK_API_KEY'), baseUrl: baseUrl.href.replace(/\/$/, ''),
@@ -81,6 +83,10 @@ export function loadConfig(env = process.env) {
   if (!['true', 'false'].includes((env.GROUP_KEYWORD_WITHOUT_AT || 'false').trim())) {
     throw new Error('GROUP_KEYWORD_WITHOUT_AT 必须是 true 或 false');
   }
+  if (!['true', 'false'].includes((env.GROUP_MANAGEMENT_ENABLED || 'false').trim())) {
+    throw new Error('GROUP_MANAGEMENT_ENABLED 必须是 true 或 false');
+  }
+  if (config.groupManagerId === config.botId) throw new Error('群管理控制者不能是机器人自身');
   if (privateUsers.includes(config.botId) || config.botId === config.adminId) {
     throw new Error('机器人与私聊用户／管理员 QQ 号不能相同');
   }

@@ -1,6 +1,7 @@
 import { budgetDay } from './store.js';
 import { estimateInput, costMicro, prepareMessages, usageCost } from './model.js';
 import { containsTerm, findTerm, matchesInputRule, RULE_REPLY } from './terms.js';
+import { isGroupManagementCommand, manageGroup } from './group-management.js';
 
 const HELP = '私聊直接发送文本；群聊请@机器人。/帮助 /状态 /清空。消息与当前会话上下文会发送给配置的模型服务商。';
 const fmt = micro => (micro / 1e6).toFixed(4);
@@ -20,7 +21,8 @@ export function parseEvent(event, config, now = Date.now()) {
         || (!event.message.some(item => item?.type === 'at' && String(item.data?.qq) === config.botId)
           && !(config.groupKeywordWithoutAt && matchesInputRule(text, config)))) return null;
   } else if (event.message_type !== 'private'
-    || ![...(config.privateUsers ?? [config.privateUser]), config.adminId].includes(user)) return null;
+    || (![...(config.privateUsers ?? [config.privateUser]), config.adminId].includes(user)
+      && !(config.groupManagementEnabled && user === config.groupManagerId && isGroupManagementCommand(text)))) return null;
   if (!group && !text) return null;
   const scope = group ? `group:${event.group_id}` : 'private';
   return {
@@ -114,6 +116,11 @@ export class Bot {
       if (this.now() - (this.lastNotice.get(message.key) ?? -Infinity) >= 60000) {
         this.lastNotice.set(message.key, this.now()); await reply('请求较频繁，请稍后再试。');
       }
+      return;
+    }
+    if (isGroupManagementCommand(text)) {
+      const notice = await manageGroup(message, config, send, alive, this.log);
+      if (notice) await reply(notice);
       return;
     }
     if (text === '/状态') {
