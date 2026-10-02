@@ -67,7 +67,12 @@ export function loadConfig(env = process.env) {
     databasePath: resolve(env.DATABASE_PATH || 'data/autochat.sqlite'),
     systemPrompt: env.SYSTEM_PROMPT?.trim() || DEFAULT_PERSONA,
     blockTerms: (env.BLOCK_TERMS || '').split(',').map(x => x.trim()).filter(Boolean),
+    triggerTerms: (env.TRIGGER_TERMS || '').split(',').map(x => x.trim()).filter(Boolean),
+    groupKeywordWithoutAt: (env.GROUP_KEYWORD_WITHOUT_AT || 'false').trim() === 'true',
   };
+  if (!['true', 'false'].includes((env.GROUP_KEYWORD_WITHOUT_AT || 'false').trim())) {
+    throw new Error('GROUP_KEYWORD_WITHOUT_AT 必须是 true 或 false');
+  }
   if (privateUsers.includes(config.botId) || config.botId === config.adminId) {
     throw new Error('机器人与私聊用户／管理员 QQ 号不能相同');
   }

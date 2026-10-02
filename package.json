@@ -1,10 +1,12 @@
 {
   "name": "autochat",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Local NapCatQQ bot with DeepSeek and a daily CNY budget",
-  "engines": { "node": ">=24.0.0" },
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
     "start": "node --env-file-if-exists=.env src/main.js",
     "check": "node --env-file-if-exists=.env src/main.js --check",
@@ -14,7 +16,9 @@
     "bot:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-autochat.ps1",
     "bot:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-autochat.ps1",
     "bot:restart": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/restart-autochat.ps1",
-    "test": "node --test"
+    "test": "node --test test/*.test.js"
   },
-  "dependencies": { "ws": "^8.18.3" }
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
 }

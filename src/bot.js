@@ -1,5 +1,6 @@
 import { budgetDay } from './store.js';
 import { estimateInput, costMicro, prepareMessages, usageCost } from './model.js';
+import { containsTerm, findTerm, matchesInputRule, RULE_REPLY } from './terms.js';
 
 const HELP = '私聊直接发送文本；群聊请@机器人。/帮助 /状态 /清空。消息与当前会话上下文会发送给配置的模型服务商。';
 const fmt = micro => (micro / 1e6).toFixed(4);
@@ -11,14 +12,15 @@ export function parseEvent(event, config, now = Date.now()) {
       || !Array.isArray(event.message)) return null;
   const user = String(event.user_id);
   if (!/^\d+$/.test(user)) return null;
+  const text = event.message.filter(item => item?.type === 'text' && typeof item.data?.text === 'string')
+    .map(item => item.data.text).join('').trim();
   const group = event.message_type === 'group';
   if (group) {
     if (String(event.group_id) !== config.groupId
-        || !event.message.some(item => item?.type === 'at' && String(item.data?.qq) === config.botId)) return null;
+        || (!event.message.some(item => item?.type === 'at' && String(item.data?.qq) === config.botId)
+          && !(config.groupKeywordWithoutAt && matchesInputRule(text, config)))) return null;
   } else if (event.message_type !== 'private'
     || ![...(config.privateUsers ?? [config.privateUser]), config.adminId].includes(user)) return null;
-  const text = event.message.filter(item => item?.type === 'text' && typeof item.data?.text === 'string')
-    .map(item => item.data.text).join('').trim();
   if (!group && !text) return null;
   const scope = group ? `group:${config.groupId}` : 'private';
   return {
@@ -79,7 +81,7 @@ export class Bot {
     for (const [key] of keys) this.limits.get(key).push(now);
     return false;
   }
-  blocked(text) { return this.config.blockTerms.some(term => text.toLowerCase().includes(term.toLowerCase())); }
+  blocked(text) { return containsTerm(text, this.config.blockTerms); }
   async reply(message, text, send, alive) {
     if (!alive()) return false;
     try {
@@ -123,9 +125,11 @@ export class Bot {
     }
     if (text === '/清空') { store.clear(message.key); return reply('已清空当前会话。'); }
     if (store.setting('enabled', '1') !== '1' || (message.group && store.setting('groupEnabled', '1') !== '1')) return;
+    if (this.blocked(text)) return reply(RULE_REPLY);
+    const trigger = findTerm(text, config.triggerTerms);
+    if (trigger !== undefined) return reply(trigger);
     if (!text || text === '/帮助') return reply(HELP);
     if (text.startsWith('/')) return reply('未知命令。发送 /帮助 查看用法。');
-    if (this.blocked(text)) return reply('此内容被本地规则拦截。');
     let messages;
     try { messages = prepareMessages(store.history(message.key), text, config); }
     catch { return reply('这条消息太长，请缩短后重试。'); }
@@ -147,7 +151,7 @@ export class Bot {
       return reply('模型暂时不可用，请稍后再试。此次费用预留暂不释放。');
     }
     if (!result.text) return reply('模型没有返回可用文本，请稍后再试。');
-    if (this.blocked(result.text)) return reply('回复被本地内容规则拦截。');
+    if (this.blocked(result.text)) return reply(RULE_REPLY);
     const output = Array.from(result.text).slice(0, 3500).join('');
     const answer = output.length < result.text.length ? `${output}\n（回复过长，已截断）` : output;
     if (await reply(answer)) {
