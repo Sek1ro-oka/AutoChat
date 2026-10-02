@@ -13,8 +13,8 @@ try {
   const groups = await transport.call('get_group_list', {});
   const friends = await transport.call('get_friend_list', {});
   const ids = new Set(friends.map(friend => String(friend.user_id)));
-  console.log(JSON.stringify({ configuredGroup: config.groupId,
-    botInConfiguredGroup: groups.some(group => String(group.group_id) === config.groupId),
+  console.log(JSON.stringify({ configuredGroups: config.groupIds.map(id => ({ id,
+    botInGroup: groups.some(group => String(group.group_id) === id) })),
     privateUsers: config.privateUsers.map(id => ({ id, isFriend: ids.has(id) })) }));
 } catch (error) {
   console.error(['ONEBOT_NOT_READY', 'ONEBOT_ACTION_FAILED', 'ONEBOT_TIMEOUT', 'ONEBOT_DISCONNECTED']

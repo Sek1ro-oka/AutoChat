@@ -14,12 +14,13 @@ function fixture(t, overrides = {}, answer = '正常回答') {
   const config = loadConfig({ ...env, ...overrides }), store = new Store();
   t.after(() => store.close());
   let calls = 0;
-  const sent = [];
-  const bot = new Bot(config, store, { complete: async () => {
+  const sent = [], requests = [];
+  const bot = new Bot(config, store, { complete: async messages => {
     calls++;
+    requests.push(messages);
     return { text: answer, usage: { prompt_tokens: 1, completion_tokens: 1 } };
   } }, { now: () => now });
-  return { config, store, bot, sent, calls: () => calls,
+  return { config, store, bot, sent, requests, calls: () => calls,
     send: async (action, params) => sent.push({ action, params }) };
 }
 function event(text, overrides = {}) {
@@ -100,4 +101,32 @@ test('block takes priority and multiple triggers use configured order', async t 
   assert.equal(f.sent[0].params.message[0].data.text, RULE_REPLY);
   assert.equal(f.sent[1].params.message[0].data.text, '暗号');
   assert.equal(f.calls(), 0);
+});
+
+test('blocked and triggered turns preserve existing history and never reach later model context in private or group', async t => {
+  for (const group of [false, true]) {
+    for (const ruleText of ['包含禁词的这一整条消息', '包含暗号的这一整条消息']) {
+      const f = fixture(t);
+      const user = group ? 10000004 : 10000002;
+      const key = group ? 'group:10000003:10000004' : 'private:10000002';
+      const makeEvent = (text, messageId) => event(text, {
+        user_id: user, message_id: messageId, message_type: group ? 'group' : 'private',
+        ...(group ? { group_id: 10000003,
+          message: [{ type: 'at', data: { qq: '10000001' } }, { type: 'text', data: { text } }] } : {}),
+      });
+      await f.bot.ingest(makeEvent('此前的正常问题', 1), f.send);
+      const previous = f.store.history(key);
+      assert.equal(previous.length, 2);
+      await f.bot.ingest(makeEvent(ruleText, 2), f.send);
+      assert.equal(f.calls(), 1);
+      assert.deepEqual(f.store.history(key), previous);
+      await f.bot.ingest(makeEvent('后续的正常问题', 3), f.send);
+      assert.equal(f.calls(), 2);
+      assert.deepEqual(f.requests[1].slice(1, -1), previous);
+      for (const messages of f.requests) {
+        assert.ok(messages.every(item => !item.content.includes(ruleText) && !item.content.includes(RULE_REPLY)));
+      }
+      assert.ok(f.store.history(key).every(item => !item.content.includes(ruleText) && !item.content.includes(RULE_REPLY)));
+    }
+  }
 });

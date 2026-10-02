@@ -49,9 +49,17 @@ export function loadConfig(env = process.env) {
     }
   }
   if (!privateUsers.length) throw new Error('PRIVATE_USER_QQS 不能为空');
+  const groupIds = env.GROUP_QQS?.trim()
+    ? [...new Set(env.GROUP_QQS.split(',').map(value => value.trim()).filter(Boolean))]
+    : [id('GROUP_QQ')];
+  if (!groupIds.length || groupIds.some(value => !/^[1-9]\d{4,14}$/.test(value)
+      || !Number.isSafeInteger(Number(value)))) {
+    throw new Error('QQ 标识格式不正确：GROUP_QQS');
+  }
   const privateUser = privateUsers[0];
   const config = {
-    botId: id('BOT_QQ'), privateUser, privateUsers: Object.freeze(privateUsers), groupId: id('GROUP_QQ'),
+    botId: id('BOT_QQ'), privateUser, privateUsers: Object.freeze(privateUsers),
+    groupId: groupIds[0], groupIds: Object.freeze(groupIds),
     adminId: env.ADMIN_QQ?.trim() ? id('ADMIN_QQ') : privateUser,
     wsUrl: wsUrl.href, onebotToken: required('ONEBOT_ACCESS_TOKEN'),
     apiKey: required('DEEPSEEK_API_KEY'), baseUrl: baseUrl.href.replace(/\/$/, ''),

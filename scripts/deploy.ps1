@@ -45,7 +45,7 @@ if (!(Test-Path -LiteralPath $envPath)) {
     $values = @{}
     $values['BOT_QQ'] = Read-Host 'Bot QQ number'
     $values['PRIVATE_USER_QQS'] = Read-Host 'Allowed private QQ numbers (comma separated)'
-    $values['GROUP_QQ'] = Read-Host 'Allowed group number'
+    $values['GROUP_QQS'] = Read-Host 'Allowed group numbers (comma separated)'
     $values['ADMIN_QQ'] = Read-Host 'Administrator QQ number (one allowed private user)'
     $secret = Read-Host 'DeepSeek API key (hidden)' -AsSecureString
     $credential = New-Object System.Management.Automation.PSCredential('key', $secret)

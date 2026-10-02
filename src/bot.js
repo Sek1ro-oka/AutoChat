@@ -16,17 +16,17 @@ export function parseEvent(event, config, now = Date.now()) {
     .map(item => item.data.text).join('').trim();
   const group = event.message_type === 'group';
   if (group) {
-    if (String(event.group_id) !== config.groupId
+    if (!(config.groupIds ?? [config.groupId]).includes(String(event.group_id))
         || (!event.message.some(item => item?.type === 'at' && String(item.data?.qq) === config.botId)
           && !(config.groupKeywordWithoutAt && matchesInputRule(text, config)))) return null;
   } else if (event.message_type !== 'private'
     || ![...(config.privateUsers ?? [config.privateUser]), config.adminId].includes(user)) return null;
   if (!group && !text) return null;
-  const scope = group ? `group:${config.groupId}` : 'private';
+  const scope = group ? `group:${event.group_id}` : 'private';
   return {
     user, group, text, scope, key: `${scope}:${user}`,
     eventKey: `${config.botId}:${scope}:${user}:${event.message_id}`,
-    target: group ? { group_id: Number(config.groupId) } : { user_id: Number(user) },
+    target: group ? { group_id: Number(event.group_id) } : { user_id: Number(user) },
     action: group ? 'send_group_msg' : 'send_private_msg',
   };
 }
@@ -36,7 +36,7 @@ export class Bot {
     this.config = config; this.store = store; this.model = model;
     this.now = now; this.log = log; this.tail = Promise.resolve(); this.queued = 0;
     this.limits = new Map(); this.lastNotice = new Map(); this.sendFailures = 0;
-    store.ensureGroup(config.groupId, now(), config.clearMs);
+    for (const id of config.groupIds ?? [config.groupId]) store.ensureGroup(id, now(), config.clearMs);
     this.maintenance();
   }
   maintenance() {
@@ -119,8 +119,10 @@ export class Bot {
     if (text === '/状态') {
       if (!admin) return reply('运行状态仅限管理员私聊查看。');
       const balance = store.balance(budgetDay(this.now()), config.budgetMicro);
-      const due = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Hong_Kong',
-        dateStyle: 'short', timeStyle: 'medium' }).format(store.groupDue(config.groupId));
+      const formatter = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Hong_Kong',
+        dateStyle: 'short', timeStyle: 'medium' });
+      const due = (config.groupIds ?? [config.groupId]).map(id =>
+        `${id}：${formatter.format(store.groupDue(id))}`).join('\n');
       return reply(`模型：${config.model}\n回复：${store.setting('enabled', '1') === '1' ? '启用' : '停止'}\n群回复：${store.setting('groupEnabled', '1') === '1' ? '启用' : '关闭'}\n今日保守计费 ¥${fmt(balance.used)}／预留 ¥${fmt(balance.held)}／剩余 ¥${fmt(balance.remaining)}\n下次群清理：${due}（香港时间）`);
     }
     if (text === '/清空') { store.clear(message.key); return reply('已清空当前会话。'); }
