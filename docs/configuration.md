@@ -1,0 +1,71 @@
+# 手动修改配置与管理服务
+
+所有命令先在 PowerShell 切换到项目目录：
+
+```powershell
+cd E:\AutoChat
+```
+
+## 人设／预设
+
+默认人设在 `src/persona.js`。编辑反引号之间的中文提示词，保留 `export const DEFAULT_PERSONA =` 和末尾的反引号、分号；若文字中包含反引号或 `${`，需要按 JavaScript 语法转义。
+
+另一种方式是编辑 `.env` 的 `SYSTEM_PROMPT`，填写自己完整的人设；它会覆盖默认预设。例如：
+
+```dotenv
+SYSTEM_PROMPT="你是一位熟悉网络梗的傲娇女生。说话简短、嘴毒，闲聊时偶尔只回梗和反问；对方要求认真回答时正面作答。"
+```
+
+保留 `SYSTEM_PROMPT=` 空值即可继续使用 `src/persona.js` 的默认预设。修改后重启服务；旧聊天上下文仍保留，想完全从新人设开始可以在相应私聊／群 @ 中发送 `/清空`。
+
+## 私聊白名单与群
+
+编辑本机 `.env`，不要改 `.env.example`：
+
+- `PRIVATE_USER_QQS`：多个 QQ 号用英文逗号隔开。添加时在现有列表后追加，删除时移除对应号码。此字段有值时优先于旧 `PRIVATE_USER_QQ`。
+- `GROUP_QQ`：当前支持一个响应群，改成目标群号即可；机器人需要已经在该群。白名单设置不会自动加好友或加群。
+- `ADMIN_QQ`：管理员 QQ，默认取私聊列表的第一个号码，建议明确填写。普通白名单用户不自动获得管理权限。
+
+添加一人不需要修改旧的单用户字段。修改名单和群号后运行 `npm run bot:restart`。更改响应群只影响机器人回复，不解散 QQ 群，也不自动退群。
+
+## 其他常用配置
+
+| 字段 | 用途 |
+| --- | --- |
+| `MODEL_NAME` | 当前默认 deepseek-flash；切换模型时同时核验并更新价格 |
+| `DAILY_BUDGET_CNY` | 全部私聊和群聊合计的每日人民币预算，当前为 1 |
+| `MAX_OUTPUT_TOKENS` | 单次回答输出 token 上限，当前为 1024 |
+| `CONTEXT_INPUT_TOKENS` | 输入容量上限，当前为 16000，使用保守估算 |
+| `GROUP_CLEAR_HOURS` | 群上下文自动清理间隔，当前为 72 |
+| `MODEL_TIMEOUT_MS` | 模型请求超时毫秒，当前为 60000 |
+| `BLOCK_TERMS` | 输入／输出简单拦截词，英文逗号分隔 |
+
+群清理已保存的下一次截止时间不会因修改间隔立即重新计时；下一次到期后按新间隔推进。私聊不参与定时清理。
+
+`DEEPSEEK_API_KEY`、`ONEBOT_ACCESS_TOKEN` 是密钥，不要发给别人或写入可提交的范例。修改 OneBot Token／端口后，还需要运行 `node --env-file=.env scripts/configure-napcat.js` 同步 NapCat 配置并重启 NapCat；单纯更换人设、名单和预算只需重启 AutoChat。
+
+## 启动、停止、重启
+
+```powershell
+npm run bot:start
+npm run bot:stop
+npm run bot:restart
+```
+
+这些命令管理当前的后台 AutoChat 服务，不关闭 NapCat，也不关闭其他 QQ／Node 进程。重启会先检查配置，检查失败则保留现有运行服务。后台停止使用进程停止方式，建议等机器人当前回复完成后再执行；在途请求的未知费用预留会保留，不会因重启释放预算。
+
+若要前台看日志，先 `npm run bot:stop`，再 `npm start`；按 Ctrl+C 停止前台服务。前台实例不由后台 PID 文件管理，不要同时启动前后台两个实例。
+
+## 检查与排错
+
+```powershell
+npm run check
+npm run check:connection
+npm run status
+```
+
+分别是配置校验、真实 NapCat 连接检查、持久化事件和当日账本统计。`npm run check:model` 会真实调用模型并产生小额费用，其余上述诊断不调用模型。
+
+AutoChat 日志在 `logs/`，启动输出／错误在 `runtime/autochat-output.log` 和 `runtime/autochat-error.log`。如重启后无回复，先检查连接，再检查白名单、群号、是否正确 @，以及管理员是否关闭了回复。
+
+管理员可在 QQ 私聊中发送 `/状态`、`/停止`、`/启动`、`/群关闭`、`/群开启`。QQ 命令 `/停止` 只暂停模型回复，进程继续运行；它与 `npm run bot:stop` 的停止进程不同。
