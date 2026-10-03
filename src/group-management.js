@@ -8,18 +8,21 @@ const validId = text => /^[1-9]\d{4,14}$/.test(text || '') && Number.isSafeInteg
 const validMember = (info, group, user) => info && String(info.group_id) === group
   && String(info.user_id) === user && ['member', 'admin', 'owner'].includes(info.role);
 
-export const isGroupAdminCommand = text => /^\/?禁言(?:\s|$)/u.test(text);
+export const isGroupAdminCommand = text => /^\/?(?:禁言|解除禁言)(?:\s|$)/u.test(text);
 export async function manageGroupAdmin(message, config, call, alive, log = () => {}) {
   if (!message.group || !message.mentionedBot) return '群内禁言命令必须明确@机器人。';
   if (!config.groupAdminCommandsEnabled) return '群内管理员命令已关闭；设置 GROUP_ADMIN_COMMANDS_ENABLED=true 后重启。';
-  const parts = message.text.split(/\s+/u);
+  const parts = (message.groupCommandText ?? message.text).split(/\s+/u);
   const user = parts[1], minutes = parts[2]?.replace(/分钟$/u, '');
-  if (!message.commandSegmentsValid || parts.length !== 3 || !validId(user)
-    || !/^\d+$/.test(minutes || '') || Number(minutes) < 1 || Number(minutes) > 43200) {
-    return '用法：@机器人 禁言 成员QQ号 分钟（1～43200整数分钟；机器人是群主时也可禁言管理员）';
+  const explicitUnban = parts[0].replace(/^\//u, '') === '解除禁言';
+  const unban = explicitUnban || parts.length === 2;
+  if (!message.commandSegmentsValid || !validId(user)
+    || (unban ? parts.length !== 2 : parts.length !== 3
+      || !/^\d+$/.test(minutes || '') || Number(minutes) < 1 || Number(minutes) > 43200)) {
+    return '用法：@机器人 禁言 @成员 分钟（1～43200整数分钟）；解除禁言：@机器人 解除禁言 @成员，或@机器人 禁言 @成员（不带分钟数）。请在QQ中实际选择并@成员，也兼容数字QQ号。机器人是群主时也可操作管理员。';
   }
   const group = String(message.target.group_id);
-  return performGroupMute(group, user, minutes, false, config, call, alive, log, message.user);
+  return performGroupMute(group, user, minutes, unban, config, call, alive, log, message.user);
 }
 
 export async function manageGroup(message, config, call, alive, log = () => {}) {

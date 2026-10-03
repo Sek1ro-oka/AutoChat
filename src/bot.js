@@ -23,8 +23,14 @@ export function parseEvent(event, config, now = Date.now()) {
   const group = event.message_type === 'group';
   const images = event.message.filter(item => item?.type === 'image');
   const mentionedBot = event.message.some(item => item?.type === 'at' && String(item.data?.qq) === config.botId);
-  const commandSegmentsValid = event.message.every(item => item?.type === 'text'
-    || (item?.type === 'at' && String(item.data?.qq) === config.botId));
+  const validMention = item => item?.type === 'at' && /^[1-9]\d{4,14}$/.test(String(item.data?.qq))
+    && Number.isSafeInteger(Number(item.data.qq));
+  const mentions = event.message.filter(item => item?.type === 'at');
+  const commandSegmentsValid = event.message.every(item => item?.type === 'text' || validMention(item))
+    && mentions.filter(item => String(item.data?.qq) === config.botId).length === 1
+    && mentions.filter(item => String(item.data?.qq) !== config.botId).length <= 1;
+  const groupCommandText = event.message.map(item => item?.type === 'text' ? item.data?.text || ''
+    : validMention(item) && String(item.data.qq) !== config.botId ? ` ${item.data.qq} ` : '').join('').trim();
   if (group) {
     if (!(config.groupIds ?? [config.groupId]).includes(String(event.group_id))
         || (!event.message.some(item => item?.type === 'at' && String(item.data?.qq) === config.botId)
@@ -35,7 +41,7 @@ export function parseEvent(event, config, now = Date.now()) {
   if (!group && !modelText && !images.length) return null;
   const scope = group ? `group:${event.group_id}` : 'private';
   return {
-    user, group, text, modelText, images, mentionedBot, commandSegmentsValid, scope, key: `${scope}:${user}`,
+    user, group, text, modelText, images, mentionedBot, commandSegmentsValid, groupCommandText, scope, key: `${scope}:${user}`,
     eventKey: `${config.botId}:${scope}:${user}:${event.message_id}`,
     target: group ? { group_id: Number(event.group_id) } : { user_id: Number(user) },
     action: group ? 'send_group_msg' : 'send_private_msg',

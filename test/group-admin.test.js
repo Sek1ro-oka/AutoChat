@@ -98,3 +98,49 @@ test('bot owner may mute admin targets, bot admin may not, and owner targets rem
     assert.ok(!f.calls.some(c => c.action === 'set_group_ban'));
   }
 });
+test('group admins can unmute through omitted minutes or explicit slash/non-slash command', async t => {
+  for (const text of ['禁言 10000006', '解除禁言 10000006', '/解除禁言 10000006', '/禁言 10000006']) {
+    const f = fixture(t); await f.bot.ingest(event(text), f.api); await f.bot.ingest(event(text), f.api);
+    const bans = f.calls.filter(c => c.action === 'set_group_ban');
+    assert.equal(bans.length, 1); assert.equal(bans[0].params.duration, 0);
+    assert.match(f.sent[0], /已解除/); assert.equal(f.store.history('group:10000003:10000004').length, 0);
+    assert.equal(f.store.balance(budgetDay(now), f.c.budgetMicro).used, 0);
+  }
+});
+test('unmute enforces caller and target hierarchy and rejects extra duration on explicit unmute', async t => {
+  for (const roles of [{ senderRole: 'member' }, { targetRole: 'admin' }, { targetRole: 'owner', botRole: 'owner' }]) {
+    const f = fixture(t, roles); await f.bot.ingest(event('解除禁言 10000006'), f.api);
+    assert.ok(!f.calls.some(c => c.action === 'set_group_ban'));
+  }
+  const owner = fixture(t, { botRole: 'owner', targetRole: 'admin' });
+  await owner.bot.ingest(event('解除禁言 10000006'), owner.api);
+  assert.equal(owner.calls.at(-1).params.duration, 0);
+  const invalid = fixture(t); await invalid.bot.ingest(event('解除禁言 10000006 5'), invalid.api);
+  assert.equal(invalid.calls.length, 0); assert.match(invalid.sent[0], /用法/);
+});
+function mentionCommand(command, minutes) {
+  return [{ type: 'at', data: { qq: '10000001' } }, { type: 'text', data: { text: ` ${command} ` } },
+    { type: 'at', data: { qq: '10000006' } }, ...(minutes === undefined ? [] : [{ type: 'text', data: { text: ` ${minutes}` } }])];
+}
+test('structured target mentions support mute and both unmute forms using actual QQ ID', async t => {
+  for (const [command, minutes, duration] of [['禁言', '5', 300], ['禁言', undefined, 0], ['解除禁言', undefined, 0]]) {
+    const f = fixture(t); const message = mentionCommand(command, minutes);
+    await f.bot.ingest(event('', { message }), f.api); await f.bot.ingest(event('', { message }), f.api);
+    assert.deepEqual(f.calls.at(-1).params, { group_id: 10000003, user_id: 10000006, duration });
+    assert.equal(f.calls.filter(c => c.action === 'set_group_ban').length, 1);
+    assert.equal(f.store.history('group:10000003:10000004').length, 0);
+  }
+});
+test('ambiguous targets, @all, literal nickname and extra bot mention never reach mutation APIs', async t => {
+  const base = mentionCommand('禁言', '5');
+  for (const message of [
+    [...base, { type: 'at', data: { qq: '10000008' } }],
+    base.map(item => item.type === 'at' && item.data.qq === '10000006' ? { type: 'at', data: { qq: 'all' } } : item),
+    [...base, { type: 'at', data: { qq: '10000001' } }],
+    [{ type: 'at', data: { qq: '10000001' } }, { type: 'text', data: { text: '禁言 @张三 5' } }],
+    [...base, { type: 'text', data: { text: ' 10000008' } }],
+  ]) {
+    const f = fixture(t); await f.bot.ingest(event('', { message }), f.api);
+    assert.equal(f.calls.length, 0); assert.match(f.sent[0], /用法/);
+  }
+});
