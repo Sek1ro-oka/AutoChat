@@ -6,7 +6,7 @@ import { Model } from '../src/model.js';
 import { Bot } from '../src/bot.js';
 import { Store, budgetDay } from '../src/store.js';
 import { loadConfig } from '../src/config.js';
-import { searchQuery, searchSources, autoSearchQuery } from '../src/search.js';
+import { searchQuery, searchSources, autoSearchQuery, plainSearchAnswer } from '../src/search.js';
 
 const now = 1800000000000;
 const env = { BOT_QQ: '10000001', PRIVATE_USER_QQ: '10000002', GROUP_QQ: '10000003',
@@ -22,7 +22,7 @@ function fixture(t, overrides = {}, result = {}) {
   const bot = new Bot(c, store, { complete: async (messages, options) => {
     calls.push({ messages, options });
     if (result.error) throw result.error;
-    return { text: '检索回答', usage: { prompt_tokens: 100, completion_tokens: 10 }, searchVerified: true,
+    return { text: options?.search ? '# RAW_SEARCH_SUMMARY' : '结合资料后的自然回答', usage: { prompt_tokens: 100, completion_tokens: 10 }, searchVerified: true,
       sources: [{ title: '官方资料', url: 'https://example.com/doc' }], ...result };
   } }, { now: () => now });
   return { c, store, bot, calls, sent, send: async (action, params) => sent.push(params.message[0].data.text) };
@@ -68,10 +68,13 @@ test('search command appends sources, charges budget and persists count across b
   const f = fixture(t, { WEB_SEARCH_DAILY_LIMIT: '1' });
   await f.bot.ingest(event('/搜索 官方资料'), f.send);
   await f.bot.ingest(event('/搜索 官方资料'), f.send);
-  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls.length, 2);
   assert.deepEqual(f.calls[0].options, { search: true, query: '官方资料' });
   assert.match(f.sent[0], /搜索来源/); assert.match(f.sent[0], /https:\/\/example.com\/doc/);
-  assert.equal(f.store.balance(budgetDay(now), f.c.budgetMicro).used, 280);
+  assert.equal(f.store.balance(budgetDay(now), f.c.budgetMicro).used, 560);
+  assert.ok(!f.sent[0].includes('RAW_SEARCH_SUMMARY'));
+  assert.match(f.sent[0], /结合资料后的自然回答/);
+  assert.ok(!JSON.stringify(f.store.history('private:10000002')).includes('RAW_SEARCH_SUMMARY'));
   assert.equal(f.store.history('private:10000002').length, 2);
   const nextBot = new Bot(f.c, f.store, { complete: async () => { throw new Error('NOT_ALLOWED'); } }, { now: () => now });
   await nextBot.ingest(event('/搜索 其他问题', { message_id: 2 }), f.send);
@@ -116,7 +119,7 @@ test('group @ search commands and plain search phrasing produce search answer wi
   for (const text of ['/搜索 明天北京天气', '/联网搜索 明天北京天气', '搜索 明天北京天气']) {
     const f = fixture(t); await f.bot.ingest(groupEvent(text), f.send); await f.bot.ingest(groupEvent(text), f.send);
     assert.deepEqual(f.calls[0].options, { search: true, query: '明天北京天气' });
-    assert.equal(f.calls.length, 1); assert.match(f.sent[0], /搜索来源/);
+    assert.equal(f.calls.length, 2); assert.match(f.sent[0], /搜索来源/);
     assert.equal(f.store.history('group:10000003:10000002').length, 2);
   }
 });
@@ -154,9 +157,19 @@ test('auto search preserves group gates, keyword policy, block terms, group paus
   assert.deepEqual(keyword.calls[0].options, { search: true, query: '北京天气' });
 });
 test('group auto search HTTP payload excludes earlier history and custom persona', async t => {
+  const routes = [];
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks));
+    routes.push(req.url);
+    if (req.url === '/chat/completions') {
+      assert.ok(JSON.stringify(body).includes('PRIVATE_HISTORY'));
+      assert.ok(JSON.stringify(body).includes('PRIVATE_PERSONA'));
+      assert.ok(JSON.stringify(body).includes('新闻摘要'));
+      assert.equal(body.tools, undefined);
+      res.end(JSON.stringify({ choices: [{ message: { content: '**整理后的自然回答**' } }], usage: { prompt_tokens: 150, completion_tokens: 20 } }));
+      return;
+    }
     assert.deepEqual(body.messages, [{ role: 'user', content: '今天有什么新闻' }]);
     assert.ok(!JSON.stringify(body).includes('PRIVATE_HISTORY'));
     assert.ok(!JSON.stringify(body).includes('PRIVATE_PERSONA'));
@@ -170,4 +183,43 @@ test('group auto search HTTP payload excludes earlier history and custom persona
     { role: 'assistant', content: 'PRIVATE_HISTORY' }]);
   f.bot.model = new Model({ ...f.c, baseUrl: `http://127.0.0.1:${server.address().port}` });
   await f.bot.ingest(groupEvent('今天有什么新闻'), f.send); assert.match(f.sent[0], /搜索来源/);
+  assert.match(f.sent[0], /整理后的自然回答/); assert.ok(!f.sent[0].includes('**'));
+  assert.deepEqual(routes, ['/anthropic/v1/messages','/chat/completions']);
+});
+test('search synthesis failure retains only its uncertain reserve and never forwards raw markdown', async t => {
+  const f=fixture(t); let call=0;
+  f.bot.model={complete:async()=>{
+    if (++call===2) throw new Error('SECRET_FAILURE');
+    return {text:'# RAW_REPORT',searchVerified:true,sources:[{title:'公开资料',url:'https://example.com'}],
+      usage:{prompt_tokens:100,completion_tokens:10}};
+  }};
+  await f.bot.ingest(event('/搜索 问题'),f.send);
+  assert.equal(call,2); assert.match(f.sent[0],/整理回答暂时失败/); assert.ok(!f.sent[0].includes('RAW_REPORT'));
+  const balance=f.store.balance(budgetDay(now),f.c.budgetMicro);
+  assert.equal(balance.used,280); assert.ok(balance.held>0); assert.equal(f.store.history('private:10000002').length,0);
+});
+test('search missing usage, exceeding reserve, or blocked reference never starts synthesis', async t => {
+  for(const variant of ['unknown','overrun','block']) {
+    const f=fixture(t,{BLOCK_TERMS:'禁词'}); let count=0;
+    f.bot.model={complete:async()=>{count++;return {text:variant==='block'?'禁词':'RAW_SEARCH',searchVerified:true,
+      sources:[{title:'资料',url:'https://example.com'}],usage:variant==='unknown'?undefined:
+        {prompt_tokens:variant==='overrun'?1000000:100,completion_tokens:10}};}};
+    await f.bot.ingest(event('/搜索 问题'),f.send);
+    assert.equal(count,1); assert.ok(!f.sent[0].includes('RAW_SEARCH'));
+    assert.equal(f.store.history('private:10000002').length,0);
+    if(variant==='block')assert.equal(f.store.balance(budgetDay(now),f.c.budgetMicro).held,0);
+  }
+});
+test('plain text rendering removes markdown report syntax while preserving useful content',()=>{
+  const result=plainSearchAnswer('## 回答\n**结论**\n| A | B |\n| --- | --- |\n| 1 | 2 |\n[资料](https://example.com)\n```text\n内容\n```');
+  assert.ok(!/[#*|`]/u.test(result));assert.match(result,/结论/);assert.match(result,/1；2/);assert.match(result,/内容/);
+});
+test('blocked synthesized answer is refused after charging both calls and never enters history',async t=>{
+  const f=fixture(t,{BLOCK_TERMS:'禁词'});let count=0;
+  f.bot.model={complete:async()=>({text:++count===1?'公开资料':'禁词',searchVerified:true,
+    sources:[{title:'资料',url:'https://example.com'}],usage:{prompt_tokens:100,completion_tokens:10}})};
+  await f.bot.ingest(event('/搜索 问题'),f.send);
+  assert.equal(count,2);assert.equal(f.sent[0],'我是什么都不会告诉你的');
+  assert.equal(f.store.history('private:10000002').length,0);
+  assert.equal(f.store.balance(budgetDay(now),f.c.budgetMicro).used,560);
 });

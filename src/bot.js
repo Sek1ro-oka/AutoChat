@@ -2,7 +2,7 @@ import { budgetDay } from './store.js';
 import { estimateInput, costMicro, prepareMessages, usageCost } from './model.js';
 import { containsTerm, matchesInputRule, RULE_REPLY } from './terms.js';
 import { isGroupManagementCommand, manageGroup, isGroupAdminCommand, manageGroupAdmin } from './group-management.js';
-import { searchQuery, autoSearchQuery } from './search.js';
+import { searchQuery, autoSearchQuery, SEARCH_ANSWER_INPUT_RESERVE, searchAnswerMessages, plainSearchAnswer } from './search.js';
 import { loadImages, IMAGE_TOKEN_RESERVE, MAX_IMAGES } from './vision.js';
 import { conversationText } from './emoji.js';
 import { AntiSpam } from './anti-spam.js';
@@ -199,8 +199,10 @@ export class Bot {
     const day = budgetDay(this.now());
     const searchKey = `search_count:${day}`;
     if (searching && Number(store.setting(searchKey, '0')) >= config.searchDailyLimit) return reply('今日联网搜索次数已用完，明日恢复。');
-    const estimate = () => costMicro(estimateInput(messages) + (searching ? config.searchInputReserve : 0)
+    const primaryEstimate = () => costMicro(estimateInput(messages) + (searching ? config.searchInputReserve : 0)
       + (seeing ? (profile?.imageInputReserve ?? IMAGE_TOKEN_RESERVE) * message.images.length : 0), config.maxOutput, config);
+    const answerEstimate = () => costMicro(estimateInput(messages) + SEARCH_ANSWER_INPUT_RESERVE, config.maxOutput, config);
+    const estimate = () => primaryEstimate() + (searching ? answerEstimate() : 0);
     // Shrink prior history further when the monetary budget is tighter than context capacity.
     const available = store.balance(day, config.budgetMicro).remaining;
     while (messages.length > 2 && estimate() > available) messages.splice(1, 2);
@@ -211,8 +213,11 @@ export class Bot {
       catch { this.log('image_failed'); return reply('图片读取失败：仅支持QQ图片（JPEG、PNG、GIF、WebP），每张最多5MB。请重新发送图片。'); }
       if (!alive()) return;
     }
-    const reservation = store.reserve(day, estimate(), config.budgetMicro, this.now());
+    const reservation = store.reserve(day, primaryEstimate(), config.budgetMicro, this.now());
     if (!reservation) return reply('今日模型预算不足或已停止，明日恢复；可使用 /清空。');
+    const answerReservation = searching ? store.reserve(day, answerEstimate(), config.budgetMicro, this.now()) : null;
+    if (searching && !answerReservation) { store.settle(reservation, 0); return reply('今日预算不足以完成搜索和回答，明日恢复。'); }
+    const cancelAnswer = () => { if (answerReservation) store.settle(answerReservation, 0); };
     if (searching) store.set(searchKey, Number(store.setting(searchKey, '0')) + 1);
     let result;
     try {
@@ -222,14 +227,38 @@ export class Bot {
       if (actual === null) store.uncertain(reservation); else store.settle(reservation, actual);
     } catch {
       store.uncertain(reservation);
+      cancelAnswer();
       this.log('model_failed');
       return reply(searching ? '联网搜索暂时不可用，未编造搜索回答；此次费用预留暂不释放。'
         : '模型暂时不可用，请稍后再试。此次费用预留暂不释放。');
     }
-    if (searching && !result.searchVerified) return reply('此次没有获得可核查的搜索来源，不能当作已联网回答；已产生的费用仍计入预算。');
-    if (!result.text) return reply('模型没有返回可用文本，请稍后再试。');
-    if (this.blocked(result.text)) return reply(RULE_REPLY);
-    const sourceText = searching ? '\n\n搜索来源：\n' + result.sources.map((source, index) => `${index + 1}. ${source.title}\n${source.url}`).join('\n') : '';
+    if (searching && !result.searchVerified) { cancelAnswer(); return reply('此次没有获得可核查的搜索来源，不能当作已联网回答；已产生的费用仍计入预算。'); }
+    if (!result.text) { cancelAnswer(); return reply('模型没有返回可用文本，请稍后再试。'); }
+    if (this.blocked(result.text)) { cancelAnswer(); return reply(RULE_REPLY); }
+    if (searching) {
+      if (!alive() || usageCost(result.usage, config) === null || store.setting(`overrun:${day}`) === '1') {
+        cancelAnswer(); return reply('搜索已结束，但计费或连接状态不允许继续整理回答；未转发原始搜索摘要。');
+      }
+      let answerMessages;
+      try { answerMessages = searchAnswerMessages(messages, query, result, config, estimateInput); }
+      catch { cancelAnswer(); return reply('检索资料与问题过长，无法整理回答；请缩短问题后重试。'); }
+      if (this.blocked(answerMessages.at(-1).content)) { cancelAnswer(); return reply(RULE_REPLY); }
+      const sources = result.sources;
+      try {
+        const model = profile && profile.id !== 'default' ? this.model.forProfile(profile) : this.model;
+        result = await model.complete(answerMessages);
+        const actual = usageCost(result.usage, config);
+        if (actual === null) store.uncertain(answerReservation); else store.settle(answerReservation, actual);
+      } catch {
+        store.uncertain(answerReservation); this.log('search_answer_failed');
+        return reply('已搜索到资料，但整理回答暂时失败；未转发原始搜索摘要，此次费用预留暂不释放。');
+      }
+      if (!result.text) return reply('模型没有生成可用回答，未转发原始搜索摘要。');
+      result = { ...result, text: plainSearchAnswer(result.text), sources };
+      if (!result.text) return reply('模型没有生成可用回答，未转发原始搜索摘要。');
+      if (this.blocked(result.text)) return reply(RULE_REPLY);
+    }
+    const sourceText = searching ? '\n\n搜索来源：\n' + result.sources.map((source, index) => `${index + 1}. ${plainSearchAnswer(source.title) || '参考资料'}\n${source.url}`).join('\n') : '';
     const output = Array.from(result.text).slice(0, searching ? 1700 : 3500).join('');
     const answer = (output.length < result.text.length ? `${output}\n（回复过长，已截断）` : output) + sourceText;
     if (this.blocked(answer)) return reply(RULE_REPLY);
