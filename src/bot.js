@@ -1,7 +1,7 @@
 import { budgetDay } from './store.js';
 import { estimateInput, costMicro, prepareMessages, usageCost } from './model.js';
 import { containsTerm, matchesInputRule, RULE_REPLY } from './terms.js';
-import { isGroupManagementCommand, manageGroup } from './group-management.js';
+import { isGroupManagementCommand, manageGroup, isGroupAdminCommand, manageGroupAdmin } from './group-management.js';
 import { searchQuery } from './search.js';
 import { loadImages, IMAGE_TOKEN_RESERVE, MAX_IMAGES } from './vision.js';
 import { conversationText } from './emoji.js';
@@ -22,6 +22,9 @@ export function parseEvent(event, config, now = Date.now()) {
   const modelText = conversationText(event.message);
   const group = event.message_type === 'group';
   const images = event.message.filter(item => item?.type === 'image');
+  const mentionedBot = event.message.some(item => item?.type === 'at' && String(item.data?.qq) === config.botId);
+  const commandSegmentsValid = event.message.every(item => item?.type === 'text'
+    || (item?.type === 'at' && String(item.data?.qq) === config.botId));
   if (group) {
     if (!(config.groupIds ?? [config.groupId]).includes(String(event.group_id))
         || (!event.message.some(item => item?.type === 'at' && String(item.data?.qq) === config.botId)
@@ -32,7 +35,7 @@ export function parseEvent(event, config, now = Date.now()) {
   if (!group && !modelText && !images.length) return null;
   const scope = group ? `group:${event.group_id}` : 'private';
   return {
-    user, group, text, modelText, images, scope, key: `${scope}:${user}`,
+    user, group, text, modelText, images, mentionedBot, commandSegmentsValid, scope, key: `${scope}:${user}`,
     eventKey: `${config.botId}:${scope}:${user}:${event.message_id}`,
     target: group ? { group_id: Number(event.group_id) } : { user_id: Number(user) },
     action: group ? 'send_group_msg' : 'send_private_msg',
@@ -126,6 +129,11 @@ export class Bot {
       if (this.now() - (this.lastNotice.get(message.key) ?? -Infinity) >= 60000) {
         this.lastNotice.set(message.key, this.now()); await reply('请求较频繁，请稍后再试。');
       }
+      return;
+    }
+    if (message.group && isGroupAdminCommand(text) && (config.groupAdminCommandsEnabled || !text.startsWith('/'))) {
+      const notice = await manageGroupAdmin(message, config, send, alive, this.log);
+      if (notice) await reply(notice);
       return;
     }
     if (isGroupManagementCommand(text)) {

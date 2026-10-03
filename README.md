@@ -14,6 +14,7 @@ AI 回复可能不准确或包含不恰当表达；默认角色带调侃和毒�
 
 - 私聊白名单中的用户自动回复；支持多群白名单，默认仅在明确 @ 机器人时回复。
 - 可选群内防刷屏：默认同一成员10秒内连续5条，核实群管理权限后禁言5分钟；独立开关、阈值可配置，不对群主或管理员操作，不使用模型额度。
+- 可选群管理员命令：`@机器人 禁言 成员QQ号 5`，实时核验发起者和机器人的群权限，机器人是管理员时只操作普通成员，是群主时也可操作管理员，不操作群主，不调用模型。
 - 支持纯 emoji 和 QQ 原生表情消息：常见 QQ 表情转成名称后交给当前人设模型理解，未知编号如实标记；沿用上下文、白名单、限流和每日预算。
 - 可选图片识别：私聊发图或群 @ 附图，可识别内容、截图文字和图表；每条最多3张、每张5MB。原图不进入上下文，识别费用与文本、搜索共用每日预算。详见 [图片识别配置](docs/configuration.md#图片识别)。
 - 私聊会话持久化；群成员会话独立，每 72 小时统一清理。
@@ -25,9 +26,9 @@ AI 回复可能不准确或包含不恰当表达；默认角色带调侃和毒�
 
 ## 一键部署（Windows x64）
 
-下载 [AutoChat v0.1.7 Windows 部署包](downloads/AutoChat-v0.1.7-windows.zip)，完整解压后双击 **deploy.cmd**。联网下载并校验 Node.js／NapCat，首次引导填写账号和密钥，然后后台启动。先安装 [QQ NT](https://im.qq.com/)，首次用机器人账号扫码登录；详细步骤见 [部署手册](docs/local-setup.md)。这是联网部署包，不含个人密钥、账号会话或聊天数据。
+下载 [AutoChat v0.1.8 Windows 部署包](downloads/AutoChat-v0.1.8-windows.zip)，完整解压后双击 **deploy.cmd**。联网下载并校验 Node.js／NapCat，首次引导填写账号和密钥，然后后台启动。先安装 [QQ NT](https://im.qq.com/)，首次用机器人账号扫码登录；详细步骤见 [部署手册](docs/local-setup.md)。这是联网部署包，不含个人密钥、账号会话或聊天数据。
 
-修改 `.env` 或人设后双击 **restart.cmd**，停止机器人双击 **stop.cmd**。每天 1 元为所有用户共用预算。压缩包校验值见 [SHA-256](downloads/AutoChat-v0.1.7-windows.zip.sha256)。
+修改 `.env` 或人设后双击 **restart.cmd**，停止机器人双击 **stop.cmd**。每天 1 元为所有用户共用预算。压缩包校验值见 [SHA-256](downloads/AutoChat-v0.1.8-windows.zip.sha256)。
 
 开发者运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package.ps1` 可重建压缩包；打包采用文件白名单，附带锁定版本的 `ws` 和许可证。
 

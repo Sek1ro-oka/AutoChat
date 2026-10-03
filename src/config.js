@@ -62,6 +62,7 @@ export function loadConfig(env = process.env) {
     groupId: groupIds[0], groupIds: Object.freeze(groupIds),
     groupManagerId: env.PRIVATE_USER_QQ?.trim() ? id('PRIVATE_USER_QQ') : privateUser,
     groupManagementEnabled: (env.GROUP_MANAGEMENT_ENABLED || 'false').trim() === 'true',
+    groupAdminCommandsEnabled: (env.GROUP_ADMIN_COMMANDS_ENABLED || 'false').trim() === 'true',
     adminId: env.ADMIN_QQ?.trim() ? id('ADMIN_QQ') : privateUser,
     wsUrl: wsUrl.href, onebotToken: required('ONEBOT_ACCESS_TOKEN'),
     apiKey: required('DEEPSEEK_API_KEY'), baseUrl: baseUrl.href.replace(/\/$/, ''),
@@ -90,6 +91,7 @@ export function loadConfig(env = process.env) {
     antiSpamMuteSeconds: integer('GROUP_ANTI_SPAM_MUTE_MINUTES', 5, 1, 43200) * 60,
     antiSpamReply: env.GROUP_ANTI_SPAM_REPLY === undefined ? '你话太多了！' : env.GROUP_ANTI_SPAM_REPLY.trim(),
   };
+  if (!['true', 'false'].includes((env.GROUP_ADMIN_COMMANDS_ENABLED || 'false').trim())) throw new Error('GROUP_ADMIN_COMMANDS_ENABLED 必须是 true 或 false');
   if (!['true', 'false'].includes((env.GROUP_ANTI_SPAM_ENABLED || 'false').trim())) throw new Error('GROUP_ANTI_SPAM_ENABLED 必须是 true 或 false');
   if (Array.from(config.antiSpamReply).length > 200) throw new Error('GROUP_ANTI_SPAM_REPLY 最多200字');
   if (!['true', 'false'].includes((env.VISION_ENABLED || 'false').trim())) throw new Error('VISION_ENABLED 必须是 true 或 false');

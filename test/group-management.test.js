@@ -48,6 +48,12 @@ test('management controller mutes and unmutes with permission checks, no history
   assert.deepEqual(f.store.history('private:10000002'), previous);
   assert.deepEqual(f.store.balance(budgetDay(now), f.c.budgetMicro), { used: 0, held: 0, remaining: f.c.budgetMicro });
 });
+test('private controller can operate admin targets only when bot is group owner', async t => {
+  const f = fixture(t, { botRole: 'owner', targetRole: 'admin' });
+  await f.bot.ingest(event(), f.api);
+  await f.bot.ingest(event('/解除禁言 10000003 10000004', { message_id: 2 }), f.api);
+  assert.deepEqual(f.calls.filter(c => c.action === 'set_group_ban').map(c => c.params.duration), [600, 0]);
+});
 
 test('disabled feature, other private admin and group messages cannot execute management', async t => {
   for (const variant of ['disabled', 'other', 'group']) {
