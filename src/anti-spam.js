@@ -39,7 +39,8 @@ export class AntiSpam {
           this.log('anti_spam_no_permission'); return false;
         }
         const target = await call('get_group_member_info', { group_id: Number(group), user_id: Number(user), no_cache: true });
-        if (!alive() || !memberMatches(target, group, user) || target.role !== 'member') return false;
+        if (!alive() || !memberMatches(target, group, user) || target.role === 'owner'
+          || (target.role === 'admin' && bot.role !== 'owner')) return false;
         await call('set_group_ban', { group_id: Number(group), user_id: Number(user), duration: c.antiSpamMuteSeconds });
         this.log('anti_spam_muted');
         if (c.antiSpamReply && alive()) {

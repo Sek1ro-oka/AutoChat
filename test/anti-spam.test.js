@@ -102,6 +102,25 @@ test('live permission and identity checks protect owner/admin and fail closed', 
     await burst(f); assert.ok(!f.calls.some(c => c.action === 'set_group_ban'));
   }
 });
+test('bot owner moderates a spamming admin; bot admin cannot, and group owner is always protected', async t => {
+  for (const [botRole, targetRole, expected] of [
+    ['owner', 'admin', true], ['admin', 'admin', false], ['owner', 'owner', false], ['owner', 'member', true],
+  ]) {
+    const f = fixture(t, {}, async (action, params) => action === 'get_group_member_info'
+      ? { ...params, role: params.user_id === 10000001 ? botRole : targetRole } : {});
+    await burst(f);
+    const bans = f.calls.filter(c => c.action === 'set_group_ban');
+    assert.equal(bans.length, expected ? 1 : 0);
+    assert.equal(f.calls.filter(c => c.action === 'send_group_msg').length, expected ? 1 : 0);
+    if (expected) {
+      assert.equal(bans[0].params.duration, 300);
+      assert.deepEqual(f.calls.at(-1).params.message, [{ type: 'at', data: { qq: '10000004' } },
+        { type: 'text', data: { text: ' 你话太多了！' } }]);
+      await burst(f, 10);
+      assert.equal(f.calls.filter(c => c.action === 'set_group_ban').length, 1);
+    }
+  }
+});
 test('failed mute is not retried; persistent cooldown survives restart and expires', async t => {
   const f = fixture(t, {}, async (action, params) => {
     if (action === 'set_group_ban') throw new Error('UNKNOWN_RESULT');
