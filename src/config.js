@@ -84,7 +84,14 @@ export function loadConfig(env = process.env) {
     searchDailyLimit: integer('WEB_SEARCH_DAILY_LIMIT', 50, 1, 1000),
     visionEnabled: (env.VISION_ENABLED || 'false').trim() === 'true',
     visionDetail: (env.VISION_DETAIL || 'original').trim(),
+    antiSpamEnabled: (env.GROUP_ANTI_SPAM_ENABLED || 'false').trim() === 'true',
+    antiSpamCount: integer('GROUP_ANTI_SPAM_COUNT', 5, 2, 100),
+    antiSpamWindowMs: integer('GROUP_ANTI_SPAM_WINDOW_SECONDS', 10, 1, 300) * 1000,
+    antiSpamMuteSeconds: integer('GROUP_ANTI_SPAM_MUTE_MINUTES', 5, 1, 43200) * 60,
+    antiSpamReply: env.GROUP_ANTI_SPAM_REPLY === undefined ? '你话太多了！' : env.GROUP_ANTI_SPAM_REPLY.trim(),
   };
+  if (!['true', 'false'].includes((env.GROUP_ANTI_SPAM_ENABLED || 'false').trim())) throw new Error('GROUP_ANTI_SPAM_ENABLED 必须是 true 或 false');
+  if (Array.from(config.antiSpamReply).length > 200) throw new Error('GROUP_ANTI_SPAM_REPLY 最多200字');
   if (!['true', 'false'].includes((env.VISION_ENABLED || 'false').trim())) throw new Error('VISION_ENABLED 必须是 true 或 false');
   if (!['low', 'original'].includes(config.visionDetail)) throw new Error('VISION_DETAIL 必须是 low 或 original');
   if (!['true', 'false'].includes((env.WEB_SEARCH_ENABLED || 'false').trim())) {

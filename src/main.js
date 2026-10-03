@@ -25,6 +25,7 @@ async function stop() {
   stopping = true; clearInterval(timer); transport.stop();
   // Wait for in-flight model usage settlement before closing SQLite.
   await bot.tail;
+  await bot.antiSpam.tail;
   store.close(); log('service_stopped');
 }
 process.on('SIGINT', stop);

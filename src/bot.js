@@ -5,6 +5,7 @@ import { isGroupManagementCommand, manageGroup } from './group-management.js';
 import { searchQuery } from './search.js';
 import { loadImages, IMAGE_TOKEN_RESERVE, MAX_IMAGES } from './vision.js';
 import { conversationText } from './emoji.js';
+import { AntiSpam } from './anti-spam.js';
 
 const HELP = '私聊直接发送文本；群聊请@机器人。/帮助 /状态 /清空；/搜索 查询内容 可联网查询。普通对话与上下文会发送给模型服务商；联网搜索只发送明确的查询内容，不发送已有历史。';
 const fmt = micro => (micro / 1e6).toFixed(4);
@@ -43,6 +44,7 @@ export class Bot {
     this.imageLoader = imageLoader;
     this.config = config; this.store = store; this.model = model;
     this.now = now; this.log = log; this.tail = Promise.resolve(); this.queued = 0;
+    this.antiSpam = new AntiSpam(config, store, now, log);
     this.limits = new Map(); this.lastNotice = new Map(); this.sendFailures = 0;
     for (const id of config.groupIds ?? [config.groupId]) store.ensureGroup(id, now(), config.clearMs);
     this.maintenance();
@@ -59,6 +61,8 @@ export class Bot {
       .finally(() => { this.tickPending = false; });
   }
   ingest(event, send, alive = () => true) {
+    const moderation = this.antiSpam.observe(event, send, alive);
+    if (moderation) return moderation;
     const message = parseEvent(event, this.config, this.now());
     if (!message) return Promise.resolve(false);
     if (!this.store.claim(message.eventKey, this.now())) return Promise.resolve(false);
