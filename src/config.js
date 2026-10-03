@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { DEFAULT_PERSONA } from './persona.js';
+import { loadModelProfiles } from './model-profiles.js';
 
 export function loadConfig(env = process.env) {
   const required = name => {
@@ -111,5 +112,7 @@ export function loadConfig(env = process.env) {
   if (privateUsers.includes(config.botId) || config.botId === config.adminId) {
     throw new Error('机器人与私聊用户／管理员 QQ 号不能相同');
   }
+  config.modelProfiles = loadModelProfiles(env, config);
+  config.sendThinking = config.modelProfiles[0].sendThinking;
   return Object.freeze(config);
 }

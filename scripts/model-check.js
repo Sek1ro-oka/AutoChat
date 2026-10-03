@@ -1,10 +1,12 @@
 import { loadConfig } from '../src/config.js';
 import { Store, budgetDay } from '../src/store.js';
 import { Model, costMicro, estimateInput, usageCost } from '../src/model.js';
+import { activeProfile } from '../src/model-profiles.js';
 
 // A small real request, accounted in the same daily ledger as production.
-const config = { ...loadConfig(), maxOutput: 16 };
-const store = new Store(config.databasePath);
+const baseConfig = loadConfig();
+const store = new Store(baseConfig.databasePath);
+const config = { ...baseConfig, ...activeProfile(baseConfig, store), maxOutput: 16 };
 try {
   const messages = [{ role: 'user', content: '请只回复OK。' }];
   const id = store.reserve(budgetDay(), costMicro(estimateInput(messages), config.maxOutput, config),

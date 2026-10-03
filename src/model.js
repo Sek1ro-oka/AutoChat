@@ -22,6 +22,7 @@ export function usageCost(usage, config) {
 }
 export class Model {
   constructor(config) { this.config = config; }
+  forProfile(profile) { return new Model({ ...this.config, ...profile }); }
   async complete(messages, options = {}) {
     const config = this.config;
     if (options.search) return this.search(options.query);
@@ -34,7 +35,7 @@ export class Model {
       method: 'POST',
       headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: config.model, messages, max_tokens: config.maxOutput,
-        stream: false, thinking: { type: 'disabled' } }),
+        stream: false, ...(config.sendThinking === false ? {} : { thinking: { type: 'disabled' } }) }),
       signal: AbortSignal.timeout(config.timeoutMs), redirect: 'error',
     });
     if (!response.ok) throw new Error(`MODEL_HTTP_${response.status}`);

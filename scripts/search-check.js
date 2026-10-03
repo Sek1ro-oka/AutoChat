@@ -1,11 +1,13 @@
 import { loadConfig } from '../src/config.js';
 import { Model, costMicro, usageCost } from '../src/model.js';
 import { Store, budgetDay } from '../src/store.js';
+import { activeProfile } from '../src/model-profiles.js';
 
-const config = loadConfig();
-if (!config.webSearchEnabled) { console.error('请先启用 WEB_SEARCH_ENABLED。'); process.exit(1); }
-const store = new Store(config.databasePath), day = budgetDay(), key = `search_count:${day}`;
+const baseConfig = loadConfig();
+const store = new Store(baseConfig.databasePath), day = budgetDay(), key = `search_count:${day}`;
+const config = { ...baseConfig, ...activeProfile(baseConfig, store) };
 try {
+  if (!config.webSearchEnabled || !config.supportsSearch) throw new Error('SEARCH_NOT_ENABLED_OR_SUPPORTED');
   if (Number(store.setting(key, '0')) >= config.searchDailyLimit) throw new Error('SEARCH_LIMIT_REACHED');
   const reservation = store.reserve(day, costMicro(config.searchInputReserve + 1024, config.maxOutput, config), config.budgetMicro, Date.now());
   if (!reservation) throw new Error('BUDGET_EXHAUSTED');

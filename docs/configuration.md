@@ -33,6 +33,39 @@ SYSTEM_PROMPT="你是一位熟悉网络梗的傲娇女生。说话简短、嘴�
 
 ## 其他常用配置
 
+### 多模型配置与私聊切换
+
+旧字段 `MODEL_NAME`、`MODEL_BASE_URL`、`DEEPSEEK_API_KEY` 和原计价字段组成 `default` 配置，现有 `.env` 可继续使用。额外模型在 `MODEL_PROFILES` 列出标识，每个标识使用对应的大写前缀。例如 `MODEL_PROFILES=alt,backup` 对应 `MODEL_ALT_*` 和 `MODEL_BACKUP_*`，最多10个额外配置；标识只能使用小写字母、数字和下划线。
+
+```dotenv
+MODEL_PROFILES=alt
+MODEL_ALT_NAME=填写服务商提供的模型ID
+MODEL_ALT_BASE_URL=https://服务商地址/v1
+MODEL_ALT_API_KEY=只在本机填写真实密钥
+MODEL_ALT_PRICE_INPUT_CNY_PER_MILLION=填写人民币每百万输入token价格
+MODEL_ALT_PRICE_OUTPUT_CNY_PER_MILLION=填写人民币每百万输出token价格
+MODEL_ALT_PRICE_VERIFIED_DATE=填写YYYY-MM-DD
+MODEL_ALT_MAX_OUTPUT_TOKENS=1024
+MODEL_ALT_CONTEXT_INPUT_TOKENS=16000
+MODEL_ALT_SUPPORTS_VISION=false
+MODEL_ALT_SUPPORTS_SEARCH=false
+MODEL_ALT_SEND_THINKING=false
+```
+
+以上是字段说明，示例中文占位值必须换成有效配置。接口需兼容 `/chat/completions`，`BASE_URL` 填接口根地址（通常带 `/v1`），不填写完整 `/chat/completions` 地址。仅支持无凭据、无查询参数的HTTPS地址；不同服务商API Key分别保存，不能在私聊命令里填写密钥、URL或任意模型名。额外配置需要独立核验人民币计价，原币价格需自行换算并保守填写；不要沿用DeepSeek价格猜测其他模型费用。字段不完整时配置校验失败，不会停掉原有服务。
+
+改好 `.env` 后双击 `restart.cmd`，由 `ADMIN_QQ` 私聊：
+
+- `/模型列表` 或 `/模型`：查看配置标识、模型名称、当前选择和声明的功能。
+- `/切换模型 alt`：选择对应配置；`/切换模型 default` 回到原配置。
+- `/状态`：查看当前模型与共同预算；`/清空` 只清空当前配置中的当前会话。
+
+选择对所有私聊和群聊生效，在SQLite中只保存配置标识，不保存API Key。命令不产生模型费用、仅限管理员私聊，群管理员不能通过群命令切换全局模型；模型回复暂停期间仍能切换。不同配置的上下文独立，切换时不把原配置历史转发给新服务商，切回原配置继续其历史；所有配置共用每日金额预算和搜索次数。群会话仍按原72小时规则清理全部配置。删除已选择的配置后重启，会回到 `default`；建议一个标识固定对应一个模型与服务商，更换服务商时使用新标识。
+
+切换成功表示本地配置已选中，不代表该服务商接口已经连通。`npm run check:model` 会使用当前选择发送一次真实请求并记入共同账本；未知费用继续保留预留额度，不自动换模型重试。其他服务商密钥需要你在本机填写，未填入的配置不会出现在列表中。
+
+图片与搜索需要分别声明支持。额外模型默认 `SUPPORTS_VISION=false`、`SUPPORTS_SEARCH=false`，不支持时发送图片／搜索会提示切换，不调用收费接口；自动搜索遇到不支持的模型会走普通文本对话。仅当该模型兼容当前图片输入格式时开启图片，并必须填写 `MODEL_ALT_IMAGE_INPUT_RESERVE_TOKENS`（每张图片保守预留的输入token数）。DeepSeek默认配置每图额外预留2048；其他模型必须依据服务商的图片计费规则设置。搜索还要求同一服务商支持当前 `/anthropic/v1/messages` 的 `web_search_20250305` 结构与来源结果。普通额外配置默认不发送DeepSeek专用 `thinking` 字段，只有兼容且需要该参数时设置 `SEND_THINKING=true`。声明支持不会自动适配不兼容接口。
+
 ### 群内自动防刷屏
 
 群内解除禁言：发送 `@机器人 解除禁言 @成员`，或按简写发送 `@机器人 禁言 @成员`（不带分钟数）。两种形式都支持命令前加 `/`，实际向 QQ 发送 `duration=0`。只有本群管理员或群主可使用，机器人必须有相应权限；机器人是群主时可解除管理员的禁言，机器人是管理员时只操作普通成员。显式“解除禁言”后不能再附加分钟数；“禁言”后带1～43200分钟仍执行禁言，填写0会提示用法。解除禁言不关闭防刷屏规则，目标继续刷屏时仍可能再次被禁言。

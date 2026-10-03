@@ -3,6 +3,7 @@ import { loadConfig } from '../src/config.js';
 import { Model, prepareMessages, estimateInput, costMicro, usageCost } from '../src/model.js';
 import { Store, budgetDay } from '../src/store.js';
 import { imageData, IMAGE_TOKEN_RESERVE } from '../src/vision.js';
+import { activeProfile } from '../src/model-profiles.js';
 
 // Synthetic public test image: a red square on the left and blue circle on the right.
 // No user pictures, chat history, QQ account details, or local files are read.
@@ -31,10 +32,12 @@ for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
 const header = Buffer.alloc(13); header.writeUInt32BE(width); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 2;
 const png = Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), chunk('IHDR', header),
   chunk('IDAT', deflateSync(pixels)), chunk('IEND', Buffer.alloc(0))]);
-const config = loadConfig(), store = new Store(config.databasePath);
+const baseConfig = loadConfig(), store = new Store(baseConfig.databasePath);
+const config = { ...baseConfig, ...activeProfile(baseConfig, store) };
 try {
+  if (!config.supportsVision) throw new Error('VISION_NOT_SUPPORTED');
   const messages = prepareMessages([], '请客观描述图片中左右两侧的颜色和形状，用中文回答。', config);
-  const reservation = store.reserve(budgetDay(), costMicro(estimateInput(messages) + IMAGE_TOKEN_RESERVE,
+  const reservation = store.reserve(budgetDay(), costMicro(estimateInput(messages) + (config.imageInputReserve ?? IMAGE_TOKEN_RESERVE),
     config.maxOutput, config), config.budgetMicro, Date.now());
   if (!reservation) throw new Error('BUDGET_EXHAUSTED');
   try {
