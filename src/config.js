@@ -81,6 +81,7 @@ export function loadConfig(env = process.env) {
     triggerTerms: (env.TRIGGER_TERMS || '').split(',').map(x => x.trim()).filter(Boolean),
     groupKeywordWithoutAt: (env.GROUP_KEYWORD_WITHOUT_AT || 'false').trim() === 'true',
     webSearchEnabled: (env.WEB_SEARCH_ENABLED || 'false').trim() === 'true',
+    webSearchAutoEnabled: (env.WEB_SEARCH_AUTO_ENABLED || 'false').trim() === 'true',
     searchInputReserve: integer('WEB_SEARCH_INPUT_RESERVE_TOKENS', 64000, 16000, 1000000),
     searchDailyLimit: integer('WEB_SEARCH_DAILY_LIMIT', 50, 1, 1000),
     visionEnabled: (env.VISION_ENABLED || 'false').trim() === 'true',
@@ -91,6 +92,7 @@ export function loadConfig(env = process.env) {
     antiSpamMuteSeconds: integer('GROUP_ANTI_SPAM_MUTE_MINUTES', 5, 1, 43200) * 60,
     antiSpamReply: env.GROUP_ANTI_SPAM_REPLY === undefined ? '你话太多了！' : env.GROUP_ANTI_SPAM_REPLY.trim(),
   };
+  if (!['true', 'false'].includes((env.WEB_SEARCH_AUTO_ENABLED || 'false').trim())) throw new Error('WEB_SEARCH_AUTO_ENABLED 必须是 true 或 false');
   if (!['true', 'false'].includes((env.GROUP_ADMIN_COMMANDS_ENABLED || 'false').trim())) throw new Error('GROUP_ADMIN_COMMANDS_ENABLED 必须是 true 或 false');
   if (!['true', 'false'].includes((env.GROUP_ANTI_SPAM_ENABLED || 'false').trim())) throw new Error('GROUP_ANTI_SPAM_ENABLED 必须是 true 或 false');
   if (Array.from(config.antiSpamReply).length > 200) throw new Error('GROUP_ANTI_SPAM_REPLY 最多200字');

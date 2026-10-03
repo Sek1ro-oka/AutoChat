@@ -2,12 +2,12 @@ import { budgetDay } from './store.js';
 import { estimateInput, costMicro, prepareMessages, usageCost } from './model.js';
 import { containsTerm, matchesInputRule, RULE_REPLY } from './terms.js';
 import { isGroupManagementCommand, manageGroup, isGroupAdminCommand, manageGroupAdmin } from './group-management.js';
-import { searchQuery } from './search.js';
+import { searchQuery, autoSearchQuery } from './search.js';
 import { loadImages, IMAGE_TOKEN_RESERVE, MAX_IMAGES } from './vision.js';
 import { conversationText } from './emoji.js';
 import { AntiSpam } from './anti-spam.js';
 
-const HELP = '私聊直接发送文本；群聊请@机器人。/帮助 /状态 /清空；/搜索 查询内容 可联网查询。普通对话与上下文会发送给模型服务商；联网搜索只发送明确的查询内容，不发送已有历史。';
+const HELP = '私聊直接发送文本；群聊请@机器人。/帮助 /状态 /清空；群内@机器人 /搜索 完整问题 可联网查询，私聊同样可用。启用自动搜索后，天气、新闻、最新动态等问题会自动联网。普通对话与上下文会发送给模型服务商；联网搜索只发送本条问题，不发送已有历史。';
 const fmt = micro => (micro / 1e6).toFixed(4);
 
 export function parseEvent(event, config, now = Date.now()) {
@@ -163,7 +163,8 @@ export class Bot {
     const seeing = message.images.length > 0;
     if (seeing && !config.visionEnabled) return reply('图片识别未启用；设置 VISION_ENABLED=true 后重启。');
     if (seeing && message.images.length > MAX_IMAGES) return reply('每条消息最多识别3张图片。');
-    const query = searchQuery(text);
+    const query = searchQuery(text) ?? (config.webSearchEnabled && config.webSearchAutoEnabled && !seeing
+      ? autoSearchQuery(text) : null);
     const searching = query !== null;
     if (seeing && searching) return reply('请将图片识别与联网搜索分开发送。');
     if (searching && !config.webSearchEnabled) return reply('联网搜索未启用；在 .env 设置 WEB_SEARCH_ENABLED=true 后重启。');
