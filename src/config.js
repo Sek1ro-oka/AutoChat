@@ -79,7 +79,17 @@ export function loadConfig(env = process.env) {
     blockTerms: (env.BLOCK_TERMS || '').split(',').map(x => x.trim()).filter(Boolean),
     triggerTerms: (env.TRIGGER_TERMS || '').split(',').map(x => x.trim()).filter(Boolean),
     groupKeywordWithoutAt: (env.GROUP_KEYWORD_WITHOUT_AT || 'false').trim() === 'true',
+    webSearchEnabled: (env.WEB_SEARCH_ENABLED || 'false').trim() === 'true',
+    searchInputReserve: integer('WEB_SEARCH_INPUT_RESERVE_TOKENS', 64000, 16000, 1000000),
+    searchDailyLimit: integer('WEB_SEARCH_DAILY_LIMIT', 50, 1, 1000),
+    visionEnabled: (env.VISION_ENABLED || 'false').trim() === 'true',
+    visionDetail: (env.VISION_DETAIL || 'original').trim(),
   };
+  if (!['true', 'false'].includes((env.VISION_ENABLED || 'false').trim())) throw new Error('VISION_ENABLED 必须是 true 或 false');
+  if (!['low', 'original'].includes(config.visionDetail)) throw new Error('VISION_DETAIL 必须是 low 或 original');
+  if (!['true', 'false'].includes((env.WEB_SEARCH_ENABLED || 'false').trim())) {
+    throw new Error('WEB_SEARCH_ENABLED 必须是 true 或 false');
+  }
   if (!['true', 'false'].includes((env.GROUP_KEYWORD_WITHOUT_AT || 'false').trim())) {
     throw new Error('GROUP_KEYWORD_WITHOUT_AT 必须是 true 或 false');
   }
