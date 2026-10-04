@@ -41,3 +41,6 @@ napcat/
 *.sqlite-*
 *.db
 *.db-*
+
+# Local assistant workspace and notes
+.workbuddy/
