@@ -20,6 +20,7 @@ import { costMicro, estimateInput, usageCost } from '../model.js';
 import { containsTerm } from '../terms.js';
 import { isRepeat, score } from './attention.js';
 import { GroupMemory } from './memory.js';
+import { applyParams, resolveParams } from './params.js';
 import { parseSegments } from './quote.js';
 import { buildSocialRequest, withSlang } from './prompt.js';
 import { render } from './renderer.js';
@@ -57,61 +58,31 @@ export class Social {
   }
 
   // --- parameters (runtime-overridable from the console) ---------------------
-  params() {
-    const c = this.config;
-    const num = (key, fallback) => {
-      const raw = this.store.setting(key, null);
-      const value = Number(raw);
-      return raw !== null && Number.isFinite(value) ? value : fallback;
-    };
-    return {
-      enabled: this.store.setting('social_enabled', c.socialEnabled ? '1' : '0') === '1',
-      threshold: num('social_threshold', c.socialThreshold),
-      cooldownMs: num('social_cooldown_seconds', c.socialCooldownSeconds) * 1000,
-      dailyLimit: num('social_daily_limit', c.socialDailyLimit),
-      contextMessages: c.socialContextMessages,
-      maxChunks: c.socialMaxChunks,
-      minDelayMs: c.socialMinDelayMs,
-      maxDelayMs: c.socialMaxDelayMs,
-    };
-  }
+  // Resolution lives in params.js; asking for one group yields that group's
+  // effective numbers, which is what makes the simulation specialisable per
+  // group. Called with no group it returns the global view.
+  params(group = null) { return resolveParams(this.store, this.config, group); }
 
   grouped() { return this.config.groupIds ?? [this.config.groupId]; }
 
-  // Validate and persist a console edit. Unknown keys are ignored on purpose:
-  // the endpoint takes a patch, not a replacement.
+  // Validate and persist a console edit. Without `group` the global rows are
+  // written; with it, only that group's override rows. `group`+`muted` is the
+  // older per-group flag and keeps working unchanged. A `null` value clears the
+  // layer rather than writing it, so the console can say "inherit again".
   setParams(patch = {}) {
-    const bool = value => (typeof value === 'boolean' ? value : null);
-    const within = (value, min, max) => (Number.isFinite(Number(value))
-      && Number(value) >= min && Number(value) <= max ? Number(value) : null);
-    if ('enabled' in patch) {
-      const value = bool(patch.enabled);
-      if (value === null) throw new Error('SOCIAL_PARAM_INVALID');
-      this.store.set('social_enabled', value ? '1' : '0');
+    const { group, ...rest } = patch;
+    if (group === undefined) {
+      applyParams({ store: this.store, config: this.config, patch: rest, log: this.log });
+    } else {
+      const scoped = String(group);
+      if (!this.grouped().includes(scoped)) throw new Error('SOCIAL_PARAM_INVALID');
+      if ('muted' in rest) {
+        if (typeof rest.muted !== 'boolean') throw new Error('SOCIAL_PARAM_INVALID');
+        this.store.set(`social_mute:${scoped}`, rest.muted ? '1' : '0');
+      }
+      const { muted, ...numbers } = rest;
+      applyParams({ store: this.store, config: this.config, group: scoped, patch: numbers, log: this.log });
     }
-    if ('threshold' in patch) {
-      const value = within(patch.threshold, 0, 100);
-      if (value === null) throw new Error('SOCIAL_PARAM_INVALID');
-      this.store.set('social_threshold', String(value));
-    }
-    if ('cooldownSeconds' in patch) {
-      const value = within(patch.cooldownSeconds, 5, 3600);
-      if (value === null) throw new Error('SOCIAL_PARAM_INVALID');
-      this.store.set('social_cooldown_seconds', String(Math.round(value)));
-    }
-    if ('dailyLimit' in patch) {
-      const value = within(patch.dailyLimit, 1, 500);
-      if (value === null) throw new Error('SOCIAL_PARAM_INVALID');
-      this.store.set('social_daily_limit', String(Math.round(value)));
-    }
-    if (patch.group !== undefined) {
-      const group = String(patch.group);
-      if (!this.grouped().includes(group)) throw new Error('SOCIAL_PARAM_INVALID');
-      const muted = bool(patch.muted);
-      if (muted === null) throw new Error('SOCIAL_PARAM_INVALID');
-      this.store.set(`social_mute:${group}`, muted ? '1' : '0');
-    }
-    this.log('social_params_changed');
     return this.describe();
   }
 
@@ -151,9 +122,12 @@ export class Social {
   }
 
   observe(event, send, alive) {
-    if (!this.params().enabled) return Promise.resolve(false);
+    // Parse first: the enable switch is per group (see params.js), so it can
+    // only be read once the group is known. Still before anything is written —
+    // a group with the simulation off stores nothing.
     const message = this.parse(event);
     if (!message) return Promise.resolve(false);
+    if (!this.params(message.group).enabled) return Promise.resolve(false);
     this.memory.remember(message);
     if (message.fromBot) return Promise.resolve(false);
     // Chat content stays out of SQLite unless the simulation is on: the ledger
@@ -222,7 +196,7 @@ export class Social {
   record(group, decision) { this.decisions.set(group, decision); }
 
   async consider(message, send, alive) {
-    const params = this.params();
+    const params = this.params(message.group);
     const now = this.now();
     const state = this.advance(message.group, this.store.getSimState(message.group), message, now);
     const hour = this.hour();
@@ -262,14 +236,16 @@ export class Social {
 
   // --- speech ---------------------------------------------------------------
   // The group's confirmed slang table (Phase 4) rides along with the persona
-  // here; `slang` is optional, and without it the prompt is unchanged.
-  systemPrompt() {
+  // here; `slang` is optional, and without it the prompt is unchanged. Both the
+  // persona and the slang table are resolved for *this* group, so a group that
+  // pinned its own card or narrowed its vocabulary gets exactly that.
+  systemPrompt(group = null) {
     let base = this.config.systemPrompt;
     if (this.personas) {
-      try { base = this.personas.resolve(); }
+      try { base = this.personas.resolve(group); }
       catch { this.log('social_persona_failed'); }
     }
-    return withSlang(base, this.slang);
+    return withSlang(base, this.slang, { group });
   }
 
   // Building the prompt (history, quoting, escaping) lives in prompt.js — it is
@@ -277,7 +253,7 @@ export class Social {
   // "should we speak at all" decisions this file makes.
   request(message, params) {
     return buildSocialRequest({
-      memory: this.memory, config: this.config, message, params, system: this.systemPrompt(),
+      memory: this.memory, config: this.config, message, params, system: this.systemPrompt(message.group),
     });
   }
 
@@ -288,7 +264,7 @@ export class Social {
   }
 
   async speak(message, send, alive, state) {
-    const params = this.params();
+    const params = this.params(message.group);
     const sessionKey = `social:group:${message.group}`;
     let messages;
     try { messages = this.request(message, params); }
@@ -365,12 +341,17 @@ export class Social {
       const lastSpokeAt = row?.last_spoke_at ?? null;
       const idle = lastSpokeAt ? Math.max(0, now - lastSpokeAt) : null;
       const decision = this.decisions.get(id) ?? null;
+      // Each row reports *its own* effective numbers, not the global ones: that
+      // is the whole point of the per-group layer, and the console renders it.
+      const own = this.params(id);
       return {
         id, state, energy: energyFor(state, idle ?? 0), lastSpokeAt, idleMs: idle,
-        spokeToday: this.spokeToday(id, day), dailyLimit: params.dailyLimit,
+        enabled: own.enabled, overridden: own.overridden,
+        threshold: own.threshold, cooldownSeconds: Math.round(own.cooldownMs / 1000),
+        spokeToday: this.spokeToday(id, day), dailyLimit: own.dailyLimit,
         muted: this.store.setting(`social_mute:${id}`, '0') === '1',
         activity: this.memory.ring(id).filter(entry => now - entry.at <= ACTIVITY_WINDOW_MS).length,
-        required: requiredScore({ threshold: params.threshold, state, energy: energyFor(state, idle ?? 0) }),
+        required: requiredScore({ threshold: own.threshold, state, energy: energyFor(state, idle ?? 0) }),
         decision,
       };
     });

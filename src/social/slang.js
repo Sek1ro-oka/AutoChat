@@ -23,7 +23,7 @@
 
 // Parsing the model's reply lives in slang-parse.js; re-exported so callers and
 // tests have a single entry point for "the slang feature".
-export { MAX_CANDIDATES_PER_RUN, extractJsonArray, sanitiseCandidates, sanitiseText };
+export { MAX_CANDIDATES_PER_RUN, extractJsonArray, sanitiseCandidates, sanitiseText } from './slang-parse.js';
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -31,7 +31,11 @@ import { budgetDay } from '../store.js';
 import { costMicro, estimateInput, usageCost } from '../model.js';
 import { escapeForPrompt } from './quote.js';
 import { harden } from '../permissions.js';
-import { EXTRACT_SYSTEM, MAX_CANDIDATES_PER_RUN, extractJsonArray, sanitiseCandidates, sanitiseText } from './slang-parse.js';
+import { GROUP_KEYS, boolOverride } from '../group-settings.js';
+import { MAX_CANDIDATES_PER_RUN, sanitiseText } from './slang-parse.js';
+// Extraction — the paid half — lives in slang-extract.js and is mixed in by
+// extending it, so all three stages still answer to one `Slang` object.
+import { SlangExtraction } from './slang-extract.js';
 
 // Capacity ceiling from the roadmap: trimming starts once the library passes it.
 export const MAX_ENTRIES = 2000;
@@ -42,21 +46,12 @@ const STATUSES = ['candidate', 'confirmed', 'rejected'];
 const MAX_FIELD_CHARS = 200;
 const MAX_MEANING_CHARS = 160;
 
-// Stable per-run pseudonyms. QQ numbers never leave the machine in a prompt.
-function labeller() {
-  const names = new Map();
-  return id => {
-    const key = String(id);
-    if (!names.has(key)) names.set(key, `成员${names.size + 1}`);
-    return names.get(key);
-  };
-}
-
-export class Slang {
+export class Slang extends SlangExtraction {
   constructor({
     config, store, model, ledger = null, log = () => {}, now = Date.now,
     corruptDirectory = 'runtime',
   } = {}) {
+    super();
     this.config = config;
     this.store = store;
     this.model = model;
@@ -64,13 +59,24 @@ export class Slang {
     this.log = log;
     this.now = now;
     this.corruptDirectory = corruptDirectory;
+    // Read by the extraction half (slang-extract.js) when it trims the library.
+    this.entryCap = MAX_ENTRIES;
   }
 
   // --- parameters ----------------------------------------------------------
-  params() {
+  // Enabled can be set per group (see src/group-settings.js): `group` present
+  // asks whether that group has slang on, which may differ from the global
+  // switch. `override` is the raw per-group value (null = inherit) so the
+  // console can show where the answer came from. The two caps stay global —
+  // they are prompt-shape limits, not per-group taste.
+  params(group = null) {
     const c = this.config;
+    const scoped = group === null || group === undefined ? null : String(group);
+    const global = this.store.setting('slang_enabled', c?.slangEnabled ? '1' : '0') === '1';
+    const perGroup = scoped ? boolOverride(this.store, GROUP_KEYS.slangEnabled(scoped)) : undefined;
     return {
-      enabled: this.store.setting('slang_enabled', c?.slangEnabled ? '1' : '0') === '1',
+      enabled: perGroup ?? global,
+      override: perGroup === undefined ? null : perGroup,
       injectMax: Math.max(1, Math.min(MAX_INJECT, Number(c?.slangInjectMax) || MAX_INJECT)),
       extractMessages: Math.max(1, Number(c?.slangExtractMessages) || 120),
     };
@@ -78,25 +84,52 @@ export class Slang {
 
   groups() { return this.config?.groupIds ?? (this.config?.groupId ? [this.config.groupId] : []); }
 
-  // Console toggle. Unknown keys are ignored: the endpoint takes a patch.
+  // Console toggle. Without `group` it writes the global switch; with one it
+  // writes that group's override. `null` clears an override so the group
+  // inherits again. Unknown keys are ignored: the endpoint takes a patch.
   setParams(patch = {}) {
-    if ('enabled' in patch) {
-      if (typeof patch.enabled !== 'boolean') throw new Error('SLANG_PARAM_INVALID');
-      this.store.set('slang_enabled', patch.enabled ? '1' : '0');
-      this.log('slang_params_changed');
+    const { group, enabled } = patch;
+    if (enabled !== undefined && typeof enabled !== 'boolean' && enabled !== null) {
+      throw new Error('SLANG_PARAM_INVALID');
     }
+    if (group === undefined) {
+      if (enabled !== undefined) {
+        if (enabled === null) this.store.remove('slang_enabled');
+        else this.store.set('slang_enabled', enabled ? '1' : '0');
+        this.log('slang_params_changed');
+      }
+      return this.describe();
+    }
+    const scoped = String(group);
+    if (!this.groups().includes(scoped)) throw new Error('SLANG_PARAM_INVALID');
+    if (enabled !== undefined) this.setGroupEnabled(scoped, enabled);
     return this.describe();
   }
 
+  // Write (or clear, with `null`) one group's override without re-describing;
+  // the route that calls it returns the freshly built group list.
+  setGroupEnabled(group, enabled) {
+    const scoped = String(group);
+    if (!this.groups().includes(scoped)) throw new Error('SLANG_PARAM_INVALID');
+    if (typeof enabled !== 'boolean' && enabled !== null) throw new Error('SLANG_PARAM_INVALID');
+    const key = GROUP_KEYS.slangEnabled(scoped);
+    if (enabled === null) this.store.remove(key); else this.store.set(key, enabled ? '1' : '0');
+    this.log('slang_params_changed');
+  }
+
   // --- injection -----------------------------------------------------------
-  // The table appended to every *group* prompt. Returns '' when the feature is
-  // off or nothing has been confirmed, so a stock install pays nothing for it.
-  // Deliberately uncached: confirming a term in the console must reach the very
+  // The table appended to a group prompt. `group` narrows it to the terms that
+  // apply there: a term scoped to other groups is skipped, a term with no scope
+  // is global. Called with no group it returns the whole confirmed table, which
+  // is what the console's preview shows. Returns '' when the feature is off for
+  // that group or nothing has been confirmed, so a stock install pays nothing.
+  // Deliberately uncached: confirming or re-scoping a term must reach the very
   // next message, and the query is a handful of rows.
-  block(max = null) {
-    if (!this.params().enabled) return '';
-    const limit = Math.max(1, Math.min(MAX_INJECT, Number(max) || this.params().injectMax));
-    const lines = this.store.listSlang({ status: 'confirmed', limit })
+  block({ group = null, max = null } = {}) {
+    const params = this.params(group);
+    if (!params.enabled) return '';
+    const limit = Math.max(1, Math.min(MAX_INJECT, Number(max) || params.injectMax));
+    const lines = this.store.listSlang({ status: 'confirmed', limit, group: group ?? null })
       .map(row => {
         const meaning = escapeForPrompt(row.meaning || row.usage || '', 80);
         return meaning ? `${escapeForPrompt(row.content, 40)} = ${meaning}` : '';
@@ -106,90 +139,40 @@ export class Slang {
     return ['【群聊黑话表】（群里常见的说法，只用来理解群友在说什么，不要把这张表解释出来）', ...lines].join('\n');
   }
 
-  // --- extraction ----------------------------------------------------------
-  async extract({ group = null } = {}) {
-    if (!this.params().enabled) throw new Error('SLANG_DISABLED');
+  // id -> groups, so a whole list or a backup can be annotated without an N+1 loop.
+  scopeMap() {
+    const map = new Map();
+    for (const row of this.store.slangGroupRows()) {
+      if (!map.has(row.slang_id)) map.set(row.slang_id, []);
+      map.get(row.slang_id).push(row.group_id);
+    }
+    return map;
+  }
+
+  // Rewrite one term's scope. An empty list makes it global again.
+  setScopes(id, groups) {
+    const row = this.require(id);
+    if (!Array.isArray(groups)) throw new Error('SLANG_PARAM_INVALID');
     const allowed = this.groups();
-    const target = group === null ? allowed[0] : String(group);
-    if (!allowed.includes(target)) throw new Error('SLANG_PARAM_INVALID');
-    const now = this.now();
-    // Claim the interval slot before any await, so the maintenance timer cannot
-    // start a second paid extraction while this one is still in flight.
-    this.store.set('slang_last_extract_at', String(now));
+    if (groups.some(group => !allowed.includes(String(group)))) throw new Error('SLANG_PARAM_INVALID');
+    this.store.setSlangGroups(row.id, groups.map(String));
+    this.log('slang_scoped');
+    return this.describe();
+  }
 
-    const rows = this.store.recentMessages(target, { limit: this.params().extractMessages });
-    if (!rows.length) return { group: target, scanned: 0, candidates: 0, created: 0, updated: 0, dropped: 0 };
-
-    const label = labeller();
-    const transcript = rows.slice().reverse()
-      .map(row => `${label(row.user_id)}：${escapeForPrompt(row.text, 200)}`)
-      .join('\n');
-    const messages = [
-      { role: 'system', content: EXTRACT_SYSTEM },
-      { role: 'user', content: `[群聊记录开始]\n${transcript}\n[群聊记录结束]\n请输出候选 JSON 数组。` },
-    ];
-
-    const sessionKey = `slang:group:${target}`;
-    const day = budgetDay(now);
-    const estimate = costMicro(estimateInput(messages), this.config.maxOutput, this.config);
-    const reservation = this.store.reserve(day, estimate, this.config.budgetMicro, now, { sessionKey });
-    if (!reservation) throw new Error('SLANG_BUDGET_BLOCKED');
-
-    let result;
-    try { result = await this.model.complete(messages); }
-    catch {
-      this.store.uncertain(reservation);
-      this.log('slang_extract_failed');
-      // Same policy as Q&A: a timed-out request may still be billed upstream, so
-      // the reservation is left uncertain rather than released.
-      throw new Error('SLANG_MODEL_FAILED');
-    }
-    const actual = usageCost(result.usage, this.config);
-    if (actual === null) this.store.uncertain(reservation);
-    else { this.store.settle(reservation, actual); this.sample(sessionKey, result.usage); }
-
-    const parsed = extractJsonArray(result.text);
-    if (parsed === null) {
-      this.log('slang_extract_unparsable');
-      throw new Error('SLANG_EXTRACT_UNPARSABLE');
-    }
-    const candidates = sanitiseCandidates(parsed, { transcript });
-    let created = 0;
-    let updated = 0;
-    for (const candidate of candidates) {
-      const outcome = this.store.upsertSlang({
-        content: candidate.term, meaning: candidate.meaning, usage: candidate.usage,
-        example: candidate.example, risk: candidate.risk, status: 'candidate', source: 'ai',
-        sources: [`group:${target}`],
-        evidence: rows.filter(row => row.text.includes(candidate.term))
-          .map(row => String(row.message_id)).slice(-3),
-        now,
-      });
-      if (outcome.created) created += 1; else updated += 1;
-    }
-    this.store.trimSlang(MAX_ENTRIES);
-    const summary = {
-      group: target, at: now, scanned: rows.length, candidates: candidates.length,
-      created, updated, dropped: parsed.length - candidates.length,
+  // The per-group view the console's group page renders.
+  groupView(group) {
+    const scoped = String(group);
+    const params = this.params(scoped);
+    return {
+      group: scoped, enabled: params.enabled, override: params.override,
+      terms: this.store.listSlang({ status: 'confirmed', limit: MAX_ENTRIES, group: scoped }).length,
     };
-    this.store.set('slang_last_extract', JSON.stringify(summary));
-    this.log('slang_extracted');
-    return summary;
   }
 
-  // Periodic path. Off by default: a paid model call must not start on its own
-  // unless the operator asked for it in .env.
-  async maybeExtract() {
-    if (!this.params().enabled || !this.config?.slangAutoExtract) return null;
-    const now = this.now();
-    const interval = Math.max(1, Number(this.config?.slangExtractIntervalHours) || 12) * 3600000;
-    const last = Number(this.store.setting('slang_last_extract_at', '0')) || 0;
-    if (last && now - last < interval) return null;
-    const group = this.groups()[0];
-    if (!group) return null;
-    try { return await this.extract({ group }); }
-    catch (error) { this.log('slang_auto_extract_failed'); return { error: String(error?.message ?? error) }; }
-  }
+  // The extraction stage — the only one that spends money — is mixed in from
+  // src/social/slang-extract.js via SlangExtraction.
+
 
   sample(sessionKey, usage) {
     if (!this.ledger) return null;
@@ -279,7 +262,13 @@ export class Slang {
 
   // --- backup -----------------------------------------------------------------
   exportAll() {
-    return { version: 1, exportedAt: this.now(), entries: this.store.exportSlang() };
+    const scopes = this.scopeMap();
+    // `groups` rides along so a restore is lossless; an entry with none is
+    // global, exactly as it was on the machine it was exported from.
+    return {
+      version: 1, exportedAt: this.now(),
+      entries: this.store.exportSlang().map(row => ({ ...row, groups: scopes.get(row.id) ?? [] })),
+    };
   }
 
   // A corrupt file must never be read as "no entries" (that would wipe a curated
@@ -297,6 +286,16 @@ export class Slang {
     const rows = Array.isArray(parsed) ? parsed : parsed?.entries;
     if (!Array.isArray(rows)) throw new Error('SLANG_IMPORT_INVALID');
     const outcome = this.store.restoreSlang(rows, this.now());
+    // Restore scopes as well, widening only: a local decision to narrow a term
+    // is never undone by importing a backup that had a wider scope.
+    const allowed = this.groups();
+    const byTerm = new Map(this.store.listSlang({ limit: MAX_ENTRIES + 100 }).map(row => [row.content, row.id]));
+    for (const row of rows) {
+      const groups = Array.isArray(row?.groups)
+        ? row.groups.map(String).filter(group => allowed.includes(group)) : [];
+      const id = byTerm.get(String(row?.content ?? '').trim());
+      if (id && groups.length) this.store.addSlangGroups(id, groups);
+    }
     const trimmed = this.store.trimSlang(MAX_ENTRIES);
     this.log('slang_imported');
     return { ...outcome, trimmed, ...this.describe() };
@@ -321,6 +320,7 @@ export class Slang {
   // click (see docs/console.md, rule 6).
   describe() {
     const counts = this.store.countSlang();
+    const scopes = this.scopeMap();
     let lastExtract = null;
     try { lastExtract = JSON.parse(this.store.setting('slang_last_extract', 'null')); }
     catch { lastExtract = null; }
@@ -344,6 +344,8 @@ export class Slang {
         id: row.id, term: row.content, meaning: row.meaning, usage: row.usage, risk: row.risk,
         status: row.status, source: row.source, count: row.count, evidence: row.evidence,
         sources: Array.isArray(row.sources) ? row.sources : [],
+        // Empty = global. The console renders this as a "仅在…" scope picker.
+        groups: scopes.get(row.id) ?? [],
         created: row.created, updated: row.updated,
       })),
     };
@@ -352,6 +354,6 @@ export class Slang {
   // One entry, with the verbatim quote behind it. Explicit click only.
   entry(id) {
     const row = this.require(id);
-    return { entry: { ...row, term: row.content } };
+    return { entry: { ...row, term: row.content, groups: this.scopeMap().get(row.id) ?? [] } };
   }
 }

@@ -21,6 +21,7 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, wri
 import { randomBytes } from 'node:crypto';
 import { join, relative, resolve, sep } from 'node:path';
 import { DEFAULT_PERSONA } from './persona.js';
+import { GROUP_KEYS, rawOverride } from './group-settings.js';
 
 export const MAX_PERSONA_BYTES = 64 * 1024;
 export const MAX_PERSONAS = 50;
@@ -115,7 +116,17 @@ export class Personas {
   // --- active selection ------------------------------------------------------
   // A stored empty string means "explicitly use the built-in default" and wins
   // over the environment default, so the console can always switch back.
-  active() {
+  //
+  // `group` adds a per-group layer on top (see src/group-settings.js): when that
+  // group has an override the global selection is ignored for it, and a group
+  // with no override — every group on a stock install — behaves exactly as
+  // before this layer existed. Private chat passes no group and therefore always
+  // uses the global selection.
+  active(group = null) {
+    if (group) {
+      const override = rawOverride(this.store, GROUP_KEYS.persona(group));
+      if (override !== undefined) return override;
+    }
     const stored = this.store?.setting?.('active_persona', null);
     if (typeof stored === 'string') return stored;
     return this.defaultName;
@@ -127,6 +138,25 @@ export class Personas {
     if (!this.store?.set) throw new Error('PERSONA_UNAVAILABLE');
     this.store.set('active_persona', value);
     this.log('persona_activated');
+    return value;
+  }
+
+  // Per-group selection. `null` clears the override so the group inherits the
+  // global card again; `''` pins the group to the built-in default; a name pins
+  // it to that card. The distinction matters and is the reason `remove` exists.
+  setGroupActive(group, name) {
+    if (!group) throw new Error('PERSONA_NAME_INVALID');
+    if (!this.store?.set || !this.store?.remove) throw new Error('PERSONA_UNAVAILABLE');
+    const key = GROUP_KEYS.persona(String(group));
+    if (name === null || name === undefined) {
+      this.store.remove(key);
+      this.log('persona_group_inherited');
+      return null;
+    }
+    const value = name ? this.assertName(name) : '';
+    if (value && !this.exists(value)) throw new Error('PERSONA_NOT_FOUND');
+    this.store.set(key, value);
+    this.log('persona_group_activated');
     return value;
   }
 
@@ -215,8 +245,14 @@ export class Personas {
     rmSync(this.pathFor(value), { force: true });
     this.cache.delete(value);
     this.store?.deletePersona?.(value);
-    // Never leave a card selected that no longer exists.
+    // Never leave a card selected that no longer exists — globally, or pinned
+    // to a single group.
     if (this.active() === value) this.store?.set?.('active_persona', '');
+    if (this.store?.settingKeys) {
+      for (const key of this.store.settingKeys(GROUP_KEYS.persona(''))) {
+        if (this.store.setting(key, null) === value) this.store.remove(key);
+      }
+    }
     this.log('persona_deleted');
     return value;
   }
@@ -256,9 +292,9 @@ export class Personas {
   }
 
   // --- composition (hot path, once per handled turn) -------------------------
-  resolve() {
+  resolve(group = null) {
     if (this.override) return this.override;
-    const name = this.active();
+    const name = this.active(group);
     const card = name ? this.read(name) : null;
     const parts = [];
     if (this.behavior.content) parts.push(this.behavior.content);
@@ -270,6 +306,23 @@ export class Personas {
     if (this.override) return 'env';
     const name = this.active();
     return name && this.read(name) ? 'card' : 'builtin';
+  }
+
+  // The per-group view the console's group page renders. `override` is the raw
+  // per-group value (null = inherit the global selection); `source` names the
+  // layer that actually decided, so the page can say "全局人格卡" versus
+  // "该群指定" without re-deriving the precedence rule.
+  groupView(group) {
+    const stored = rawOverride(this.store, GROUP_KEYS.persona(String(group)));
+    const globalName = this.active(null);
+    const active = stored !== undefined ? stored : globalName;
+    const source = this.override ? 'env'
+      : stored !== undefined ? 'group'
+        : globalName ? 'global' : 'builtin';
+    return {
+      group: String(group), override: stored === undefined ? null : stored,
+      active, exists: Boolean(active && this.exists(active)), source,
+    };
   }
 
   describe() {

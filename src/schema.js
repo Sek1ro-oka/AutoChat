@@ -40,6 +40,15 @@ export const SCHEMA = `
     evidence TEXT NOT NULL DEFAULT '[]', created INTEGER NOT NULL, updated INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS slang_status ON slang(status);
+  -- Per-group slang scoping (per-group specialisation). A term with no row here
+  -- is global — injected into every group — which keeps every pre-existing
+  -- library behaving as before. A term with rows is injected only into those
+  -- groups. No foreign key: the table is tiny and trimSlang/deleteSlang clean
+  -- orphans explicitly, so a missing FK cannot leave dangling scopes.
+  CREATE TABLE IF NOT EXISTS slang_groups (
+    slang_id TEXT NOT NULL, group_id TEXT NOT NULL, PRIMARY KEY (slang_id, group_id)
+  );
+  CREATE INDEX IF NOT EXISTS slang_groups_group ON slang_groups(group_id);
   CREATE TABLE IF NOT EXISTS sim_state (
     group_id TEXT PRIMARY KEY, state TEXT NOT NULL, last_spoke_at INTEGER,
     energy REAL NOT NULL DEFAULT 0, updated INTEGER NOT NULL

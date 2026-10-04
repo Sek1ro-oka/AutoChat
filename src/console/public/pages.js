@@ -296,6 +296,14 @@ const pages = {
       <div class="row" style="margin-bottom:10px"><label class="muted" style="font-size:12px;min-width:52px">风险</label>
         <input type="text" style="flex:1" value="${esc(slangState.patch[detail.id]?.risk ?? detail.risk)}"
           oninput="slangEdit(${esc(JSON.stringify(detail.id))},'risk',this.value)" placeholder="歧义或禁忌，留空即可"></div>
+      <div class="row" style="margin-bottom:10px"><label class="muted" style="font-size:12px;min-width:52px">生效群</label>
+        <span class="row" style="gap:10px">${d.groups.map(gid => {
+          const checked = (detail.groups ?? []).includes(String(gid));
+          return `<label class="muted" style="font-size:12px"><input type="checkbox" data-scope-group="${esc(gid)}" ${checked ? 'checked' : ''}> ${esc(gid)}</label>`;
+        }).join('') || '<span class="muted">未配置群</span>'}</span>
+        <button onclick="slangScopeSave(${esc(JSON.stringify(detail.id))})">保存生效群</button>
+      </div>
+      <div class="muted" style="font-size:12px;margin-bottom:10px">不勾选任何群 = 全局生效（注入所有群）；勾选若干群 = 仅这些群注入。</div>
       <div class="toolbar">
         <button onclick="slangSave(${esc(JSON.stringify(detail.id))})">保存含义</button>
         <button onclick="slangClose()">收起</button>
@@ -341,6 +349,65 @@ const pages = {
         ${d.preview ? `<pre>${esc(d.preview)}</pre>` : '<div class="empty">未注入任何内容（功能未开启，或还没有已确认的词条）。</div>'}
         <div class="muted" style="font-size:12px;margin-top:8px">这段文字会追加在人格提示词之后，群聊与问答（@机器人）两条路径都会带上，且每次对话都重新读取。私聊不带。</div>
       </div>`;
+  },
+  async groups() {
+    const d = await api('/api/groups');
+    stamp.textContent = `${d.groups.length} 个群`;
+    if (!d.groups.length) return '<div class="empty">未配置群。请在 <code>.env</code> 的 <code>GROUP_QQS</code> 里用逗号列出群号。</div>';
+    const banners = [];
+    if (groupState.notice) banners.push(`<div class="banner ${groupState.bad ? 'bad' : 'ok'}">${esc(groupState.notice)}</div>`);
+    const names = d.personas?.characters ?? [];
+    const globalActive = d.personas?.active ?? '';
+    const g = d.socialGlobal ?? { threshold: 0, cooldownSeconds: 0, dailyLimit: 0 };
+
+    const cards = d.groups.map(row => {
+      const p = row.persona, s = row.social, sl = row.slang;
+      const inheritLabel = globalActive ? `继承全局（${esc(globalActive)}）` : '继承全局（内置默认）';
+      const selValue = p?.override === null || p?.override === undefined ? '__inherit__' : p.override;
+      const personaOptions = [`<option value="__inherit__">${inheritLabel}</option>`,
+        `<option value="" ${selValue === '' ? 'selected' : ''}>内置默认</option>`]
+        .concat(names.map(n => `<option value="${esc(n)}" ${selValue === n ? 'selected' : ''}>${esc(n)}</option>`)).join('');
+      const personaLive = p?.source === 'group' ? `该群指定「${esc(p.active || '内置默认')}」`
+        : p?.source === 'global' ? `继承全局「${esc(p.active)}」` : '内置默认';
+
+      const ov = s?.overridden ?? {};
+      const socialEnabled = s?.enabled;
+      const field = (key, id, value, min, max, unit) => `<label class="muted" style="font-size:12px">${key}
+        <input type="text" id="${id}" style="min-width:64px" value="${esc(value)}">
+        ${ov[key] ? `<button onclick="groupSocialInherit(${esc(JSON.stringify(row.id))},'${key}')" title="清除该群覆盖，改回继承全局">清除</button>` : '<span class="muted">继承</span>'}
+      </label>`;
+
+      return `<div class="card">
+        <div class="row" style="justify-content:space-between">
+          <h3 style="margin:0">群 <code>${esc(row.id)}</code></h3>
+          <button onclick="groupReset(${esc(JSON.stringify(row.id))})">恢复该群默认</button>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <label class="muted" style="font-size:12px">人格卡
+            <select onchange="groupPersona(${esc(JSON.stringify(row.id))},this.value)">${personaOptions}</select>
+          </label>
+          <span class="muted" style="font-size:12px">${esc(personaLive)}</span>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button onclick="groupSocialToggle(${esc(JSON.stringify(row.id))},${socialEnabled ? 'false' : 'true'})">${socialEnabled ? '关闭仿真' : '开启仿真'}</button>
+          ${field('阈值', `g-threshold-${row.id}`, s?.threshold ?? g.threshold, 0, 100)}
+          ${field('冷却(秒)', `g-cooldown-${row.id}`, s?.cooldownSeconds ?? g.cooldownSeconds, 5, 3600)}
+          ${field('日上限', `g-daily-${row.id}`, s?.dailyLimit ?? g.dailyLimit, 1, 500)}
+          <button onclick="groupSocialSave(${esc(JSON.stringify(row.id))})">保存仿真参数</button>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button onclick="groupSlangToggle(${esc(JSON.stringify(row.id))},${sl?.enabled ? 'false' : 'true'})">${sl?.enabled ? '关闭黑话' : '开启黑话'}</button>
+          <span class="muted" style="font-size:12px">${sl?.override === null || sl?.override === undefined ? '继承全局开关' : '该群已单独指定'} · 适用词条 ${num(sl?.terms ?? 0)} 条</span>
+        </div>
+      </div>`;
+    }).join('');
+
+    return `${banners.join('')}
+      <div class="section card">
+        <h3>按群特异化</h3>
+        <div class="muted" style="font-size:12px">每个群可独立选择人格卡、仿真参数（开关/阈值/冷却/日上限）与黑话开关。未单独指定的项继承全局值；「恢复默认」会清空该群的全部覆盖。</div>
+      </div>
+      <div class="section" style="display:grid;gap:14px">${cards}</div>`;
   },
   async logs() {
     const d = await api('/api/logs?limit=150');

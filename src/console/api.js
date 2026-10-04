@@ -3,6 +3,7 @@
 
 import { budgetDay, CHINA_OFFSET_MS } from '../store.js';
 import { reportCost, sampleCostMicro, splitTotals } from '../ledger.js';
+import { clearGroupOverrides } from '../group-settings.js';
 
 const SECRET = /(key|token|secret|password|passwd)/i;
 
@@ -168,4 +169,55 @@ export function buildSlang({ slang }) {
 export function buildSlangEntry({ slang, id }) {
   if (!slang) throw new Error('SLANG_UNAVAILABLE');
   return slang.entry(id);
+}
+
+// --- Per-group specialisation ----------------------------------------------
+// One card per served group, pulling the three specialisable subsystems into a
+// single row so the operator sees "what this group actually is" in one place.
+export function buildGroups({ config, personas, social, slang, now = Date.now() }) {
+  const groupIds = social ? social.grouped() : (slang ? slang.groups() : (config?.groupIds ?? []));
+  const socialView = social ? social.describe({ now }) : null;
+  const socialByGroup = new Map((socialView?.groups ?? []).map(g => [String(g.id), g]));
+  return {
+    available: { personas: Boolean(personas), social: Boolean(social), slang: Boolean(slang) },
+    groups: groupIds.map(id => ({
+      id: String(id),
+      persona: personas ? personas.groupView(id) : null,
+      social: socialByGroup.get(String(id)) ?? null,
+      slang: slang ? slang.groupView(id) : null,
+    })),
+    // Reference for the pickers: the persona dropdown needs the card names and
+    // the global active card, and the social rows show their inherited defaults.
+    personas: personas ? { active: personas.active(), characters: personas.list().map(c => c.name) } : null,
+    socialGlobal: socialView ? {
+      threshold: socialView.params.threshold,
+      cooldownSeconds: socialView.params.cooldownSeconds,
+      dailyLimit: socialView.params.dailyLimit,
+    } : null,
+  };
+}
+
+// Route a group-page write to the right subsystem. `subsystem` is mandatory; the
+// rest of the patch is subsystem-specific and validated by that subsystem.
+export function applyGroupPatch({ personas, social, slang, store, group, patch = {} }) {
+  const scoped = String(group ?? '');
+  if (!scoped) throw new Error('GROUP_PARAM_INVALID');
+  const known = social ? social.grouped() : (slang ? slang.groups() : []);
+  if (known.length && !known.includes(scoped)) throw new Error('GROUP_NOT_FOUND');
+  const { subsystem, ...rest } = patch;
+  if (subsystem === 'persona') {
+    if (!personas) throw new Error('PERSONA_UNAVAILABLE');
+    personas.setGroupActive(scoped, rest.name === undefined ? null : rest.name);
+  } else if (subsystem === 'social') {
+    if (!social) throw new Error('SOCIAL_UNAVAILABLE');
+    social.setParams({ group: scoped, ...rest });
+  } else if (subsystem === 'slang') {
+    if (!slang) throw new Error('SLANG_UNAVAILABLE');
+    slang.setParams({ group: scoped, enabled: rest.enabled });
+  } else if (subsystem === 'reset') {
+    clearGroupOverrides(store, scoped);
+  } else {
+    throw new Error('GROUP_PARAM_INVALID');
+  }
+  return true;
 }

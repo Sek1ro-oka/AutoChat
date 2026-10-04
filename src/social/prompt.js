@@ -15,11 +15,13 @@ import { escapeForPrompt, formatQuote } from './quote.js';
 // Append the group's confirmed slang table to a system prompt. Both prompt
 // callers (the answering path and the simulation) use this one implementation
 // instead of each writing the same concat; `grouped` is false for a private
-// chat, which has no group vocabulary. Absent the module the prompt is
-// byte-for-byte what it was before Phase 4.
-export function withSlang(base, slang, { grouped = true } = {}) {
+// chat, which has no group vocabulary. `group` narrows the table to the terms
+// that apply to this group — a term scoped to another group is left out (see
+// docs/slang.md). Absent the module the prompt is byte-for-byte what it was
+// before Phase 4.
+export function withSlang(base, slang, { grouped = true, group = null } = {}) {
   if (!grouped || !slang) return base;
-  const block = slang.block();
+  const block = slang.block({ group });
   return block ? `${base}\n\n${block}` : base;
 }
 

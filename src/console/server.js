@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import {
   buildSummary, buildSessions, buildCharges, buildConfig, buildCost, buildCostTurns,
   buildPersonas, buildPersonaFile, buildSocial, buildSlang, buildSlangEntry,
+  buildGroups, applyGroupPatch,
 } from './api.js';
 import { readLogs } from './logs.js';
 import { harden } from '../permissions.js';
@@ -52,6 +53,8 @@ const ERROR_STATUS = new Map([
   ['SLANG_SEARCH_LIMIT', 429], ['SLANG_IMPORT_INVALID', 400],
   ['SLANG_MODEL_FAILED', 502], ['SLANG_EXTRACT_UNPARSABLE', 502],
   ['SLANG_LOOKUP_UNVERIFIED', 502], ['SLANG_LOOKUP_EMPTY', 502],
+  // Per-group specialisation: 4xx for what the operator can fix.
+  ['GROUP_PARAM_INVALID', 400], ['GROUP_NOT_FOUND', 404],
 ]);
 
 const equal = (a, b) => {
@@ -161,6 +164,7 @@ export function createConsole({
       name: url.searchParams.get('name') ?? '',
     }),
     '/api/social': () => buildSocial({ social, now: now() }),
+    '/api/groups': () => buildGroups({ config, personas, social, slang, now: now() }),
     '/api/slang': () => buildSlang({ slang }),
     '/api/slang/entry': (url) => buildSlangEntry({ slang: requireSlang(), id: url.searchParams.get('id') ?? '' }),
     // The backup is served as a plain JSON document so the browser can save it
@@ -185,12 +189,19 @@ export function createConsole({
       return { active: target.setActive(body?.name ?? ''), ...buildPersonas({ personas }) };
     },
     '/api/social/config': (url, body) => requireSocial().setParams(body ?? {}),
+    // Per-group specialisation: one endpoint, routed by `subsystem`, so the page
+    // has a single save path for persona / social / slang / reset.
+    '/api/groups/config': (url, body) => {
+      applyGroupPatch({ personas, social, slang, store, group: body?.group, patch: body ?? {} });
+      return buildGroups({ config, personas, social, slang, now: now() });
+    },
     // Slang review (Phase 4). Every write returns the re-described library, so
     // the page re-renders from one response instead of chaining a read.
     '/api/slang/config': (url, body) => requireSlang().setParams(body ?? {}),
     '/api/slang/extract': (url, body) => requireSlang().extract({ group: body?.group ?? null }).then(result => ({ result, ...requireSlang().describe() })),
     '/api/slang/status': (url, body) => requireSlang().setStatus(body?.id, body?.status),
     '/api/slang/entry': (url, body) => requireSlang().edit(body?.id, body ?? {}),
+    '/api/slang/scopes': (url, body) => requireSlang().setScopes(body?.id, body?.groups),
     '/api/slang/delete': (url, body) => requireSlang().remove(body?.id),
     '/api/slang/lookup': (url, body) => requireSlang().lookup(body?.id),
     '/api/slang/import': (url, body) => requireSlang().importAll(body?.text),

@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { SCHEMA } from './schema.js';
+import { SlangStore } from './store-slang.js';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -24,19 +25,11 @@ const SPLITS = `
 
 const columns = (db, table) => new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name));
 
-// `source(s)`/`evidence` columns are JSON arrays; a row that fails to parse is
-// treated as empty rather than throwing, so one bad row cannot hide the library.
-const parseArray = value => {
-  try {
-    const parsed = JSON.parse(value ?? '[]');
-    return Array.isArray(parsed) ? parsed : [];
-  } catch { return []; }
-};
-const slangRow = row => (row ? { ...row, sources: parseArray(row.sources), evidence: parseArray(row.evidence) } : null);
-const unique = list => [...new Set((Array.isArray(list) ? list : []).map(item => String(item)).filter(Boolean))];
-
-export class Store {
+// Slang persistence lives in src/store-slang.js (mixed in by extending
+// `SlangStore`) so this file stays inside the project's size ceiling.
+export class Store extends SlangStore {
   constructor(path = ':memory:') {
+    super();
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec(SCHEMA);
@@ -73,6 +66,14 @@ export class Store {
   }
   set(key, value) {
     this.db.prepare('INSERT OR REPLACE INTO settings VALUES (?,?)').run(key, String(value));
+  }
+  // Deleting is what "no per-group override" means: the reader then inherits the
+  // global value. Returns the number of rows removed so a reset can report truth.
+  remove(key) { return this.db.prepare('DELETE FROM settings WHERE key=?').run(key).changes; }
+  // Every key under a namespace, so a deleted persona card can be unpinned from
+  // the groups that named it. `prefix` carries no LIKE wildcard by construction.
+  settingKeys(prefix) {
+    return this.db.prepare('SELECT key FROM settings WHERE key LIKE ?').all(`${prefix}%`).map(row => row.key);
   }
   claim(key, now) {
     return this.db.prepare('INSERT OR IGNORE INTO events VALUES (?,?)').run(key, now).changes === 1;
@@ -194,120 +195,10 @@ export class Store {
     return this.db.prepare('SELECT name, content, updated FROM personas WHERE name=?').get(String(name)) ?? null;
   }
   deletePersona(name) { this.db.prepare('DELETE FROM personas WHERE name=?').run(String(name)); }
-  // --- Slang library (V2 · Phase 4) ----------------------------------------
-  // One row per term. `status` is the only thing that decides whether a term is
-  // ever injected into a prompt, so an unconfirmed candidate is inert. `count`
-  // is how many times extraction has seen it; `sources`/`evidence` record where
-  // the meaning came from and which group messages backed it.
-  listSlang({ status = null, limit = 500 } = {}) {
-    const cap = Math.max(1, Math.min(5000, Number(limit) || 500));
-    if (status) {
-      return this.db.prepare(`SELECT * FROM slang WHERE status=? ORDER BY count DESC, updated DESC LIMIT ?`)
-        .all(String(status), cap).map(slangRow);
-    }
-    // Confirmed first: that is the order a human reads the console list in.
-    return this.db.prepare(`SELECT * FROM slang ORDER BY (status='confirmed') DESC, count DESC, updated DESC LIMIT ?`)
-      .all(cap).map(slangRow);
-  }
-  getSlang(id) { return slangRow(this.db.prepare('SELECT * FROM slang WHERE id=?').get(String(id))); }
-  countSlang() {
-    return this.db.prepare(`SELECT COUNT(*) AS total,
-      COALESCE(SUM(CASE WHEN status='confirmed' THEN 1 ELSE 0 END),0) AS confirmed,
-      COALESCE(SUM(CASE WHEN status='candidate' THEN 1 ELSE 0 END),0) AS candidate,
-      COALESCE(SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END),0) AS rejected
-      FROM slang`).get();
-  }
-  // Observation semantics: a new term is inserted as a candidate, an existing
-  // one only accumulates evidence and a counter. The status is deliberately not
-  // touched — a human rejection must survive the next extraction.
-  upsertSlang({ content, meaning = '', usage = '', example = '', risk = '', status = 'candidate',
-    source = 'ai', sources = [], evidence = [], now = Date.now() }) {
-    const term = String(content ?? '').trim();
-    if (!term) throw new Error('SLANG_TERM_INVALID');
-    return this.transaction(() => {
-      const existing = this.db.prepare('SELECT * FROM slang WHERE content=?').get(term);
-      if (!existing) {
-        const id = randomUUID();
-        this.db.prepare(`INSERT INTO slang (id, content, meaning, usage, example, risk, status, source,
-          count, sources, evidence, created, updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-          .run(id, term, String(meaning), String(usage), String(example), String(risk), String(status),
-            String(source), 1, JSON.stringify(unique(sources)), JSON.stringify(unique(evidence)), now, now);
-        return { id, content: term, created: true, count: 1 };
-      }
-      const count = Number(existing.count) + 1;
-      this.db.prepare(`UPDATE slang SET meaning=?, usage=?, example=?, risk=?, count=?,
-        sources=?, evidence=?, updated=? WHERE id=?`)
-        .run(existing.meaning || String(meaning), existing.usage || String(usage),
-          existing.example || String(example), existing.risk || String(risk), count,
-          JSON.stringify(unique([...parseArray(existing.sources), ...(Array.isArray(sources) ? sources : [])])),
-          JSON.stringify(unique([...parseArray(existing.evidence), ...(Array.isArray(evidence) ? evidence : [])])),
-          now, existing.id);
-      return { id: existing.id, content: term, created: false, count };
-    });
-  }
-  setSlangStatus(id, status, now = Date.now()) {
-    return this.db.prepare('UPDATE slang SET status=?, updated=? WHERE id=?')
-      .run(String(status), now, String(id)).changes;
-  }
-  // Text fields plus provenance (`source`/`sources`), which the web lookup sets
-  // together with the meaning it proposes.
-  updateSlang(id, fields = {}, now = Date.now()) {
-    const sets = [];
-    const values = [];
-    for (const key of ['meaning', 'usage', 'example', 'risk']) {
-      if (typeof fields[key] === 'string') { sets.push(`${key}=?`); values.push(fields[key]); }
-    }
-    if (typeof fields.source === 'string') { sets.push('source=?'); values.push(fields.source); }
-    if (Array.isArray(fields.sources)) { sets.push('sources=?'); values.push(JSON.stringify(unique(fields.sources))); }
-    if (!sets.length) return null;
-    this.db.prepare(`UPDATE slang SET ${sets.join(', ')}, updated=? WHERE id=?`).run(...values, now, String(id));
-    return this.getSlang(id);
-  }
-  deleteSlang(id) { return this.db.prepare('DELETE FROM slang WHERE id=?').run(String(id)).changes; }
-  exportSlang() { return this.db.prepare('SELECT * FROM slang ORDER BY created, content').all(); }
-  // Restore semantics for a backup file: keep every human decision that already
-  // exists locally, take the larger count, and fill blanks. Runs as one
-  // transaction so a partial import cannot leave half a library behind.
-  restoreSlang(rows, now = Date.now()) {
-    let added = 0; let merged = 0;
-    return this.transaction(() => {
-      for (const row of Array.isArray(rows) ? rows : []) {
-        const term = String(row?.content ?? '').trim();
-        if (!term) continue;
-        const existing = this.db.prepare('SELECT * FROM slang WHERE content=?').get(term);
-        if (!existing) {
-          const status = ['candidate', 'confirmed', 'rejected'].includes(row.status) ? row.status : 'candidate';
-          this.db.prepare(`INSERT INTO slang (id, content, meaning, usage, example, risk, status, source,
-            count, sources, evidence, created, updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-            .run(randomUUID(), term, String(row.meaning ?? ''), String(row.usage ?? ''), String(row.example ?? ''),
-              String(row.risk ?? ''), status, String(row.source ?? 'import'),
-              Math.max(1, Number(row.count) || 1), JSON.stringify(unique(row.sources)),
-              JSON.stringify(unique(row.evidence)), Number(row.created) || now, now);
-          added += 1;
-          continue;
-        }
-        this.db.prepare(`UPDATE slang SET meaning=?, usage=?, example=?, risk=?, count=?,
-          sources=?, evidence=?, updated=? WHERE id=?`)
-          .run(existing.meaning || String(row.meaning ?? ''), existing.usage || String(row.usage ?? ''),
-            existing.example || String(row.example ?? ''), existing.risk || String(row.risk ?? ''),
-            Math.max(Number(existing.count) || 1, Number(row.count) || 1),
-            JSON.stringify(unique([...parseArray(existing.sources), ...unique(row.sources)])),
-            JSON.stringify(unique([...parseArray(existing.evidence), ...unique(row.evidence)])), now, existing.id);
-        merged += 1;
-      }
-      return { added, merged };
-    });
-  }
-  // Capacity ceiling. Trim lowest-keep-priority first: an unconfirmed, rarely
-  // seen, stale term goes before a confirmed one.
-  trimSlang(cap = 2000) {
-    const limit = Math.max(1, Number(cap) || 2000);
-    const total = this.countSlang().total;
-    if (total <= limit) return 0;
-    return this.db.prepare(`DELETE FROM slang WHERE id IN
-      (SELECT id FROM slang ORDER BY (status='confirmed') ASC, count ASC, updated ASC LIMIT ?)`)
-      .run(total - limit).changes;
-  }
+  // Slang persistence (V2 · Phase 4) is mixed in from src/store-slang.js,
+  // which Store extends, so the whole library is still reached as
+  // store.listSlang(...) and friends. It moved out when per-group scoping
+  // pushed this file past the project size ceiling.
   // --- Token samples (V2 · Phase 5) ----------------------------------------
   // Global monotonic turn id, allocated in SQLite so it never restarts at 1.
   nextTurn() {

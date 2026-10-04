@@ -243,6 +243,15 @@ window.slangOpen = async id => {
 };
 window.slangClose = () => { slangState.entry = null; slangState.patch = {}; render(); };
 window.slangEdit = (id, field, value) => { (slangState.patch[id] ||= {})[field] = value; };
+window.slangScopeSave = async id => {
+  const boxes = [...document.querySelectorAll('[data-scope-group]')];
+  const groups = boxes.filter(b => b.checked).map(b => b.dataset.scopeGroup);
+  try {
+    await post('/api/slang/scopes', { id, groups });
+    slangSet('已保存词条的生效群。');
+  } catch (error) { slangSet(reason(error), true); }
+  render();
+};
 window.slangSave = async id => {
   const patch = slangState.patch[id] || {};
   if (!Object.keys(patch).length) { slangSet('没有改动。'); render(); return; }
@@ -296,6 +305,50 @@ window.slangImportFile = async input => {
   render();
 };
 
+// --- 按群特异化 ---
+// 群设置页只按动作保存，不自动轮询：下拉与输入框会因定时刷新而重置。
+const groupState = { notice: '', bad: false };
+const groupSet = (text, bad = false) => { groupState.notice = text; groupState.bad = bad; };
+window.groupPersona = async (group, value) => {
+  try {
+    await post('/api/groups/config', { group, subsystem: 'persona', name: value === '__inherit__' ? null : value });
+    groupSet('已保存人格选择。');
+  } catch (error) { groupSet(reason(error), true); }
+  render();
+};
+window.groupSocialToggle = async (group, enabled) => {
+  try { await post('/api/groups/config', { group, subsystem: 'social', enabled }); groupSet('已保存仿真开关。'); }
+  catch (error) { groupSet(reason(error), true); }
+  render();
+};
+window.groupSocialSave = async group => {
+  try {
+    await post('/api/groups/config', { group, subsystem: 'social',
+      threshold: Number($('#g-threshold-' + group).value),
+      cooldownSeconds: Number($('#g-cooldown-' + group).value),
+      dailyLimit: Number($('#g-daily-' + group).value),
+    });
+    groupSet('已保存仿真参数。');
+  } catch (error) { groupSet(reason(error), true); }
+  render();
+};
+window.groupSocialInherit = async (group, field) => {
+  try { await post('/api/groups/config', { group, subsystem: 'social', [field]: null }); groupSet('已恢复继承全局。'); }
+  catch (error) { groupSet(reason(error), true); }
+  render();
+};
+window.groupSlangToggle = async (group, enabled) => {
+  try { await post('/api/groups/config', { group, subsystem: 'slang', enabled }); groupSet('已保存黑话开关。'); }
+  catch (error) { groupSet(reason(error), true); }
+  render();
+};
+window.groupReset = async group => {
+  if (!window.confirm(`恢复群 ${group} 的人格 / 仿真 / 黑话覆盖为「继承全局」？`)) return;
+  try { await post('/api/groups/config', { group, subsystem: 'reset' }); groupSet('已恢复该群默认。'); }
+  catch (error) { groupSet(reason(error), true); }
+  render();
+};
+
 
 async function render() {
   try { main.innerHTML = await pages[page](); }
@@ -303,8 +356,8 @@ async function render() {
 }
 function schedule() {
   clearInterval(timer);
-  // 人格页与仿真/黑话页保存着可编辑字段，轮询会覆盖输入：这几页只在动作或手动刷新时重绘。
-  if (page === 'personas' || page === 'social' || page === 'slang') return;
+  // 人格页与仿真/黑话/群设置页保存着可编辑字段，轮询会覆盖输入：这几页只在动作或手动刷新时重绘。
+  if (page === 'personas' || page === 'social' || page === 'slang' || page === 'groups') return;
   timer = setInterval(() => { if (!document.hidden) render(); }, 3000);
 }
 document.querySelectorAll('nav a').forEach(link => {

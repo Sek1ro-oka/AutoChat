@@ -43,7 +43,8 @@ export function parseEvent(event, config, now = Date.now()) {
   if (!group && !modelText && !images.length) return null;
   const scope = group ? `group:${event.group_id}` : 'private';
   return {
-    user, group, text, modelText, images, mentionedBot, commandSegmentsValid, groupCommandText, scope, key: `${scope}:${user}`,
+    user, group, groupId: group ? String(event.group_id) : null,
+    text, modelText, images, mentionedBot, commandSegmentsValid, groupCommandText, scope, key: `${scope}:${user}`,
     eventKey: `${config.botId}:${scope}:${user}:${event.message_id}`,
     target: group ? { group_id: Number(event.group_id) } : { user_id: Number(user) },
     action: group ? 'send_group_msg' : 'send_private_msg',
@@ -117,17 +118,22 @@ export class Bot {
   // message; the behaviour layer stays a startup snapshot. Without a loader this
   // returns `config.systemPrompt`, i.e. exactly the pre-Phase-2 behaviour.
   //
+  // Per-group specialisation: a group may pin its own card, so the resolution is
+  // asked for this message's group id (null in a private chat, which always
+  // follows the global selection).
+  //
   // The slang table (Phase 4) is appended for group turns only — a private chat
   // has no group vocabulary — and it is read fresh every turn so confirming a
-  // term in the console reaches the next message. Absent the module, this is
+  // term in the console reaches the next message. Only terms that apply to this
+  // group are included (see docs/slang.md). Absent the module, this is
   // byte-for-byte the old prompt.
   systemPrompt(message = null) {
     let base = this.config.systemPrompt;
     if (this.personas) {
-      try { base = this.personas.resolve(); }
+      try { base = this.personas.resolve(message?.groupId ?? null); }
       catch { this.log('persona_failed'); }
     }
-    return withSlang(base, this.slang, { grouped: Boolean(message?.group) });
+    return withSlang(base, this.slang, { grouped: Boolean(message?.group), group: message?.groupId ?? null });
   }
   async reply(message, text, send, alive) {
     if (!alive()) return false;
