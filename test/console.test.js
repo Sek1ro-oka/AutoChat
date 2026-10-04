@@ -101,6 +101,15 @@ test('unknown api routes 404 and the shell page needs no token', async t => {
   const html = await page.text();
   assert.match(html, /AutoChat 控制台/);
   assert.match(html, /data-page="social"/, 'the simulation page is reachable from the nav');
+  assert.match(html, /<script src="app\.js"><\/script>/, 'the shell loads its logic from its own file');
+  // The script asset is served without a token: it is code, not data, and the
+  // browser cannot attach a header to its own <script> fetch.
+  const app = await fetch(`${base}/app.js`);
+  assert.equal(app.status, 200);
+  assert.match(app.headers.get('content-type'), /javascript/);
+  assert.match(await app.text(), /autochat\.console\.token/);
+  assert.equal((await fetch(`${base}/../src/config.js`)).status, 404, 'no path traversal out of public/');
+  assert.equal((await fetch(`${base}/app.js.bak`)).status, 404);
 });
 
 test('credentials never appear in console responses', async t => {

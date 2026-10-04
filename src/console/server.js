@@ -23,6 +23,11 @@ import { readLogs } from './logs.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const INDEX_PATH = join(HERE, 'public', 'index.html');
+// Whitelisted shell assets. The page logic lives in its own file so neither
+// file has to grow past the project's 400-line ceiling as pages are added.
+const ASSETS = new Map([
+  ['/app.js', ['public/app.js', 'text/javascript; charset=utf-8']],
+]);
 const TOKEN_HEADER = 'x-console-token';
 const MAX_BODY_BYTES = 128 * 1024;
 
@@ -151,6 +156,14 @@ export function createConsole({
     const { pathname } = url;
     if (pathname === '/' || pathname === '/index.html') {
       try { send(res, 200, readFileSync(INDEX_PATH, 'utf8'), 'text/html; charset=utf-8'); }
+      catch { send(res, 500, { error: 'console_assets_missing' }); }
+      return;
+    }
+    const asset = ASSETS.get(pathname);
+    if (asset) {
+      // No token here on purpose: this is static code, not data. Requiring one
+      // would break the browser's own <script> fetch, which cannot set headers.
+      try { send(res, 200, readFileSync(join(HERE, asset[0]), 'utf8'), asset[1]); }
       catch { send(res, 500, { error: 'console_assets_missing' }); }
       return;
     }
