@@ -92,7 +92,16 @@ export function loadConfig(env = process.env) {
     antiSpamWindowMs: integer('GROUP_ANTI_SPAM_WINDOW_SECONDS', 10, 1, 300) * 1000,
     antiSpamMuteSeconds: integer('GROUP_ANTI_SPAM_MUTE_MINUTES', 5, 1, 43200) * 60,
     antiSpamReply: env.GROUP_ANTI_SPAM_REPLY === undefined ? '你话太多了！' : env.GROUP_ANTI_SPAM_REPLY.trim(),
+    consoleEnabled: (env.CONSOLE_ENABLED || 'false').trim() === 'true',
+    consolePort: integer('CONSOLE_PORT', 3200, 1024, 65535),
+    consoleToken: env.CONSOLE_TOKEN?.trim() || null,
   };
+  if (!['true', 'false'].includes((env.CONSOLE_ENABLED || 'false').trim())) {
+    throw new Error('CONSOLE_ENABLED 必须是 true 或 false');
+  }
+  if (config.consoleToken !== null && (config.consoleToken.length < 16 || !/^[\x21-\x7e]+$/.test(config.consoleToken))) {
+    throw new Error('CONSOLE_TOKEN 至少 16 位且只能使用可见 ASCII 字符');
+  }
   if (!['true', 'false'].includes((env.WEB_SEARCH_AUTO_ENABLED || 'false').trim())) throw new Error('WEB_SEARCH_AUTO_ENABLED 必须是 true 或 false');
   if (!['true', 'false'].includes((env.GROUP_ADMIN_COMMANDS_ENABLED || 'false').trim())) throw new Error('GROUP_ADMIN_COMMANDS_ENABLED 必须是 true 或 false');
   if (!['true', 'false'].includes((env.GROUP_ANTI_SPAM_ENABLED || 'false').trim())) throw new Error('GROUP_ANTI_SPAM_ENABLED 必须是 true 或 false');

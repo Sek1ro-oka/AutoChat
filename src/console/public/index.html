@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoChat 控制台</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #ffffff; --panel-2: #eef0f4; --text: #1c1f24; --muted: #6b7280;
+    --border: #dfe3e9; --accent: #2f6fed; --ok: #16a34a; --warn: #d97706; --bad: #dc2626;
+    --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.10);
+  }
+  :root[data-theme="dark"] {
+    --bg: #14161a; --panel: #1c1f26; --panel-2: #23272f; --text: #e8eaee; --muted: #97a0ad;
+    --border: #2e333c; --accent: #5b8dff; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 1px 3px rgba(0,0,0,.5);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14161a; --panel: #1c1f26; --panel-2: #23272f; --text: #e8eaee; --muted: #97a0ad;
+      --border: #2e333c; --accent: #5b8dff; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 1px 3px rgba(0,0,0,.5);
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+    background: var(--panel); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  .pill { font-size: 12px; padding: 2px 9px; border-radius: 999px; background: var(--panel-2);
+    color: var(--muted); border: 1px solid var(--border); }
+  .pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+  .pill.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
+  .spacer { flex: 1; }
+  button { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 5px 12px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .layout { display: grid; grid-template-columns: 176px 1fr; min-height: calc(100vh - 53px); }
+  nav { border-right: 1px solid var(--border); padding: 12px 8px; background: var(--panel); }
+  nav a { display: block; padding: 8px 12px; border-radius: 8px; color: var(--muted);
+    text-decoration: none; cursor: pointer; margin-bottom: 2px; }
+  nav a:hover { background: var(--panel-2); color: var(--text); }
+  nav a.active { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); font-weight: 600; }
+  main { padding: 20px; overflow: auto; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 16px; box-shadow: var(--shadow); }
+  .card h3 { margin: 0 0 8px; font-size: 12px; color: var(--muted); font-weight: 600;
+    text-transform: uppercase; letter-spacing: .6px; }
+  .metric { font-size: 24px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .metric small { font-size: 13px; font-weight: 400; color: var(--muted); margin-left: 4px; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  tbody tr:hover { background: var(--panel-2); }
+  code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; font-size: 12.5px; }
+  pre { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px; overflow: auto; max-height: 60vh; margin: 0; }
+  .section { margin-bottom: 18px; }
+  .section > h2 { font-size: 14px; margin: 0 0 10px; }
+  .muted { color: var(--muted); }
+  .empty { color: var(--muted); padding: 18px; text-align: center; }
+  .error { color: var(--bad); padding: 18px; text-align: center; }
+  .bar { height: 8px; border-radius: 999px; background: var(--panel-2); overflow: hidden; }
+  .bar > span { display: block; height: 100%; background: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>AutoChat 控制台</h1>
+  <span class="pill" id="conn">连接中…</span>
+  <span class="pill" id="stamp"></span>
+  <span class="spacer"></span>
+  <button id="theme" title="切换主题">主题</button>
+  <button id="refresh">刷新</button>
+</header>
+<div class="layout">
+  <nav>
+    <a data-page="overview" class="active">运行总览</a>
+    <a data-page="sessions">会话</a>
+    <a data-page="charges">花费</a>
+    <a data-page="logs">日志</a>
+    <a data-page="config">配置</a>
+  </nav>
+  <main id="main"><div class="empty">加载中…</div></main>
+</div>
+<script>
+const KEY = 'autochat.console.token';
+const params = new URLSearchParams(location.search);
+if (params.get('token')) { localStorage.setItem(KEY, params.get('token')); history.replaceState(null, '', location.pathname); }
+const token = localStorage.getItem(KEY) || '';
+const main = document.getElementById('main');
+const conn = document.getElementById('conn');
+const stamp = document.getElementById('stamp');
+let page = 'overview', timer = null;
+
+const themeRoot = document.documentElement;
+const mq = window.matchMedia('(prefers-color-scheme: dark)');
+const saved = localStorage.getItem('autochat.console.theme');
+if (saved) themeRoot.setAttribute('data-theme', saved);
+const effectiveTheme = () => themeRoot.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light');
+document.getElementById('theme').onclick = () => {
+  const next = effectiveTheme() === 'dark' ? 'light' : 'dark';
+  themeRoot.setAttribute('data-theme', next);
+  localStorage.setItem('autochat.console.theme', next);
+};
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const cny = micro => '¥' + (Number(micro || 0) / 1e6).toFixed(4);
+const num = n => Number(n || 0).toLocaleString('zh-CN');
+const time = value => value ? new Date(Number(value)).toLocaleString('zh-CN', { hour12: false }) : '—';
+const dur = ms => {
+  const s = Math.floor(Number(ms || 0) / 1000);
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${d}天${h}小时` : h ? `${h}小时${m}分` : `${m}分${s % 60}秒`;
+};
+
+async function api(path) {
+  const res = await fetch(path, { headers: { 'x-console-token': token } });
+  if (res.status === 401) throw new Error('未授权：请用带 ?token= 的地址打开控制台');
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return res.json();
+}
+
+const pages = {
+  async overview() {
+    const d = await api('/api/summary');
+    conn.textContent = d.connection.ready ? '已连接' : '未连接';
+    conn.className = 'pill ' + (d.connection.ready ? 'ok' : 'bad');
+    stamp.textContent = new Date(d.generatedAt).toLocaleTimeString('zh-CN', { hour12: false });
+    const b = d.budget, usedPct = b.limitMicro ? Math.min(100, (b.usedMicro + b.heldMicro) / b.limitMicro * 100) : 0;
+    return `
+      <div class="section grid">
+        <div class="card"><h3>今日已用</h3><div class="metric">${cny(b.usedMicro)}<small>/ ${cny(b.limitMicro)}</small></div>
+          <div class="bar" style="margin-top:10px"><span style="width:${usedPct.toFixed(1)}%"></span></div></div>
+        <div class="card"><h3>预留中</h3><div class="metric">${cny(b.heldMicro)}</div></div>
+        <div class="card"><h3>剩余</h3><div class="metric">${cny(b.remainingMicro)}</div></div>
+        <div class="card"><h3>队列深度</h3><div class="metric">${d.queue.depth}<small>条</small></div></div>
+      </div>
+      <div class="section card">
+        <h3>运行状态</h3>
+        <dl class="kv">
+          <dt>运行时长</dt><dd>${dur(d.uptimeMs)}</dd>
+          <dt>模型</dt><dd>${esc(d.model.active)}（${esc(d.model.name)}）</dd>
+          <dt>回复</dt><dd>${d.switches.enabled ? '启用' : '停止'}　群回复：${d.switches.groupEnabled ? '启用' : '关闭'}</dd>
+          <dt>联网搜索</dt><dd>${d.switches.webSearch ? '启用' : '关闭'}　图片识别：${d.switches.vision ? '启用' : '关闭'}</dd>
+          <dt>防刷屏</dt><dd>${d.switches.antiSpam ? '启用' : '关闭'}　群管理：${d.switches.groupManagement ? '启用' : '关闭'}</dd>
+          <dt>账期</dt><dd>${esc(b.day)}（香港时间）</dd>
+          <dt>发送失败计数</dt><dd>${d.queue.sendFailures}</dd>
+        </dl>
+      </div>
+      <div class="section card">
+        <h3>参与者</h3>
+        ${d.participants.length ? `<table><thead><tr><th>名称</th><th>异常次数</th><th>最近错误</th></tr></thead><tbody>
+          ${d.participants.map(p => `<tr><td>${esc(p.name)}</td><td>${p.failures}</td><td class="muted">${esc(p.lastError || '—')}</td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty">无</div>'}
+      </div>
+      <div class="section card">
+        <h3>群与清理时间</h3>
+        ${d.groups.length ? `<table><thead><tr><th>群号</th><th>下次清理</th></tr></thead><tbody>
+          ${d.groups.map(g => `<tr><td>${esc(g.id)}</td><td>${time(g.due)}</td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty">未配置群</div>'}
+      </div>`;
+  },
+  async sessions() {
+    const d = await api('/api/sessions');
+    stamp.textContent = `${d.sessions.length} 个会话`;
+    if (!d.sessions.length) return '<div class="empty">暂无会话</div>';
+    return `<div class="card"><table><thead><tr><th>会话键</th><th>范围</th><th>条数</th><th>最后更新</th></tr></thead><tbody>
+      ${d.sessions.map(s => `<tr><td><code>${esc(s.key)}</code></td><td class="muted">${esc(s.scope)}</td>
+        <td>${num(s.items)}</td><td class="muted">${time(s.updated)}</td></tr>`).join('')}
+    </tbody></table></div>`;
+  },
+  async charges() {
+    const d = await api('/api/charges?days=30');
+    stamp.textContent = `${d.days.length} 天`;
+    if (!d.days.length) return '<div class="empty">暂无记账</div>';
+    return `<div class="card"><table><thead><tr><th>账期</th><th>已结算</th><th>预留中</th><th>调用数</th></tr></thead><tbody>
+      ${d.days.map(r => `<tr><td>${esc(r.day)}</td><td>${cny(r.used)}</td>
+        <td>${cny(r.held)}</td><td>${num(r.calls)}</td></tr>`).join('')}
+    </tbody></table></div>`;
+  },
+  async logs() {
+    const d = await api('/api/logs?limit=150');
+    stamp.textContent = `最近 ${d.logs.length} 条`;
+    if (!d.logs.length) return '<div class="empty">暂无日志</div>';
+    return `<div class="card"><table><thead><tr><th>时间</th><th>事件</th></tr></thead><tbody>
+      ${d.logs.map(l => `<tr><td class="muted">${esc(l.time || '—')}</td><td><code>${esc(l.event)}</code></td></tr>`).join('')}
+    </tbody></table></div>`;
+  },
+  async config() {
+    const d = await api('/api/config');
+    stamp.textContent = '密钥已打码';
+    return `<div class="section card"><h3>凭据（已打码）</h3>
+      <dl class="kv">${Object.entries(d.credentials).map(([k, v]) => `<dt>${esc(k)}</dt><dd><code>${esc(v)}</code></dd>`).join('')}</dl></div>
+      <div class="section card"><h3>生效配置</h3><pre>${esc(JSON.stringify(d.config, null, 2))}</pre></div>
+      <div class="section card"><h3>模型配置</h3><pre>${esc(JSON.stringify(d.modelProfiles, null, 2))}</pre></div>`;
+  }
+};
+
+async function render() {
+  try { main.innerHTML = await pages[page](); }
+  catch (error) { main.innerHTML = `<div class="error">${esc(error.message)}</div>`; }
+}
+function schedule() {
+  clearInterval(timer);
+  timer = setInterval(() => { if (!document.hidden) render(); }, 3000);
+}
+document.querySelectorAll('nav a').forEach(link => {
+  link.onclick = () => {
+    document.querySelectorAll('nav a').forEach(x => x.classList.remove('active'));
+    link.classList.add('active'); page = link.dataset.page; render(); schedule();
+  };
+});
+document.getElementById('refresh').onclick = render;
+if (!token) main.innerHTML = '<div class="error">缺少访问令牌。请使用启动日志中带 ?token= 的地址打开控制台。</div>';
+else { render(); schedule(); }
+</script>
+</body>
+</html>
