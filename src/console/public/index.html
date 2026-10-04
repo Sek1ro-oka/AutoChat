@@ -67,6 +67,14 @@
   .error { color: var(--bad); padding: 18px; text-align: center; }
   .bar { height: 8px; border-radius: 999px; background: var(--panel-2); overflow: hidden; }
   .bar > span { display: block; height: 100%; background: var(--accent); }
+  .seg { display: inline-flex; gap: 4px; }
+  .seg button { padding: 3px 10px; font-size: 12px; }
+  .seg button.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; }
+  svg.chart { width: 100%; height: auto; display: block; }
+  tbody tr.click { cursor: pointer; }
+  tbody tr.sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
 </style>
 </head>
 <body>
@@ -82,7 +90,7 @@
   <nav>
     <a data-page="overview" class="active">运行总览</a>
     <a data-page="sessions">会话</a>
-    <a data-page="charges">花费</a>
+    <a data-page="cost">花费与令牌</a>
     <a data-page="logs">日志</a>
     <a data-page="config">配置</a>
   </nav>
@@ -118,6 +126,50 @@ const dur = ms => {
   const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
   return d ? `${d}天${h}小时` : h ? `${h}小时${m}分` : `${m}分${s % 60}秒`;
 };
+
+// --- 花费与令牌看板的状态与渲染辅助 ---
+let costRange = '24h', costSession = '';
+window.setRange = value => { costRange = value; costSession = ''; render(); };
+window.openSession = value => { costSession = costSession === value ? '' : value; render(); };
+
+const slotLabel = (t, unit) => new Date(Number(t)).toLocaleString('zh-CN', { hour12: false,
+  month: '2-digit', day: '2-digit', ...(unit === 'hour' ? { hour: '2-digit' } : {}) });
+
+// 峰谷堆叠柱：高峰在下、空闲在上，纵轴按所选区间的最大值自适应。
+function chart(d) {
+  const W = 680, H = 190, PAD = 26, INNER = H - PAD * 2;
+  const max = Math.max(1, ...d.series.map(p => p.totalMicro));
+  const bw = (W - PAD * 2) / d.series.length;
+  const bar = Math.max(1, Math.min(bw * 0.74, bw - 1));
+  const bars = d.series.map((p, i) => {
+    const x = PAD + i * bw + (bw - bar) / 2;
+    const peakH = p.peakMicro / max * INNER, offH = p.offMicro / max * INNER;
+    const yPeak = H - PAD - peakH;
+    const tip = `${slotLabel(p.t, d.unit)}\n花费 ${cny(p.totalMicro)}（高峰 ${cny(p.peakMicro)} · 空闲 ${cny(p.offMicro)}）\ntoken ${num(p.tokens)}，命中 ${num(p.hit)}\n调用 ${num(p.calls)} 次`;
+    return `<g><title>${esc(tip)}</title>
+      <rect x="${x.toFixed(2)}" y="${yPeak.toFixed(2)}" width="${bar.toFixed(2)}" height="${peakH.toFixed(2)}" fill="var(--accent)"/>
+      <rect x="${x.toFixed(2)}" y="${(yPeak - offH).toFixed(2)}" width="${bar.toFixed(2)}" height="${offH.toFixed(2)}" fill="var(--ok)"/>
+      <rect x="${x.toFixed(2)}" y="${PAD}" width="${bar.toFixed(2)}" height="${INNER}" fill="transparent"/></g>`;
+  }).join('');
+  const step = Math.max(1, Math.ceil(d.series.length / 6));
+  const labels = d.series.map((p, i) => i % step ? '' :
+    `<text x="${(PAD + i * bw + bw / 2).toFixed(1)}" y="${H - 7}" text-anchor="middle" font-size="10" fill="var(--muted)">${esc(slotLabel(p.t, d.unit))}</text>`).join('');
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="花费走势">
+    <line x1="${PAD}" y1="${H - PAD}" x2="${W - PAD}" y2="${H - PAD}" stroke="var(--border)"/>
+    ${bars}${labels}</svg>`;
+}
+
+const segment = r => r.peakMicro && r.offMicro ? '混合' : r.peakMicro ? '高峰' : '空闲';
+
+function turns(d) {
+  if (!d.turns.length) return `<div class="section card"><h3>逐轮明细 · <code>${esc(d.session)}</code></h3><div class="empty">该会话没有采样</div></div>`;
+  return `<div class="section card"><h3>逐轮明细 · <code>${esc(d.session)}</code>（最近 ${d.turns.length} 轮）</h3>
+    <table><thead><tr><th>轮次</th><th>时间</th><th>调用</th><th>入未命中</th><th>入命中</th><th>出</th><th>时段</th><th>花费</th></tr></thead><tbody>
+    ${d.turns.map(r => `<tr><td>${num(r.turn)}</td><td class="muted">${time(r.at)}</td><td>${num(r.calls)}</td>
+      <td>${num(r.miss)}</td><td>${num(r.hit)}</td><td>${num(r.out)}</td><td>${segment(r)}</td>
+      <td>${cny(r.totalMicro)}</td></tr>`).join('')}
+    </tbody></table></div>`;
+}
 
 async function api(path) {
   const res = await fetch(path, { headers: { 'x-console-token': token } });
@@ -175,14 +227,65 @@ const pages = {
         <td>${num(s.items)}</td><td class="muted">${time(s.updated)}</td></tr>`).join('')}
     </tbody></table></div>`;
   },
-  async charges() {
-    const d = await api('/api/charges?days=30');
-    stamp.textContent = `${d.days.length} 天`;
-    if (!d.days.length) return '<div class="empty">暂无记账</div>';
-    return `<div class="card"><table><thead><tr><th>账期</th><th>已结算</th><th>预留中</th><th>调用数</th></tr></thead><tbody>
-      ${d.days.map(r => `<tr><td>${esc(r.day)}</td><td>${cny(r.used)}</td>
-        <td>${cny(r.held)}</td><td>${num(r.calls)}</td></tr>`).join('')}
-    </tbody></table></div>`;
+  async cost() {
+    const [d, daily] = await Promise.all([api('/api/cost?range=' + costRange), api('/api/charges?days=30')]);
+    stamp.textContent = `区间 ${d.range} · ${d.series.length} 桶`;
+    const t = d.totals;
+    const pct = rate => rate === null ? '—' : (rate * 100).toFixed(1) + '%';
+    const rangeButtons = d.ranges.map(r =>
+      `<button onclick="setRange('${esc(r)}')" class="${r === d.range ? 'on' : ''}">${esc(r)}</button>`).join('');
+    const drill = costSession
+      ? await api('/api/cost/turns?limit=60&session=' + encodeURIComponent(costSession))
+      : null;
+    const price = d.pricing;
+    return `
+      <div class="section card" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <strong style="font-size:13px">时间范围</strong><span class="seg">${rangeButtons}</span>
+        <span class="spacer"></span>
+        <span class="muted" style="font-size:12px">单价（元/百万）：入未命中 ${esc(price.inputPrice ?? '—')} · 入命中 ${esc(price.cacheHitPrice ?? '按默认 1/50')} · 出 ${esc(price.outputPrice ?? '—')} · 空闲 ${(Number(price.offPeakRatio) * 100).toFixed(0)}%</span>
+      </div>
+      <div class="section grid">
+        <div class="card"><h3>区间花费</h3><div class="metric">${cny(t.totalMicro)}</div>
+          <div class="muted" style="font-size:12px">高峰 ${cny(t.peakMicro)} · 空闲 ${cny(t.offMicro)}</div></div>
+        <div class="card"><h3>累计 token</h3><div class="metric">${num(t.tokens)}</div>
+          <div class="muted" style="font-size:12px">入未命中 ${num(t.miss)} · 入命中 ${num(t.hit)} · 出 ${num(t.out)}</div></div>
+        <div class="card"><h3>缓存命中率</h3><div class="metric">${pct(t.hitRate)}</div>
+          <div class="muted" style="font-size:12px">命中 ${num(t.hit)} / 输入 ${num(t.miss + t.hit)}</div></div>
+        <div class="card"><h3>平均每轮</h3><div class="metric">${cny(t.avgTurnMicro)}</div>
+          <div class="muted" style="font-size:12px">${num(t.turns)} 轮 · ${num(t.calls)} 次调用 · 每次 ${cny(t.avgCallMicro)}</div></div>
+      </div>
+      <div class="section card">
+        <h3>花费走势（每${d.unit === 'hour' ? '小时' : '天'}）</h3>
+        <div class="legend"><span><i class="swatch" style="background:var(--accent)"></i>高峰</span>
+          <span><i class="swatch" style="background:var(--ok)"></i>空闲</span>
+          <span>纵轴按区间峰值自适应；条形悬停可看明细</span></div>
+        ${chart(d)}
+      </div>
+      <div class="section card">
+        <h3>按会话</h3>
+        ${d.sessions.length ? `<table><thead><tr><th>会话</th><th>轮数</th><th>调用</th><th>入未命中</th><th>入命中</th><th>出</th><th>命中率</th><th>花费</th><th>最后</th></tr></thead><tbody>
+          ${d.sessions.map(s => `<tr class="click ${s.session === costSession ? 'sel' : ''}" onclick="openSession(${esc(JSON.stringify(s.session))})">
+            <td><code>${esc(s.session)}</code></td><td>${num(s.turns)}</td><td>${num(s.calls)}</td>
+            <td>${num(s.miss)}</td><td>${num(s.hit)}</td><td>${num(s.out)}</td>
+            <td>${pct(s.hitRate)}</td><td>${cny(s.totalMicro)}</td><td class="muted">${time(s.last)}</td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty">所选区间内没有采样</div>'}
+      </div>
+      ${drill ? turns(drill) : '<div class="section card muted" style="font-size:12px">点击任意会话行可下钻到逐轮明细。</div>'}
+      <div class="section card">
+        <h3>最近采样</h3>
+        ${d.recent.length ? `<table><thead><tr><th>时间</th><th>会话</th><th>轮/序</th><th>时段</th><th>入未命中</th><th>入命中</th><th>出</th><th>花费</th></tr></thead><tbody>
+          ${d.recent.map(r => `<tr><td class="muted">${time(r.at)}</td><td><code>${esc(r.session)}</code></td>
+            <td>${num(r.turn)} / ${num(r.seq)}</td><td>${r.bucket === 'peak' ? '高峰' : '空闲'}</td>
+            <td>${num(r.miss)}</td><td>${num(r.hit)}</td><td>${num(r.out)}</td><td>${cny(r.costMicro)}</td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty">还没有采样。开启机器人与模型对话后这里会出现逐次记录。</div>'}
+      </div>
+      <div class="section card">
+        <h3>按账期（预算账本：预留与结算）</h3>
+        ${daily.days.length ? `<table><thead><tr><th>账期</th><th>已结算</th><th>预留中</th><th>调用数</th></tr></thead><tbody>
+          ${daily.days.map(r => `<tr><td>${esc(r.day)}</td><td>${cny(r.used)}</td>
+            <td>${cny(r.held)}</td><td>${num(r.calls)}</td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty">暂无记账</div>'}
+      </div>`;
   },
   async logs() {
     const d = await api('/api/logs?limit=150');

@@ -11,7 +11,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSummary, buildSessions, buildCharges, buildConfig } from './api.js';
+import { buildSummary, buildSessions, buildCharges, buildConfig, buildCost, buildCostTurns } from './api.js';
 import { readLogs } from './logs.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -67,6 +67,13 @@ export function createConsole({
     '/api/charges': (url) => buildCharges({ store, days: Number(url.searchParams.get('days')) || 30 }),
     '/api/logs': (url) => ({ logs: readLogs(logDirectory, Number(url.searchParams.get('limit')) || 120) }),
     '/api/config': () => buildConfig({ config }),
+    '/api/cost': (url) => buildCost({
+      config, store, range: url.searchParams.get('range') ?? '24h', now: now(),
+    }),
+    '/api/cost/turns': (url) => buildCostTurns({
+      config, store, session: url.searchParams.get('session') ?? '',
+      limit: Number(url.searchParams.get('limit')) || 100,
+    }),
   };
 
   const handle = (req, res) => {

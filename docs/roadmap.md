@@ -309,7 +309,7 @@ personas/
 | Phase 2 | 人格两层提示词 | Phase 1 | 待开始 |
 | Phase 3 | 拟人化群友（一代仿真） | Phase 1、2 | 待开始 |
 | Phase 4 | 黑话词库 | Phase 3 | 待开始 |
-| Phase 5 | 令牌与花费看板 | Phase 1 | 待开始 |
+| Phase 5 | 令牌与花费看板 | Phase 1 | ✅ 2026-10-04 |
 | Phase 6 | Agent 模式（可选） | Phase 0~5 | 不做（后置） |
 
 ### 进度记录
@@ -318,9 +318,12 @@ personas/
   - 与本文档的偏差：`SOCIAL_ENABLED` 等仿真开关未在 Phase 0 引入，改由 Phase 3 与其参数一同加入，避免出现长期无人使用的配置项。
 - **2026-10-04 · Phase 1 完成**：新增 `src/console/`（`server.js` 只绑 `127.0.0.1` + 令牌鉴权、`api.js` 纯函数数据组装与凭据打码、`logs.js` 事件日志读取、`public/index.html` 单文件前端含深浅主题与 5 页）；文档见 [控制台说明](console.md)。
   - 控制台**只读**；唯一写操作是首次生成 `runtime/console-token.txt`。
+- **2026-10-04 · Phase 5 完成**：新增 `src/ledger.js`（峰谷判定 / 缓存命中拆分 / 报表计价 / 采样器）+ `src/holidays.js`（2026 法定节假日表）；`store.js` 增加 `counters` 表与 `nextTurn()`、`noteSample()`、`costTotals/costSeries/costSessions/costTurns/recentSamples/pruneSamples`；`bot.js` 每轮对话惰性分配 turn 号并在每次模型调用成功后即时落盘采样；控制台新增「花费与令牌」页与 `/api/cost`、`/api/cost/turns`。文档见 [令牌与花费看板](cost.md)。测试从 113 增至 126，全绿。
+  - **与本文档的偏差（已修正）**：§5 写的幂等键 `(session, turn, seq)` 直接用进程内 turn 计数会踩坑 —— 重启后 turn 从 1 重来会覆盖上一轮的历史采样。实际实现把 turn 号交给 SQLite 的 `counters` 表分配，跨重启单调，键永不重复。
+  - **另一处口径澄清**：qq-bridge 的「以服务端 totals 为权威值 + 基线增量」是对着账号级总量接口做的；本项目服务商只返回单次调用的 `usage`，因此等价实现是「逐次原样落盘 + SQL 聚合 + 进程内零累加器」，不设基线。
 
 **建议推进顺序**：0 → 1 → 5 → 2 → 3 → 4。
-（先把"看得见"做完：控制台与花费看板；再做"像人"：人格与仿真。Phase 5 只依赖 Phase 1，可与 Phase 2/3 并行。）
+（「看得见」这条线（控制台 + 花费看板）已收尾；下一步转「像人」：Phase 2 人格分层 → Phase 3 拟人化仿真 → Phase 4 黑话词库。）
 
 ---
 
