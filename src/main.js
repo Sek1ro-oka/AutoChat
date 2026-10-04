@@ -8,6 +8,7 @@ import { Ledger } from './ledger.js';
 import { Personas } from './personas.js';
 import { Social } from './social/engine.js';
 import { Slang } from './social/slang.js';
+import { StickerLib } from './sticker-lib.js';
 import { DEFAULT_PERSONA } from './persona.js';
 import { createLogger } from './logger.js';
 import { createConsole } from './console/server.js';
@@ -51,11 +52,15 @@ const model = new Model(config);
 // extraction additionally needs SLANG_AUTO_EXTRACT. Confirmed terms are appended
 // to group prompts by Bot and Social — see docs/slang.md.
 const slang = new Slang({ config, store, model, ledger, log });
-const bot = new Bot(config, store, model, { log, ledger, personas, slang });
+// Sticker library (Phase 6). Always constructed so the console can read and
+// review it; collection and sending are both gated on the enable switch. A
+// confirmed sticker may be sent by either the answering bot or the simulation.
+const stickers = new StickerLib({ config, store, log });
+const bot = new Bot(config, store, model, { log, ledger, personas, slang, stickers });
 // Social simulation (Phase 3). Always constructed, even when disabled, so the
 // console can turn it on at runtime; `observe` returns immediately while off and
 // writes nothing, so a stock `.env` keeps group messages out of the database.
-const social = new Social({ config, store, model, ledger, personas, slang, log });
+const social = new Social({ config, store, model, ledger, personas, slang, stickers, log });
 // Every OneBot event fans out through the runtime. The answering bot handles what
 // addresses it; the simulation handles everything else in the same groups.
 const runtime = new Runtime({ log });
@@ -76,7 +81,7 @@ log('service_started');
 
 let consoleServer = null;
 if (config.consoleEnabled) {
-  consoleServer = createConsole({ config, store, bot, transport, runtime, personas, social, slang, log, startedAt });
+  consoleServer = createConsole({ config, store, bot, transport, runtime, personas, social, slang, stickers, log, startedAt });
   consoleServer.start()
     .then(() => console.log(`AutoChat 控制台：${consoleServer.url()}`))
     .catch(error => { console.error(`控制台启动失败：${error.message}`); consoleServer = null; });

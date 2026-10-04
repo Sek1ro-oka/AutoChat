@@ -39,7 +39,7 @@ const SILENCE_MARK = '不回';
 
 export class Social {
   constructor({
-    config, store, model, ledger = null, personas = null, slang = null, log = () => {},
+    config, store, model, ledger = null, personas = null, slang = null, stickers = null, log = () => {},
     now = Date.now, random = Math.random, sleep = null,
   } = {}) {
     this.config = config;
@@ -48,6 +48,7 @@ export class Social {
     this.ledger = ledger;
     this.personas = personas;
     this.slang = slang;
+    this.stickers = stickers;
     this.log = log;
     this.now = now;
     this.random = random;
@@ -245,7 +246,15 @@ export class Social {
       try { base = this.personas.resolve(group); }
       catch { this.log('social_persona_failed'); }
     }
-    return withSlang(base, this.slang, { group });
+    base = withSlang(base, this.slang, { group });
+    // The sticker library rides along here too: an unprompted member may drop a
+    // sticker when it fits. Same block and hint as the answering path.
+    if (this.stickers?.enabled()) {
+      const block = this.stickers.block();
+      if (block) base = `${base}\n\n${block}`;
+      base = `${base}\n\n${this.stickers.hint()}`;
+    }
+    return base;
   }
 
   // Building the prompt (history, quoting, escaping) lives in prompt.js — it is
@@ -289,16 +298,21 @@ export class Social {
     if (actual === null) this.store.uncertain(reservation);
     else { this.store.settle(reservation, actual); this.sample(sessionKey, result.usage); }
 
-    const text = String(result.text ?? '').trim();
-    if (!text || text === SILENCE_MARK) { this.log('social_declined'); return false; }
+    let raw = String(result.text ?? ''); let stickerIds = [];
+    if (this.stickers?.enabled()) {
+      const parsed = this.stickers.parseMarkers(raw);
+      raw = parsed.text; stickerIds = parsed.ids;
+    }
+    const text = raw.trim();
+    if (text === SILENCE_MARK || (!text && !stickerIds.length)) { this.log('social_declined'); return false; }
     if (this.blocked(text)) { this.log('social_blocked'); return false; }
     const { chunks, delays } = render(text, {
       max: params.maxChunks, random: this.random,
       minDelayMs: params.minDelayMs, maxDelayMs: params.maxDelayMs,
     });
-    if (!chunks.length) { this.log('social_empty'); return false; }
+    if (!chunks.length && !stickerIds.length) { this.log('social_empty'); return false; }
     const recentBotTexts = this.memory.botTexts(message.group, 3);
-    if (isRepeat(chunks.join(''), recentBotTexts)) { this.log('social_repeat'); return false; }
+    if (text && isRepeat(chunks.join(''), recentBotTexts)) { this.log('social_repeat'); return false; }
 
     let sent = 0;
     for (let index = 0; index < chunks.length; index += 1) {
@@ -315,6 +329,12 @@ export class Social {
         id: response?.message_id === undefined || response?.message_id === null ? null : String(response.message_id),
         group: message.group, user: this.config.botId, at: this.now(), text: chunks[index], fromBot: true,
       });
+    }
+    // A sticker the model asked for goes out after the text it paired with.
+    if (stickerIds.length) {
+      try {
+        sent += await this.stickers.sendByIds(stickerIds, { action: 'send_group_msg', target: { group_id: Number(message.group) } }, send);
+      } catch { this.log('social_sticker_send_failed'); }
     }
     if (!sent) return false;
 

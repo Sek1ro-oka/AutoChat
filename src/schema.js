@@ -53,6 +53,19 @@ export const SCHEMA = `
     group_id TEXT PRIMARY KEY, state TEXT NOT NULL, last_spoke_at INTEGER,
     energy REAL NOT NULL DEFAULT 0, updated INTEGER NOT NULL
   );
+  -- Sticker library (V2 · Phase 6). One row per collected picture. The id
+  -- column is the picture's own md5 when QQ supplies one, else a hash of its
+  -- URL, so the same picture collected twice never doubles up. The file column
+  -- points at the local copy under data/stickers/; empty until it downloads.
+  CREATE TABLE IF NOT EXISTS stickers (
+    id TEXT PRIMARY KEY, md5 TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '',
+    file TEXT NOT NULL DEFAULT '', desc TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '[]', source TEXT NOT NULL DEFAULT 'qq',
+    status TEXT NOT NULL DEFAULT 'candidate', seen INTEGER NOT NULL DEFAULT 0,
+    use_count INTEGER NOT NULL DEFAULT 0, last_used INTEGER NOT NULL DEFAULT 0,
+    created INTEGER NOT NULL, updated INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS stickers_status ON stickers(status);
   CREATE TABLE IF NOT EXISTS token_samples (
     turn_key TEXT PRIMARY KEY, session TEXT NOT NULL, turn INTEGER NOT NULL,
     seq INTEGER NOT NULL, at INTEGER NOT NULL, miss INTEGER NOT NULL DEFAULT 0,

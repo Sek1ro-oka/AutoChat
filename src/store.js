@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { SCHEMA } from './schema.js';
-import { SlangStore } from './store-slang.js';
+import { StickerStore } from './store-stickers.js';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -27,7 +27,7 @@ const columns = (db, table) => new Set(db.prepare(`PRAGMA table_info(${table})`)
 
 // Slang persistence lives in src/store-slang.js (mixed in by extending
 // `SlangStore`) so this file stays inside the project's size ceiling.
-export class Store extends SlangStore {
+export class Store extends StickerStore {
   constructor(path = ':memory:') {
     super();
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });

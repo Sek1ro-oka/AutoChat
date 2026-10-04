@@ -171,6 +171,19 @@ export function buildSlangEntry({ slang, id }) {
   return slang.entry(id);
 }
 
+// --- Sticker library (Phase 6) ---------------------------------------------
+// The list exposes notes/descriptions and counts, never picture bytes; the file
+// name is served so the page can render a thumbnail link, nothing more.
+export function buildStickers({ stickers }) {
+  if (!stickers) return { available: false };
+  return { available: true, ...stickers.describe() };
+}
+
+export function buildStickerEntry({ stickers, id }) {
+  if (!stickers) throw new Error('STICKER_UNAVAILABLE');
+  return stickers.entry(id);
+}
+
 // --- Per-group specialisation ----------------------------------------------
 // One card per served group, pulling the three specialisable subsystems into a
 // single row so the operator sees "what this group actually is" in one place.

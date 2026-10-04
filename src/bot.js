@@ -52,12 +52,13 @@ export function parseEvent(event, config, now = Date.now()) {
 }
 
 export class Bot {
-  constructor(config, store, model, { now = Date.now, log = () => {}, imageLoader = loadImages, ledger = null, personas = null, slang = null } = {}) {
+  constructor(config, store, model, { now = Date.now, log = () => {}, imageLoader = loadImages, ledger = null, personas = null, slang = null, stickers = null } = {}) {
     this.imageLoader = imageLoader;
     this.config = config; this.store = store; this.model = model;
     this.ledger = ledger;
     this.personas = personas;
     this.slang = slang;
+    this.stickers = stickers;
     this.now = now; this.log = log; this.tail = Promise.resolve(); this.queued = 0;
     this.antiSpam = new AntiSpam(config, store, now, log);
     if (config.modelProfiles && !config.modelProfiles.some(p => p.id === store.setting('active_model', 'default'))) {
@@ -133,7 +134,16 @@ export class Bot {
       try { base = this.personas.resolve(message?.groupId ?? null); }
       catch { this.log('persona_failed'); }
     }
-    return withSlang(base, this.slang, { grouped: Boolean(message?.group), group: message?.groupId ?? null });
+    base = withSlang(base, this.slang, { grouped: Boolean(message?.group), group: message?.groupId ?? null });
+    // The sticker library (Phase 6) rides along for group turns only: a private
+    // chat has no shared sticker vocabulary. The block lists what may be sent,
+    // the hint says how the model asks for one. Both are read fresh each turn.
+    if (message?.group && this.stickers?.enabled()) {
+      const block = this.stickers.block();
+      if (block) base = `${base}\n\n${block}`;
+      base = `${base}\n\n${this.stickers.hint()}`;
+    }
+    return base;
   }
   async reply(message, text, send, alive) {
     if (!alive()) return false;
@@ -166,6 +176,14 @@ export class Bot {
       this.ledger.sample(trace, usage, config, this.now());
     };
     const text = message.text;
+    // Collect group pictures into the sticker library (Phase 6), best-effort:
+    // a failed download must never abort the reply. Rule auto-collect keeps a
+    // picture once it has been seen enough times; the model may still ask to
+    // keep one with a `【偷图】` marker in its own reply, handled further down.
+    if (message.group && this.stickers?.enabled() && message.images.length) {
+      try { await this.stickers.observe(message.images[0], { call: send }); }
+      catch { this.log('sticker_ingest_failed'); }
+    }
     const admin = !message.group && message.user === config.adminId;
     const adminCommands = new Map([
       ['/停止', ['enabled', '0', '已停止模型回复。']], ['/启动', ['enabled', '1', '已启用模型回复。']],
@@ -300,12 +318,35 @@ export class Bot {
       if (!result.text) return reply('模型没有生成可用回答，未转发原始搜索摘要。');
       if (this.blocked(result.text)) return reply(RULE_REPLY);
     }
+    // The model expresses sticker intent with markers inside its own reply
+    // (there is no tool loop): `【表情:编号】` to send one, `【偷图:备注】` to keep
+    // the current picture. They are stripped before anything reaches QQ — the
+    // markers must never be sent as literal text.
+    let stickerIntent = { text: result.text, ids: [], notes: [] };
+    if (!searching && message.group && this.stickers?.enabled()) {
+      stickerIntent = this.stickers.parseMarkers(result.text);
+    }
     const sourceText = searching ? '\n\n搜索来源：\n' + result.sources.map((source, index) => `${index + 1}. ${plainSearchAnswer(source.title) || '参考资料'}\n${source.url}`).join('\n') : '';
-    const output = Array.from(result.text).slice(0, searching ? 1700 : 3500).join('');
-    const answer = (output.length < result.text.length ? `${output}\n（回复过长，已截断）` : output) + sourceText;
+    const output = Array.from(stickerIntent.text).slice(0, searching ? 1700 : 3500).join('');
+    const answer = (output.length < stickerIntent.text.length ? `${output}\n（回复过长，已截断）` : output) + sourceText;
     if (this.blocked(answer)) return reply(RULE_REPLY);
-    if (await reply(answer)) {
-      store.save(sessionKey, message.scope, [...messages.slice(1), { role: 'assistant', content: answer }]);
+    // Keep the current picture on the model's explicit request.
+    if (stickerIntent.notes.length && message.images.length) {
+      try {
+        const id = this.stickers.idOf(message.images[0]);
+        if (id) await this.stickers.confirm(id, stickerIntent.notes[0]);
+      } catch { this.log('sticker_collect_failed'); }
+    }
+    if (answer.trim()) {
+      if (await reply(answer)) {
+        store.save(sessionKey, message.scope, [...messages.slice(1), { role: 'assistant', content: answer }]);
+      }
+    }
+    // Send the sticker(s) the model asked for, after the text.
+    if (stickerIntent.ids.length) {
+      try {
+        await this.stickers.sendByIds(stickerIntent.ids, { action: message.action, target: message.target }, send);
+      } catch { this.log('sticker_send_failed'); }
     }
   }
 }

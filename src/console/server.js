@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import {
   buildSummary, buildSessions, buildCharges, buildConfig, buildCost, buildCostTurns,
   buildPersonas, buildPersonaFile, buildSocial, buildSlang, buildSlangEntry,
-  buildGroups, applyGroupPatch,
+  buildGroups, applyGroupPatch, buildStickers, buildStickerEntry,
 } from './api.js';
 import { readLogs } from './logs.js';
 import { harden } from '../permissions.js';
@@ -32,13 +32,14 @@ const INDEX_PATH = join(HERE, 'public', 'index.html');
 const ASSETS = new Map([
   ['/pages.js', ['public/pages.js', 'text/javascript; charset=utf-8']],
   ['/pages-extra.js', ['public/pages-extra.js', 'text/javascript; charset=utf-8']],
+  ['/pages-stickers.js', ['public/pages-stickers.js', 'text/javascript; charset=utf-8']],
   ['/app.js', ['public/app.js', 'text/javascript; charset=utf-8']],
 ]);
 const TOKEN_HEADER = 'x-console-token';
 const MAX_BODY_BYTES = 128 * 1024;
 // A slang backup may legitimately hold the full 2000-entry library, which is far
 // larger than any structured body the other endpoints accept.
-const BODY_LIMITS = new Map([['/api/slang/import', 2 * 1024 * 1024]]);
+const BODY_LIMITS = new Map([['/api/slang/import', 2 * 1024 * 1024], ['/api/stickers/upload', 8 * 1024 * 1024]]);
 const bodyLimit = pathname => BODY_LIMITS.get(pathname) ?? MAX_BODY_BYTES;
 
 // Persona failures are the only ones a client can cause, so they get real
@@ -56,6 +57,9 @@ const ERROR_STATUS = new Map([
   ['SLANG_LOOKUP_UNVERIFIED', 502], ['SLANG_LOOKUP_EMPTY', 502],
   // Per-group specialisation: 4xx for what the operator can fix.
   ['GROUP_PARAM_INVALID', 400], ['GROUP_NOT_FOUND', 404],
+  // The sticker library: 4xx for what the operator can fix.
+  ['STICKER_UNAVAILABLE', 503], ['STICKER_PARAM_INVALID', 400], ['STICKER_NOT_FOUND', 404],
+  ['STICKER_UPLOAD_INVALID', 400],
 ]);
 
 const equal = (a, b) => {
@@ -128,7 +132,7 @@ function readBody(req, max = MAX_BODY_BYTES) {
 }
 
 export function createConsole({
-  config, store, bot, transport, runtime, personas = null, social = null, slang = null, log = () => {},
+  config, store, bot, transport, runtime, personas = null, social = null, slang = null, stickers = null, log = () => {},
   startedAt = Date.now(), host = '127.0.0.1', port = null, logDirectory = 'logs',
 } = {}) {
   const token = resolveToken(config, log);
@@ -146,6 +150,10 @@ export function createConsole({
   const requireSlang = () => {
     if (!slang) throw new Error('SLANG_UNAVAILABLE');
     return slang;
+  };
+  const requireStickers = () => {
+    if (!stickers) throw new Error('STICKER_UNAVAILABLE');
+    return stickers;
   };
 
   const reads = {
@@ -168,6 +176,8 @@ export function createConsole({
     '/api/groups': () => buildGroups({ config, personas, social, slang, now: now() }),
     '/api/slang': () => buildSlang({ slang }),
     '/api/slang/entry': (url) => buildSlangEntry({ slang: requireSlang(), id: url.searchParams.get('id') ?? '' }),
+    '/api/stickers': () => buildStickers({ stickers }),
+    '/api/stickers/entry': (url) => buildStickerEntry({ stickers: requireStickers(), id: url.searchParams.get('id') ?? '' }),
     // The backup is served as a plain JSON document so the browser can save it
     // with one click; restoring goes through the write route below.
     '/api/slang/export': () => requireSlang().exportAll(),
@@ -206,6 +216,13 @@ export function createConsole({
     '/api/slang/delete': (url, body) => requireSlang().remove(body?.id),
     '/api/slang/lookup': (url, body) => requireSlang().lookup(body?.id),
     '/api/slang/import': (url, body) => requireSlang().importAll(body?.text),
+    // Sticker library (Phase 6). Every write re-describes the library, so the
+    // page re-renders from one response instead of chaining a read.
+    '/api/stickers/config': (url, body) => requireStickers().setParams(body ?? {}),
+    '/api/stickers/status': (url, body) => requireStickers().setStatus(body?.id, body?.status),
+    '/api/stickers/entry': (url, body) => requireStickers().edit(body?.id, body ?? {}),
+    '/api/stickers/delete': (url, body) => requireStickers().remove(body?.id),
+    '/api/stickers/upload': (url, body) => requireStickers().upload(body ?? {}),
   };
 
   async function handle(req, res) {
@@ -242,6 +259,15 @@ export function createConsole({
       }
     }
     const route = writing ? writes[pathname] : reads[pathname];
+    // Sticker thumbnails are binary, not JSON; they are served after auth (an
+    // <img> cannot set a header, so the page passes the token in the query).
+    if (pathname === '/api/stickers/image' && !writing) {
+      const img = stickers?.image(url.searchParams.get('id') ?? '');
+      if (!img) { send(res, 404, { error: 'not_found' }); return; }
+      res.writeHead(200, { 'Content-Type': img.type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(img.bytes);
+      return;
+    }
     if (!route) { send(res, 404, { error: 'not_found' }); return; }
     try {
       let body = null;

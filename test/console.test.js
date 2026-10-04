@@ -144,13 +144,13 @@ test('unknown api routes 404 and the shell page needs no token', async t => {
   assert.equal(page.status, 200);
   const html = await page.text();
   assert.match(html, /AutoChat 控制台/);
-  for (const page of ['social', 'slang']) assert.match(html, new RegExp(`data-page="${page}"`), `${page} is reachable from the nav`);
-  // Load order matters: pages.js defines the `pages` object, pages-extra.js adds
-  // the slang/groups pages to it, and app.js renders from the combined object.
-  assert.match(html, /<script src="pages\.js"><\/script>\s*<script src="pages-extra\.js"><\/script>\s*<script src="app\.js"><\/script>/);
+  for (const page of ['social', 'slang', 'stickers']) assert.match(html, new RegExp(`data-page="${page}"`), `${page} is reachable from the nav`);
+  // Load order matters: pages.js defines the `pages` object, pages-extra.js and
+  // pages-stickers.js add their data pages to it, and app.js renders the result.
+  assert.match(html, /<script src="pages\.js"><\/script>\s*<script src="pages-extra\.js"><\/script>\s*<script src="pages-stickers\.js"><\/script>\s*<script src="app\.js"><\/script>/);
   // The script assets are served without a token: they are code, not data, and
   // the browser cannot attach a header to its own <script> fetch.
-  for (const asset of ['app.js', 'pages.js', 'pages-extra.js']) {
+  for (const asset of ['app.js', 'pages.js', 'pages-extra.js', 'pages-stickers.js']) {
     const served = await fetch(`${base}/${asset}`);
     assert.equal(served.status, 200, asset);
     assert.match(served.headers.get('content-type'), /javascript/, asset);
@@ -158,6 +158,7 @@ test('unknown api routes 404 and the shell page needs no token', async t => {
   assert.match(await (await fetch(`${base}/app.js`)).text(), /autochat\.console\.token/);
   assert.match(await (await fetch(`${base}/pages.js`)).text(), /async overview\(\)/);
   assert.match(await (await fetch(`${base}/pages-extra.js`)).text(), /async slang\(\)/);
+  assert.match(await (await fetch(`${base}/pages-stickers.js`)).text(), /async stickers\(\)/);
   assert.equal((await fetch(`${base}/../src/config.js`)).status, 404, 'no path traversal out of public/');
   assert.equal((await fetch(`${base}/app.js.bak`)).status, 404);
 });

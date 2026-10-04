@@ -146,6 +146,13 @@ export function loadConfig(env = process.env) {
     // money without a human pressing anything.
     slangAutoExtract: (env.SLANG_AUTO_EXTRACT || 'false').trim() === 'true',
     slangExtractIntervalHours: number('SLANG_EXTRACT_INTERVAL_HOURS', 12, 1, 168),
+    // Sticker library (V2 · Phase 6). Off by default: with STICKER_ENABLED unset
+    // no group picture is downloaded or kept. When it is on, rule-based
+    // auto-collect keeps a picture once it has been seen STICKER_AUTO_THRESHOLD
+    // times; the model may additionally ask to keep one with a `【偷图】` marker.
+    stickerEnabled: (env.STICKER_ENABLED || 'false').trim() === 'true',
+    stickerAutoCollect: (env.STICKER_AUTO_COLLECT || 'true').trim() === 'true',
+    stickerAutoThreshold: integer('STICKER_AUTO_THRESHOLD', 2, 1, 20),
   };
   if (!['true', 'false'].includes((env.CONSOLE_ENABLED || 'false').trim())) {
     throw new Error('CONSOLE_ENABLED 必须是 true 或 false');
@@ -186,6 +193,12 @@ export function loadConfig(env = process.env) {
   }
   if (!['true', 'false'].includes((env.SLANG_AUTO_EXTRACT || 'false').trim())) {
     throw new Error('SLANG_AUTO_EXTRACT 必须是 true 或 false');
+  }
+  if (!['true', 'false'].includes((env.STICKER_ENABLED || 'false').trim())) {
+    throw new Error('STICKER_ENABLED 必须是 true 或 false');
+  }
+  if (!['true', 'false'].includes((env.STICKER_AUTO_COLLECT || 'true').trim())) {
+    throw new Error('STICKER_AUTO_COLLECT 必须是 true 或 false');
   }
   config.modelProfiles = loadModelProfiles(env, config);
   config.sendThinking = config.modelProfiles[0].sendThinking;

@@ -107,6 +107,11 @@ const PERSONA_MSG = {
   SLANG_EXTRACT_UNPARSABLE: '模型没有返回可解析的 JSON 数组，本次未写入任何词条（避免把解释文字当成"没找到"）。',
   SLANG_LOOKUP_UNVERIFIED: '没有拿到可核查的搜索来源，含义未写入。',
   SLANG_LOOKUP_EMPTY: '搜索结果为空，含义未写入。',
+  // 表情包库（Phase 6）
+  STICKER_UNAVAILABLE: '表情包模块不可用。',
+  STICKER_PARAM_INVALID: '参数不合法。',
+  STICKER_NOT_FOUND: '该图片已不存在，可能已被删除。',
+  STICKER_UPLOAD_INVALID: '上传失败：仅支持 PNG/JPG/GIF/WebP，每张最多 5MB。',
 };
 const explain = code => PERSONA_MSG[code] || code || '操作失败';
 
@@ -356,8 +361,8 @@ async function render() {
 }
 function schedule() {
   clearInterval(timer);
-  // 人格页与仿真/黑话/群设置页保存着可编辑字段，轮询会覆盖输入：这几页只在动作或手动刷新时重绘。
-  if (page === 'personas' || page === 'social' || page === 'slang' || page === 'groups') return;
+  // 人格页与仿真/黑话/群设置/表情包页保存着可编辑字段，轮询会覆盖输入：这几页只在动作或手动刷新时重绘。
+  if (page === 'personas' || page === 'social' || page === 'slang' || page === 'groups' || page === 'stickers') return;
   timer = setInterval(() => { if (!document.hidden) render(); }, 3000);
 }
 document.querySelectorAll('nav a').forEach(link => {
