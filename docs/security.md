@@ -237,7 +237,12 @@ icacls .env
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3200/
 ```
 
-第 4、5、6 条在本仓库的最近一次运行结果：**全部为空或只有测试夹具**（`1800000000` 两处是测试用假 ID；`sk-supersecret-key`、`sk-abcdefghijkl`、`local-test-token` 全部是测试里的假凭据）。
+第 3、4 条在最近一次运行中**输出为空**。第 5、6 条有命中，但全部是测试夹具：
+
+- 第 5 条命中三处 `1800000000`：`test/core.test.js`、`test/whitelist.test.js`，以及本文档引用它们的这一行（这份清单**故意写出**这些字面量，所以它会命中自己，属预期）。
+- 第 6 条命中的是 `test/console.test.js` 里的 `sk-supersecret-key` 与 `sk-abcdefghijkl`、`test/integration.test.js` 里的 `local-test-token` 与上面这段文字 —— 没有一处是真实凭据。
+
+判断标准：命中必须全部落在 `test/` 与本文档之内。**任何一个命中出现在 `src/`、`scripts/` 或 `personas/` 就是泄漏**，要立即处理。
 
 ---
 
