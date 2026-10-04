@@ -33,7 +33,7 @@ SYSTEM_PROMPT="你是一位熟悉网络梗的傲娇女生。说话简短、嘴�
 
 ## 其他常用配置
 
-电脑重启后恢复运行：双击根目录 `start.cmd`，会同时启动NapCat和AutoChat、检查账号连接；登录失效时刷新并打开二维码，扫码确认后自动重连。`restart.cmd` 仍用于仅重启AutoChat，首次安装用 `deploy.cmd`。
+电脑重启后恢复运行：双击根目录 `start.cmd`，会同时启动NapCat和AutoChat、检查账号连接；`CONSOLE_ENABLED=true` 时还会等控制台就绪并自动打开浏览器到带令牌的地址。登录失效时刷新并打开二维码，扫码确认后自动重连。`restart.cmd` 仍用于仅重启AutoChat，首次安装用 `deploy.cmd`。
 
 ### 多模型配置与私聊切换
 

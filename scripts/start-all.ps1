@@ -10,6 +10,41 @@ $nodeExecutable = Get-AutoChatNode
 if ($LASTEXITCODE -ne 0) { throw 'Fix .env first. Existing services were not stopped.' }
 & (Join-Path $PSScriptRoot 'start-napcat.ps1')
 & (Join-Path $PSScriptRoot 'start-autochat.ps1')
+# Console: when enabled, wait until it answers and hand the tokenised address to the browser,
+# so the operator never has to dig it out of the startup log again.
+function Read-EnvEntry([string]$Path, [string]$Key) {
+    $match = Select-String -LiteralPath $Path -Pattern ('^' + [regex]::Escape($Key) + '=(.*)$') -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($match) { return $match.Matches[0].Groups[1].Value.Trim() }
+    return ''
+}
+if ((Read-EnvEntry $envPath 'CONSOLE_ENABLED') -eq 'true') {
+    $consolePort = Read-EnvEntry $envPath 'CONSOLE_PORT'
+    if ($consolePort -notmatch '^\d+$') { $consolePort = '3200' }
+    $consoleToken = Read-EnvEntry $envPath 'CONSOLE_TOKEN'
+    $tokenPath = Join-Path $workspacePath 'runtime\console-token.txt'
+    $consoleReady = $false
+    for ($attempt = 0; $attempt -lt 24 -and !$consoleReady; $attempt++) {
+        if ($attempt -gt 0) { Start-Sleep -Milliseconds 500 }
+        # The token file appears a moment after startup, so keep looking while we wait.
+        if (!$consoleToken -and (Test-Path -LiteralPath $tokenPath)) {
+            $consoleToken = (Get-Content -LiteralPath $tokenPath -Raw -ErrorAction SilentlyContinue).Trim()
+        }
+        $probeUrl = "http://127.0.0.1:$consolePort/"
+        if ($consoleToken) { $probeUrl += 'api/summary?token=' + $consoleToken }
+        try {
+            Invoke-WebRequest -Uri $probeUrl -UseBasicParsing -TimeoutSec 2 | Out-Null
+            $consoleReady = $true
+        } catch { }
+    }
+    $consoleUrl = "http://127.0.0.1:$consolePort/"
+    if ($consoleToken) { $consoleUrl += '?token=' + $consoleToken }
+    if ($consoleReady) {
+        Write-Host "Console: $consoleUrl"
+        Start-Process -FilePath $consoleUrl
+    } else {
+        Write-Warning "Console is enabled but has not answered on port $consolePort yet. Open $consoleUrl once the bot is up."
+    }
+}
 & $nodeExecutable "--env-file=$envPath" (Join-Path $PSScriptRoot 'connection-check.js')
 if ($LASTEXITCODE -eq 0) {
     Write-Host 'AutoChat is ready. Closing this window will not stop the background services.'

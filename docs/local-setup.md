@@ -40,7 +40,7 @@ npm run status
 
 ## 费用与数据
 
-关机后恢复：双击项目根目录的 `start.cmd`，会校验 `.env`，启动 NapCat 和 AutoChat，并检查登录身份。已有对应进程不会重复启动。需要重新登录时会刷新并打开二维码，用机器人QQ账号扫码确认；扫码后AutoChat自动重连，无需再次启动。二维码过期可以再运行 `start.cmd`。关闭脚本窗口不影响已经启动的后台进程。
+关机后恢复：双击项目根目录的 `start.cmd`，会校验 `.env`，启动 NapCat 和 AutoChat，并检查登录身份。已有对应进程不会重复启动。`.env` 里 `CONSOLE_ENABLED=true` 时，它还会等控制台就绪并直接用默认浏览器打开带访问令牌的地址，不必再去启动日志里翻链接。需要重新登录时会刷新并打开二维码，用机器人QQ账号扫码确认；扫码后AutoChat自动重连，无需再次启动。二维码过期可以再运行 `start.cmd`。关闭脚本窗口不影响已经启动的后台进程。
 
 首次安装用 `deploy.cmd`；修改配置后重启机器人用 `restart.cmd`（只处理AutoChat）；电脑重启后或NapCat也退出时使用 `start.cmd`（处理两者）。脚本不会自动加入Windows开机启动，也无法绕过QQ扫码验证。需要开机自动启动时，可将 `start.cmd` 的快捷方式放进Windows `shell:startup` 文件夹，在登录Windows用户后执行；登录失效仍须人工扫码。
 
