@@ -194,6 +194,19 @@ export class Store {
       .all(String(groupId), since, Math.max(1, Math.min(500, Number(limit) || 100)));
   }
   pruneMessages(cutoff) { return this.db.prepare('DELETE FROM messages WHERE at < ?').run(cutoff).changes; }
+  // --- Persona mirror (V2 · Phase 2) ---------------------------------------
+  // Character cards live on disk; this table keeps the last content the console
+  // saved so a damaged card file can still be served. It is never the source of
+  // truth, and a deleted file is never resurrected from here.
+  savePersona(name, content, now = Date.now()) {
+    this.db.prepare(`INSERT INTO personas (name, content, updated) VALUES (?,?,?)
+      ON CONFLICT(name) DO UPDATE SET content=excluded.content, updated=excluded.updated`)
+      .run(String(name), String(content), now);
+  }
+  getPersona(name) {
+    return this.db.prepare('SELECT name, content, updated FROM personas WHERE name=?').get(String(name)) ?? null;
+  }
+  deletePersona(name) { this.db.prepare('DELETE FROM personas WHERE name=?').run(String(name)); }
   // --- Token samples (V2 · Phase 5) ----------------------------------------
   // Global monotonic turn id, allocated in SQLite so it never restarts at 1.
   nextTurn() {

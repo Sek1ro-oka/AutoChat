@@ -50,10 +50,11 @@ export function parseEvent(event, config, now = Date.now()) {
 }
 
 export class Bot {
-  constructor(config, store, model, { now = Date.now, log = () => {}, imageLoader = loadImages, ledger = null } = {}) {
+  constructor(config, store, model, { now = Date.now, log = () => {}, imageLoader = loadImages, ledger = null, personas = null } = {}) {
     this.imageLoader = imageLoader;
     this.config = config; this.store = store; this.model = model;
     this.ledger = ledger;
+    this.personas = personas;
     this.now = now; this.log = log; this.tail = Promise.resolve(); this.queued = 0;
     this.antiSpam = new AntiSpam(config, store, now, log);
     if (config.modelProfiles && !config.modelProfiles.some(p => p.id === store.setting('active_model', 'default'))) {
@@ -109,6 +110,15 @@ export class Bot {
     return false;
   }
   blocked(text) { return containsTerm(text, this.config.blockTerms); }
+  // Two-layer prompts (Phase 2). Called once per handled turn: the character
+  // card is revalidated by mtime there, so a console edit reaches the very next
+  // message; the behaviour layer stays a startup snapshot. Without a loader this
+  // returns `config.systemPrompt`, i.e. exactly the pre-Phase-2 behaviour.
+  systemPrompt() {
+    if (!this.personas) return this.config.systemPrompt;
+    try { return this.personas.resolve(); }
+    catch { this.log('persona_failed'); return this.config.systemPrompt; }
+  }
   async reply(message, text, send, alive) {
     if (!alive()) return false;
     try {
@@ -125,7 +135,8 @@ export class Bot {
   async handle(message, send, alive) {
     const { store } = this;
     const profile = activeProfile(this.config, store);
-    const config = profile ? { ...this.config, ...profile } : this.config;
+    const base = { ...this.config, systemPrompt: this.systemPrompt() };
+    const config = profile ? { ...base, ...profile } : base;
     const sessionKey = profileSessionKey(message.key, profile);
     const reply = text => this.reply(message, text, send, alive);
     // Token accounting (Phase 5). One trace per handled turn; `begin` is lazy so

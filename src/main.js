@@ -5,6 +5,8 @@ import { Bot } from './bot.js';
 import { OneBot } from './onebot.js';
 import { Runtime } from './runtime.js';
 import { Ledger } from './ledger.js';
+import { Personas } from './personas.js';
+import { DEFAULT_PERSONA } from './persona.js';
 import { createLogger } from './logger.js';
 import { createConsole } from './console/server.js';
 
@@ -19,7 +21,16 @@ const startedAt = Date.now();
 const store = new Store(config.databasePath);
 const log = createLogger();
 const ledger = new Ledger({ store, log });
-const bot = new Bot(config, store, new Model(config), { log, ledger });
+// Two-layer prompts (Phase 2). Always constructed, even with the console off:
+// `PERSONA_DEFAULT` and hand-written `personas/characters/*.md` must work
+// headless. With no card active and no SYSTEM_PROMPT this resolves to the
+// built-in persona, so a stock `.env` behaves exactly as before.
+const personas = new Personas({
+  directory: config.personaDirectory, store, log,
+  envPrompt: config.systemPromptOverride, fallback: DEFAULT_PERSONA,
+  defaultName: config.personaDefault,
+});
+const bot = new Bot(config, store, new Model(config), { log, ledger, personas });
 // Every OneBot event fans out through the runtime. V2 adds more participants
 // (social simulation, message ledger); the answering bot is simply the first.
 const runtime = new Runtime({ log });
@@ -31,7 +42,7 @@ log('service_started');
 
 let consoleServer = null;
 if (config.consoleEnabled) {
-  consoleServer = createConsole({ config, store, bot, transport, runtime, log, startedAt });
+  consoleServer = createConsole({ config, store, bot, transport, runtime, personas, log, startedAt });
   consoleServer.start()
     .then(() => console.log(`AutoChat 控制台：${consoleServer.url()}`))
     .catch(error => { console.error(`控制台启动失败：${error.message}`); consoleServer = null; });

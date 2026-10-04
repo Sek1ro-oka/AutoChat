@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { DEFAULT_PERSONA } from './persona.js';
+import { validPersonaName } from './personas.js';
 import { loadModelProfiles } from './model-profiles.js';
 
 export function loadConfig(env = process.env) {
@@ -66,6 +67,15 @@ export function loadConfig(env = process.env) {
   const cacheHitPrice = env.PRICE_CACHE_HIT_CNY_PER_MILLION?.trim()
     ? number('PRICE_CACHE_HIT_CNY_PER_MILLION', null, 0.000001, 10000)
     : null;
+  // Two-layer prompts (V2 · Phase 2). `systemPromptOverride` keeps the raw
+  // SYSTEM_PROMPT so the loader can tell "explicitly configured" apart from
+  // "fell back to the built-in persona"; `systemPrompt` below is unchanged and
+  // still serves every caller that has no persona loader attached.
+  const systemPromptOverride = env.SYSTEM_PROMPT?.trim() || null;
+  const personaDefault = env.PERSONA_DEFAULT?.trim() || null;
+  if (personaDefault !== null && !validPersonaName(personaDefault)) {
+    throw new Error('PERSONA_DEFAULT 只能使用中英文、数字、空格、点、短横线或间隔号，1~40 字');
+  }
   const costHolidays = (env.COST_HOLIDAYS || '').split(',').map(value => value.trim()).filter(Boolean);
   if (costHolidays.some(day => !/^\d{4}-\d{2}-\d{2}$/.test(day) || Number.isNaN(Date.parse(day)))) {
     throw new Error('COST_HOLIDAYS 必须是逗号分隔的 YYYY-MM-DD');
@@ -93,6 +103,9 @@ export function loadConfig(env = process.env) {
     clearMs: number('GROUP_CLEAR_HOURS', 72, 1, 8760) * 3600000,
     databasePath: resolve(env.DATABASE_PATH || 'data/autochat.sqlite'),
     systemPrompt: env.SYSTEM_PROMPT?.trim() || DEFAULT_PERSONA,
+    systemPromptOverride,
+    personaDirectory: resolve(env.PERSONA_DIR || 'personas'),
+    personaDefault,
     blockTerms: (env.BLOCK_TERMS || '').split(',').map(x => x.trim()).filter(Boolean),
     triggerTerms: (env.TRIGGER_TERMS || '').split(',').map(x => x.trim()).filter(Boolean),
     groupKeywordWithoutAt: (env.GROUP_KEYWORD_WITHOUT_AT || 'false').trim() === 'true',
