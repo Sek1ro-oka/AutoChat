@@ -58,3 +58,22 @@ export function buildSocialRequest({ memory, config, message, params, system }) 
     { role: 'user', content: parts.join('\n') },
   ];
 }
+
+// The idle-initiated variant (Phase 6): nobody has spoken for a while, so there
+// is no "current message" to react to. The prompt asks the model to break the
+// silence instead. History and escaping rules are identical to buildSocialRequest.
+export function buildIdleRequest({ memory, config, group, params, system, idleMinutes }) {
+  const history = memory.ring(group).slice(-params.contextMessages);
+  const name = user => (user === config.botId ? '你' : memory.label(group, user));
+  const parts = [
+    '[群聊记录开始]',
+    ...history.map(entry => `${entry.bot ? '你' : name(entry.user)}：${escapeForPrompt(entry.text, 160)}`),
+    '[群聊记录结束]',
+  ];
+  parts.push(`群里已经安静了约 ${idleMinutes} 分钟。你想主动冒个泡说点什么，别让气氛冷下去。`);
+  parts.push('请只输出你要发送的内容，或只输出「不回」。');
+  return [
+    { role: 'system', content: `${system}\n\n${SOCIAL_ADDENDUM}` },
+    { role: 'user', content: parts.join('\n') },
+  ];
+}

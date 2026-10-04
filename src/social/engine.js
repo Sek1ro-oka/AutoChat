@@ -25,6 +25,7 @@ import { parseSegments } from './quote.js';
 import { buildSocialRequest, withSlang } from './prompt.js';
 import { render } from './renderer.js';
 import { ENERGY_BY_STATE, SIM_STATES, energyFor, requiredScore, transition } from './state.js';
+import { IdleSpeech } from './idle.js';
 
 // The state machine lives in state.js and the group memory in memory.js;
 // re-exported so callers that only care about "the simulation" have one entry.
@@ -37,11 +38,12 @@ const RETREAT_MS = 900000;
 // Handled by the answering path, not by the simulation (images, `search`, …).
 const SILENCE_MARK = '不回';
 
-export class Social {
+export class Social extends IdleSpeech {
   constructor({
     config, store, model, ledger = null, personas = null, slang = null, stickers = null, log = () => {},
     now = Date.now, random = Math.random, sleep = null,
   } = {}) {
+    super();
     this.config = config;
     this.store = store;
     this.model = model;
@@ -56,6 +58,7 @@ export class Social {
     this.memory = new GroupMemory({ store, ttlMs: config.socialMessageTtlMs, now: this.now });
     this.tails = new Map();          // group -> serialising promise
     this.decisions = new Map();      // group -> last decision (no message text)
+    this.idleRunning = false;        // re-entrancy guard for the idle timer
   }
 
   // --- parameters (runtime-overridable from the console) ---------------------
@@ -274,10 +277,17 @@ export class Social {
 
   async speak(message, send, alive, state) {
     const params = this.params(message.group);
-    const sessionKey = `social:group:${message.group}`;
     let messages;
     try { messages = this.request(message, params); }
     catch { this.log('social_context_failed'); return false; }
+    return this.deliver(messages, message.group, send, alive, state, params);
+  }
+
+  // Everything after the prompt — budget, model call, marker stripping, render,
+  // send, record — is identical whether speech was provoked by a message or by
+  // silence, so both paths share it. `group` (not a message) is the target.
+  async deliver(messages, group, send, alive, state, params) {
+    const sessionKey = `social:group:${group}`;
     const day = budgetDay(this.now());
     const estimate = costMicro(estimateInput(messages), this.config.maxOutput, this.config);
     const reservation = this.store.reserve(day, estimate, this.config.budgetMicro, this.now(), { sessionKey });
@@ -311,7 +321,7 @@ export class Social {
       minDelayMs: params.minDelayMs, maxDelayMs: params.maxDelayMs,
     });
     if (!chunks.length && !stickerIds.length) { this.log('social_empty'); return false; }
-    const recentBotTexts = this.memory.botTexts(message.group, 3);
+    const recentBotTexts = this.memory.botTexts(group, 3);
     if (text && isRepeat(chunks.join(''), recentBotTexts)) { this.log('social_repeat'); return false; }
 
     let sent = 0;
@@ -321,27 +331,27 @@ export class Social {
       let response = null;
       try {
         response = await send('send_group_msg', {
-          group_id: Number(message.group), message: [{ type: 'text', data: { text: chunks[index] } }],
+          group_id: Number(group), message: [{ type: 'text', data: { text: chunks[index] } }],
         });
       } catch { this.log('social_send_failed'); break; }
       sent += 1;
       this.memory.remember({
         id: response?.message_id === undefined || response?.message_id === null ? null : String(response.message_id),
-        group: message.group, user: this.config.botId, at: this.now(), text: chunks[index], fromBot: true,
+        group, user: this.config.botId, at: this.now(), text: chunks[index], fromBot: true,
       });
     }
     // A sticker the model asked for goes out after the text it paired with.
     if (stickerIds.length) {
       try {
-        sent += await this.stickers.sendByIds(stickerIds, { action: 'send_group_msg', target: { group_id: Number(message.group) } }, send);
+        sent += await this.stickers.sendByIds(stickerIds, { action: 'send_group_msg', target: { group_id: Number(group) } }, send);
       } catch { this.log('social_sticker_send_failed'); }
     }
     if (!sent) return false;
 
-    this.store.set(`social_count:${day}:${message.group}`, this.spokeToday(message.group, day) + 1);
+    this.store.set(`social_count:${day}:${group}`, this.spokeToday(group, day) + 1);
     const next = transition(state.state, 'spoke');
     this.store.saveSimState({
-      groupId: message.group, state: next, lastSpokeAt: this.now(),
+      groupId: group, state: next, lastSpokeAt: this.now(),
       energy: ENERGY_BY_STATE[next], updated: this.now(),
     });
     this.log('social_spoke');

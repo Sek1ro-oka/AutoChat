@@ -134,6 +134,11 @@ export function loadConfig(env = process.env) {
     socialMinDelayMs: integer('SOCIAL_MIN_DELAY_MS', 900, 0, 10000),
     socialMaxDelayMs: integer('SOCIAL_MAX_DELAY_MS', 2600, 0, 20000),
     socialMessageTtlMs: number('SOCIAL_MESSAGE_TTL_HOURS', 24, 1, 720) * 3600000,
+    // Idle-initiated speech (V2 · Phase 6). Off by default: with the switch
+    // unset the bot only ever speaks in reaction to a message, never on a timer.
+    socialIdleEnabled: (env.SOCIAL_IDLE_ENABLED || 'false').trim() === 'true',
+    socialIdleMinutes: integer('SOCIAL_IDLE_MINUTES', 45, 5, 720),
+    socialIdleHours: (env.SOCIAL_IDLE_HOURS || '0-23').trim(),
     botName: env.BOT_NAME?.trim() || '',
     botNicknames: Object.freeze((env.BOT_NICKNAMES || '').split(',').map(value => value.trim()).filter(Boolean)),
     // Slang library (V2 · Phase 4). Off by default: with SLANG_ENABLED unset no
@@ -184,6 +189,14 @@ export function loadConfig(env = process.env) {
   }
   if (config.socialMinDelayMs > config.socialMaxDelayMs) {
     throw new Error('SOCIAL_MIN_DELAY_MS 不能大于 SOCIAL_MAX_DELAY_MS');
+  }
+  if (!['true', 'false'].includes((env.SOCIAL_IDLE_ENABLED || 'false').trim())) {
+    throw new Error('SOCIAL_IDLE_ENABLED 必须是 true 或 false');
+  }
+  if (!/^\d{1,2}-\d{1,2}$/.test(config.socialIdleHours)
+    || Number(config.socialIdleHours.split('-')[0]) > Number(config.socialIdleHours.split('-')[1])
+    || Number(config.socialIdleHours.split('-')[0]) < 0 || Number(config.socialIdleHours.split('-')[1]) > 23) {
+    throw new Error('SOCIAL_IDLE_HOURS 必须是 H-H 形式（0-23，起点 ≤ 终点），如 9-22');
   }
   if (config.botName.length > 24 || config.botNicknames.some(name => name.length > 24)) {
     throw new Error('BOT_NAME 与 BOT_NICKNAMES 每项最多 24 字');

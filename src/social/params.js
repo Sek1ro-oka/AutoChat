@@ -43,6 +43,10 @@ export function resolveParams(store, config, group = null) {
   const globalThreshold = globalNumber('social_threshold', config.socialThreshold);
   const globalCooldown = globalNumber('social_cooldown_seconds', config.socialCooldownSeconds);
   const globalDaily = globalNumber('social_daily_limit', config.socialDailyLimit);
+  // Idle-initiated speech is global (a whole-bot switch, not a per-group one).
+  const globalIdleEnabled = globalText('social_idle_enabled', config.socialIdleEnabled ? '1' : '0') === '1';
+  const globalIdleMinutes = globalNumber('social_idle_minutes', config.socialIdleMinutes);
+  const globalIdleHours = globalText('social_idle_hours', config.socialIdleHours);
 
   // `undefined` from these helpers means "no row in this scope".
   const scoped = group === null || group === undefined ? null : String(group);
@@ -60,6 +64,9 @@ export function resolveParams(store, config, group = null) {
     maxChunks: config.socialMaxChunks,
     minDelayMs: config.socialMinDelayMs,
     maxDelayMs: config.socialMaxDelayMs,
+    idleEnabled: globalIdleEnabled,
+    idleMinutes: globalIdleMinutes,
+    idleHours: globalIdleHours,
     // Which of the four came from a per-group row. The console shows this so an
     // operator can tell "this group's own value" from "inherited".
     overridden: {

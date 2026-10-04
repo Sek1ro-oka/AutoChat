@@ -74,6 +74,8 @@ let slangTick = Promise.resolve();
 const timer = setInterval(() => {
   bot.tick();
   social.maintain();
+  // Idle-initiated speech rides the same 30s tick; off unless SOCIAL_IDLE_ENABLED.
+  social.idleTick((action, params) => transport.call(action, params), () => transport.ready);
   slangTick = slangTick.then(() => slang.maybeExtract()).catch(() => log('slang_auto_extract_failed'));
 }, 30000);
 transport.start();
