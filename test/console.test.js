@@ -101,6 +101,25 @@ test('every api route requires the console token', async t => {
   assert.equal((await fetch(`${base}/api/summary`, { headers: { 'x-console-token': 'wrong' } })).status, 401);
 });
 
+test('responses refuse to be framed and carry no external origin', async t => {
+  const { server } = fixture(t);
+  await server.start();
+  t.after(() => server.stop());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  // The write endpoints accept same-origin requests, so a third-party page that
+  // could frame the console would have a clickjacking path into the persona and
+  // slang editors. Both the legacy header and the CSP directive are sent.
+  for (const path of ['/', '/app.js', '/api/summary?token=' + TOKEN]) {
+    const response = await fetch(base + path);
+    assert.equal(response.headers.get('x-frame-options'), 'DENY', path);
+    const csp = response.headers.get('content-security-policy') ?? '';
+    assert.match(csp, /frame-ancestors 'none'/, path);
+    assert.match(csp, /base-uri 'none'/, path);
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff', path);
+    assert.equal(response.headers.get('referrer-policy'), 'no-referrer', path);
+  }
+});
+
 test('a valid token returns data through header and query string', async t => {
   const { server } = fixture(t);
   await server.start();

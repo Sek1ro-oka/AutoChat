@@ -30,6 +30,7 @@ import { dirname, join } from 'node:path';
 import { budgetDay } from '../store.js';
 import { costMicro, estimateInput, usageCost } from '../model.js';
 import { escapeForPrompt } from './quote.js';
+import { harden } from '../permissions.js';
 import { EXTRACT_SYSTEM, MAX_CANDIDATES_PER_RUN, extractJsonArray, sanitiseCandidates, sanitiseText } from './slang-parse.js';
 
 // Capacity ceiling from the roadmap: trimming starts once the library passes it.
@@ -307,6 +308,9 @@ export class Slang {
     try {
       mkdirSync(dirname(file), { recursive: true });
       writeFileSync(file, text, 'utf8');
+      // The stash holds whatever the operator tried to import, which can include
+      // verbatim group messages: tighten it like any other secret-bearing file.
+      harden(file, { log: this.log, label: 'slang-corrupt' });
       return file;
     } catch { return null; }
   }

@@ -20,6 +20,7 @@ import {
   buildPersonas, buildPersonaFile, buildSocial, buildSlang, buildSlangEntry,
 } from './api.js';
 import { readLogs } from './logs.js';
+import { harden } from '../permissions.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const INDEX_PATH = join(HERE, 'public', 'index.html');
@@ -71,13 +72,20 @@ function resolveToken(config, log) {
   const file = resolve('runtime/console-token.txt');
   try {
     const existing = readFileSync(file, 'utf8').trim();
-    if (existing.length >= 16) return existing;
+    if (existing.length >= 16) {
+      // A file written before the DACL step existed is still world-readable:
+      // `mode: 0o600` is a no-op on Windows. Tighten on every start, not just
+      // on creation, so an upgrade repairs the old file in place.
+      harden(file, { log, label: 'console-token' });
+      return existing;
+    }
   } catch { /* first run */ }
   const token = randomBytes(24).toString('base64url');
   try {
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, `${token}\n`, { mode: 0o600 });
   } catch { /* non-fatal: the token still works for this process */ }
+  harden(file, { log, label: 'console-token' });
   log('console_token_created');
   return token;
 }
@@ -90,6 +98,12 @@ function send(res, status, body, type = 'application/json; charset=utf-8') {
     'Cache-Control': 'no-store',
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
+    // A malicious page must not be able to frame the console: the write
+    // endpoints accept same-origin requests, so an invisible iframe over a
+    // logged-in browser would be a clickjacking path to the persona editor.
+    // The page loads no external asset, so a deny-everything CSP costs nothing.
+    'X-Frame-Options': 'DENY',
+    'Content-Security-Policy': "frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
   });
   res.end(payload);
 }

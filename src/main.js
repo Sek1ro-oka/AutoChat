@@ -11,6 +11,9 @@ import { Slang } from './social/slang.js';
 import { DEFAULT_PERSONA } from './persona.js';
 import { createLogger } from './logger.js';
 import { createConsole } from './console/server.js';
+import { hardenAll } from './permissions.js';
+import { dirname, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
 
 let config;
 try { config = loadConfig(); }
@@ -22,6 +25,16 @@ if (process.argv.includes('--check')) {
 const startedAt = Date.now();
 const store = new Store(config.databasePath);
 const log = createLogger();
+// Secrets on disk (see docs/security.md). Windows ignores the POSIX mode passed
+// at creation, so these are tightened explicitly rather than relying on
+// `{ mode: 0o600 }`. Best-effort — a failure is logged, never fatal.
+//   data/   the chat log and the ledger;
+//   .env    the API key, which is the most valuable secret in the tree.
+// Deliberately not applied to `runtime/`, which holds the Node runtime, the
+// NapCat install and a >120 MB download cache (icacls would walk all of it).
+const secrets = [{ path: dirname(config.databasePath), directory: true, label: 'data' }];
+if (existsSync(resolve('.env'))) secrets.push({ path: resolve('.env'), label: 'env' });
+hardenAll(secrets, { log });
 const ledger = new Ledger({ store, log });
 // Two-layer prompts (Phase 2). Always constructed, even with the console off:
 // `PERSONA_DEFAULT` and hand-written `personas/characters/*.md` must work
