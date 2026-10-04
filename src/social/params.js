@@ -17,7 +17,9 @@
 import { GROUP_KEYS, GROUP_LIMITS, boolOverride, numberOverride, withinRange } from '../group-settings.js';
 
 // Global setting names and their per-group counterparts, kept in one table so a
-// parameter cannot be readable in one scope and unwritable in the other.
+// parameter cannot be readable in one scope and unwritable in the other. Fields
+// without a `group` builder are whole-bot switches (the idle timer) and are only
+// ever written in the global scope.
 const FIELDS = Object.freeze({
   enabled: Object.freeze({ global: 'social_enabled', group: GROUP_KEYS.socialEnabled, bool: true }),
   threshold: Object.freeze({ global: 'social_threshold', group: GROUP_KEYS.socialThreshold, range: GROUP_LIMITS.threshold }),
@@ -27,7 +29,20 @@ const FIELDS = Object.freeze({
   dailyLimit: Object.freeze({
     global: 'social_daily_limit', group: GROUP_KEYS.socialDailyLimit, range: GROUP_LIMITS.dailyLimit, round: true,
   }),
+  idleEnabled: Object.freeze({ global: 'social_idle_enabled', bool: true }),
+  idleMinutes: Object.freeze({ global: 'social_idle_minutes', range: GROUP_LIMITS.idleMinutes, round: true }),
+  idleHours: Object.freeze({ global: 'social_idle_hours', hours: true }),
 });
+
+// "H-H" with both ends in 0..23 and start <= end. Mirrors the `.env` check in
+// config.js so a console edit can never be looser than a stock install.
+const validHours = value => {
+  const text = String(value ?? '').trim();
+  const match = /^(\d{1,2})-(\d{1,2})$/.exec(text);
+  if (!match) return false;
+  const [start, end] = [Number(match[1]), Number(match[2])];
+  return start >= 0 && end <= 23 && start <= end;
+};
 
 export function resolveParams(store, config, group = null) {
   const globalText = (key, fallback) => {
@@ -81,7 +96,7 @@ export function resolveParams(store, config, group = null) {
 // pre-existing behaviour); `group` present writes that group's override rows.
 export function applyParams({ store, config, group = null, patch = {}, log = () => {} }) {
   const scoped = group === null || group === undefined ? null : String(group);
-  const keyFor = field => (scoped === null ? field.global : field.group(scoped));
+  const keyFor = field => (field.group && scoped !== null ? field.group(scoped) : field.global);
   const write = (field, value) => {
     if (value === null) {
       if (!store.remove) throw new Error('SOCIAL_PARAM_INVALID');
@@ -93,6 +108,11 @@ export function applyParams({ store, config, group = null, patch = {}, log = () 
       store.set(keyFor(field), value ? '1' : '0');
       return;
     }
+    if (field.hours) {
+      if (!validHours(value)) throw new Error('SOCIAL_PARAM_INVALID');
+      store.set(keyFor(field), String(value).trim());
+      return;
+    }
     const parsed = withinRange(value, field.range);
     if (parsed === null) throw new Error('SOCIAL_PARAM_INVALID');
     store.set(keyFor(field), String(field.round ? Math.round(parsed) : parsed));
@@ -100,6 +120,8 @@ export function applyParams({ store, config, group = null, patch = {}, log = () 
   let touched = false;
   for (const [name, field] of Object.entries(FIELDS)) {
     if (!(name in patch)) continue;
+    // Idle fields have no per-group row: skip them when editing one group.
+    if (scoped !== null && !field.group) continue;
     write(field, patch[name]);
     touched = true;
   }

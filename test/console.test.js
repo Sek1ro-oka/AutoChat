@@ -94,7 +94,7 @@ test('every api route requires the console token', async t => {
   const base = `http://127.0.0.1:${server.address().port}`;
   for (const path of ['/api/summary', '/api/sessions', '/api/charges', '/api/logs', '/api/config',
     '/api/cost', '/api/cost/turns', '/api/personas', '/api/personas/file', '/api/social',
-    '/api/slang', '/api/slang/entry', '/api/slang/export']) {
+    '/api/settings', '/api/slang', '/api/slang/entry', '/api/slang/export']) {
     assert.equal((await fetch(base + path)).status, 401, path);
   }
   assert.equal((await fetch(`${base}/api/summary?token=wrong`)).status, 401);
@@ -144,13 +144,14 @@ test('unknown api routes 404 and the shell page needs no token', async t => {
   assert.equal(page.status, 200);
   const html = await page.text();
   assert.match(html, /AutoChat 控制台/);
-  for (const page of ['social', 'slang', 'stickers']) assert.match(html, new RegExp(`data-page="${page}"`), `${page} is reachable from the nav`);
-  // Load order matters: pages.js defines the `pages` object, pages-extra.js and
-  // pages-stickers.js add their data pages to it, and app.js renders the result.
-  assert.match(html, /<script src="pages\.js"><\/script>\s*<script src="pages-extra\.js"><\/script>\s*<script src="pages-stickers\.js"><\/script>\s*<script src="app\.js"><\/script>/);
+  for (const page of ['social', 'slang', 'stickers', 'settings']) assert.match(html, new RegExp(`data-page="${page}"`), `${page} is reachable from the nav`);
+  // Load order matters: pages.js defines the `pages` object, pages-extra.js,
+  // pages-stickers.js and pages-settings.js add their pages to it, and app.js
+  // renders the result.
+  assert.match(html, /<script src="pages\.js"><\/script>\s*<script src="pages-extra\.js"><\/script>\s*<script src="pages-stickers\.js"><\/script>\s*<script src="pages-settings\.js"><\/script>\s*<script src="app\.js"><\/script>/);
   // The script assets are served without a token: they are code, not data, and
   // the browser cannot attach a header to its own <script> fetch.
-  for (const asset of ['app.js', 'pages.js', 'pages-extra.js', 'pages-stickers.js']) {
+  for (const asset of ['app.js', 'pages.js', 'pages-extra.js', 'pages-stickers.js', 'pages-settings.js']) {
     const served = await fetch(`${base}/${asset}`);
     assert.equal(served.status, 200, asset);
     assert.match(served.headers.get('content-type'), /javascript/, asset);
@@ -159,6 +160,7 @@ test('unknown api routes 404 and the shell page needs no token', async t => {
   assert.match(await (await fetch(`${base}/pages.js`)).text(), /async overview\(\)/);
   assert.match(await (await fetch(`${base}/pages-extra.js`)).text(), /async slang\(\)/);
   assert.match(await (await fetch(`${base}/pages-stickers.js`)).text(), /async stickers\(\)/);
+  assert.match(await (await fetch(`${base}/pages-settings.js`)).text(), /async settings\(\)/);
   assert.equal((await fetch(`${base}/../src/config.js`)).status, 404, 'no path traversal out of public/');
   assert.equal((await fetch(`${base}/app.js.bak`)).status, 404);
 });
@@ -335,6 +337,41 @@ test('the simulation page reads state and accepts only guarded parameter writes'
   assert.equal((await jsonPost(base, '/api/social/config', { threshold: 999 })).status, 400);
   assert.equal((await jsonPost(base, '/api/social/config', { cooldownSeconds: 1 })).status, 400);
   assert.equal((await jsonPost(base, '/api/social/config', { group: '99999', muted: true })).status, 400);
+});
+
+test('the settings page lists configurable fields and applies guarded edits', async t => {
+  const { server, store } = fixture(t);
+  await server.start();
+  t.after(() => server.stop());
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const view = await (await fetch(`${base}/api/settings`, { headers: auth })).json();
+  assert.ok(view.fields.length > 0);
+  assert.ok(view.groups.some(group => group.id === 'budget'));
+  const budget = view.fields.find(field => field.name === 'budgetMicro');
+  assert.equal(budget.value, '1', '1,000,000 micro = 1 yuan');
+  assert.equal(budget.defaultValue, '1');
+
+  // Writes need the header token and a loopback origin, like every other write.
+  const onlyQuery = await fetch(`${base}/api/settings?token=${TOKEN}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'budgetMicro', value: '2' }),
+  });
+  assert.equal(onlyQuery.status, 403);
+  assert.equal((await onlyQuery.json()).error, 'header_token_required');
+
+  const edited = await (await jsonPost(base, '/api/settings', { name: 'budgetMicro', value: '2' })).json();
+  assert.equal(edited.fields.find(field => field.name === 'budgetMicro').value, '2');
+  assert.equal(store.setting('cfg:budget_cny', null), '2');
+
+  // Out-of-range or unknown fields are rejected with a real status code.
+  assert.equal((await jsonPost(base, '/api/settings', { name: 'budgetMicro', value: '-5' })).status, 400);
+  assert.equal((await jsonPost(base, '/api/settings', { name: 'nope', value: '1' })).status, 400);
+
+  // Clearing the value deletes the row, restoring the .env default.
+  const cleared = await (await jsonPost(base, '/api/settings', { name: 'budgetMicro', value: '' })).json();
+  assert.equal(cleared.fields.find(field => field.name === 'budgetMicro').value, '1');
+  assert.equal(store.setting('cfg:budget_cny', null), null);
 });
 
 test('the slang page reads the library, guards its writes and keeps chat text out of the list', async t => {

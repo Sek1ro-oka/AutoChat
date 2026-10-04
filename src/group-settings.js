@@ -27,6 +27,9 @@ export const GROUP_LIMITS = Object.freeze({
   threshold: Object.freeze({ min: 0, max: 100 }),
   cooldownSeconds: Object.freeze({ min: 5, max: 3600 }),
   dailyLimit: Object.freeze({ min: 1, max: 500 }),
+  // Idle-initiated speech is a whole-bot switch, not a per-group one, but its
+  // bounds still live here so the console and the engine share one table.
+  idleMinutes: Object.freeze({ min: 5, max: 720 }),
 });
 
 export const withinRange = (value, { min, max }) => {

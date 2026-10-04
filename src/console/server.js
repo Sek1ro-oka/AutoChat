@@ -19,6 +19,7 @@ import {
   buildSummary, buildSessions, buildCharges, buildConfig, buildCost, buildCostTurns,
   buildPersonas, buildPersonaFile, buildSocial, buildSlang, buildSlangEntry,
   buildGroups, applyGroupPatch, buildStickers, buildStickerEntry,
+  buildSettings, applySetting,
 } from './api.js';
 import { readLogs } from './logs.js';
 import { harden } from '../permissions.js';
@@ -33,6 +34,7 @@ const ASSETS = new Map([
   ['/pages.js', ['public/pages.js', 'text/javascript; charset=utf-8']],
   ['/pages-extra.js', ['public/pages-extra.js', 'text/javascript; charset=utf-8']],
   ['/pages-stickers.js', ['public/pages-stickers.js', 'text/javascript; charset=utf-8']],
+  ['/pages-settings.js', ['public/pages-settings.js', 'text/javascript; charset=utf-8']],
   ['/app.js', ['public/app.js', 'text/javascript; charset=utf-8']],
 ]);
 const TOKEN_HEADER = 'x-console-token';
@@ -60,6 +62,8 @@ const ERROR_STATUS = new Map([
   // The sticker library: 4xx for what the operator can fix.
   ['STICKER_UNAVAILABLE', 503], ['STICKER_PARAM_INVALID', 400], ['STICKER_NOT_FOUND', 404],
   ['STICKER_UPLOAD_INVALID', 400],
+  // Runtime settings: 4xx for what the operator can fix.
+  ['CONFIG_PARAM_INVALID', 400],
 ]);
 
 const equal = (a, b) => {
@@ -162,6 +166,7 @@ export function createConsole({
     '/api/charges': (url) => buildCharges({ store, days: Number(url.searchParams.get('days')) || 30 }),
     '/api/logs': (url) => ({ logs: readLogs(logDirectory, Number(url.searchParams.get('limit')) || 120) }),
     '/api/config': () => buildConfig({ config }),
+    '/api/settings': () => buildSettings({ config, store }),
     '/api/cost': (url) => buildCost({ config, store, range: url.searchParams.get('range') ?? '24h', now: now() }),
     '/api/cost/turns': (url) => buildCostTurns({
       config, store, session: url.searchParams.get('session') ?? '',
@@ -199,6 +204,7 @@ export function createConsole({
       const target = requirePersonas();
       return { active: target.setActive(body?.name ?? ''), ...buildPersonas({ personas }) };
     },
+    '/api/settings': (url, body) => applySetting({ config, store, name: body?.name, value: body?.value }),
     '/api/social/config': (url, body) => requireSocial().setParams(body ?? {}),
     // Per-group specialisation: one endpoint, routed by `subsystem`, so the page
     // has a single save path for persona / social / slang / reset.

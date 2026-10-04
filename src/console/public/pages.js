@@ -233,7 +233,12 @@ const pages = {
           <label class="muted" style="font-size:12px">每群日上限 <input type="text" id="sim-daily" style="min-width:70px" value="${esc(d.params.dailyLimit)}"></label>
           <button onclick="socialSave()">保存参数</button>
         </div>
-        <div class="muted" style="font-size:12px;margin-top:8px">默认值来自 <code>.env</code>：阈值 ${num(d.defaults.threshold)}、冷却 ${num(d.defaults.cooldownSeconds)} 秒、每群上限 ${num(d.defaults.dailyLimit)}；上下文 ${num(d.defaults.contextMessages)} 条、最多 ${num(d.defaults.maxChunks)} 条消息、发送间隔 ${num(d.defaults.minDelayMs)}~${num(d.defaults.maxDelayMs)} 毫秒、群消息保留 ${num(d.defaults.messageTtlHours)} 小时。上表可覆盖前三项。</div>
+        <div class="row" style="gap:14px;margin-top:10px">
+          <label class="muted" style="font-size:12px"><input type="checkbox" id="sim-idle" ${d.params.idleEnabled ? 'checked' : ''}> 冷场冒泡</label>
+          <label class="muted" style="font-size:12px">静默（分钟） <input type="text" id="sim-idle-minutes" style="min-width:70px" value="${esc(d.params.idleMinutes)}"></label>
+          <label class="muted" style="font-size:12px">时段 <input type="text" id="sim-idle-hours" style="min-width:70px" value="${esc(d.params.idleHours)}" title="H-H，如 9-22"></label>
+        </div>
+        <div class="muted" style="font-size:12px;margin-top:8px">默认值来自 <code>.env</code>：阈值 ${num(d.defaults.threshold)}、冷却 ${num(d.defaults.cooldownSeconds)} 秒、每群上限 ${num(d.defaults.dailyLimit)}；上下文 ${num(d.defaults.contextMessages)} 条、最多 ${num(d.defaults.maxChunks)} 条消息、发送间隔 ${num(d.defaults.minDelayMs)}~${num(d.defaults.maxDelayMs)} 毫秒、群消息保留 ${num(d.defaults.messageTtlHours)} 小时。上表可覆盖前三项。冷场冒泡默认 ${d.defaults.idleEnabled ? '开' : '关'}、静默 ${num(d.defaults.idleMinutes)} 分钟、时段 ${esc(d.defaults.idleHours)}——群里安静超过静默时长后机器人自己开口，其余门（时段/日上限/预算）照常把关。</div>
       </div>
       <div class="section card">
         <h3>每群状态</h3>

@@ -89,6 +89,15 @@
   .banner.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
   .banner.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
   .banner.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+  .setting-row { display: grid; grid-template-columns: minmax(190px, 1fr) minmax(150px, auto) auto auto;
+    gap: 10px 14px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .setting-row:last-child { border-bottom: none; }
+  .setting-label { font-size: 13px; }
+  .setting-label .muted { font-size: 11px; }
+  .setting-input input, .setting-input select { width: 100%; min-width: 0; }
+  .setting-input input[type=checkbox] { width: auto; }
+  .setting-default { font-size: 12px; white-space: nowrap; }
+  .setting-actions { display: flex; gap: 6px; }
 </style>
 </head>
 <body>
@@ -111,6 +120,7 @@
     <a data-page="slang">黑话</a>
     <a data-page="stickers">表情包</a>
     <a data-page="logs">日志</a>
+    <a data-page="settings">设置</a>
     <a data-page="config">配置</a>
   </nav>
   <main id="main"><div class="empty">加载中…</div></main>
@@ -118,6 +128,7 @@
 <script src="pages.js"></script>
 <script src="pages-extra.js"></script>
 <script src="pages-stickers.js"></script>
+<script src="pages-settings.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

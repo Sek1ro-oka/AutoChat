@@ -1,4 +1,5 @@
 import { loadConfig } from './config.js';
+import { createRuntimeConfig } from './runtime-config.js';
 import { Store } from './store.js';
 import { Model } from './model.js';
 import { Bot } from './bot.js';
@@ -25,6 +26,10 @@ if (process.argv.includes('--check')) {
 }
 const startedAt = Date.now();
 const store = new Store(config.databasePath);
+// Runtime-overridable settings (V2). From here on every component reads
+// `config.xxx` through a proxy that resolves the settings table first and the
+// `.env` default second, so the console can change knobs without a restart.
+config = createRuntimeConfig(config, store);
 const log = createLogger();
 // Secrets on disk (see docs/security.md). Windows ignores the POSIX mode passed
 // at creation, so these are tightened explicitly rather than relying on

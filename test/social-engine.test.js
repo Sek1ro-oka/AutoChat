@@ -13,6 +13,7 @@ const makeConfig = overrides => ({
   socialEnabled: true, socialThreshold: 6, socialCooldownSeconds: 45, socialDailyLimit: 20,
   socialContextMessages: 12, socialMaxChunks: 3, socialMinDelayMs: 0, socialMaxDelayMs: 0,
   socialMessageTtlMs: 24 * 3600000, botName: '小助手', botNicknames: [],
+  socialIdleEnabled: false, socialIdleMinutes: 45, socialIdleHours: '0-23',
   blockTerms: [], budgetMicro: 1000000, maxOutput: 1024,
   inputPrice: 2, outputPrice: 8, cacheHitPrice: null, offPeakRatio: 0.5, costHolidays: [],
   systemPrompt: '内置人设',
@@ -250,7 +251,7 @@ test('the console view carries states and reasons, never chat text', async () =>
   assert.equal(view.enabled, true);
   assert.equal(view.groups.length, 1);
   assert.equal(view.groups[0].decision.reasons.includes('base'), true);
-  assert.deepEqual(Object.keys(view.params).sort(), ['cooldownSeconds', 'dailyLimit', 'threshold']);
+  assert.deepEqual(Object.keys(view.params).sort(), ['cooldownSeconds', 'dailyLimit', 'idleEnabled', 'idleHours', 'idleMinutes', 'threshold']);
   store.close();
 });
 
@@ -261,8 +262,13 @@ test('console parameters are validated and clamped to their documented ranges', 
   assert.throws(() => social.setParams({ dailyLimit: 0 }), /SOCIAL_PARAM_INVALID/);
   assert.throws(() => social.setParams({ enabled: 'yes' }), /SOCIAL_PARAM_INVALID/);
   assert.throws(() => social.setParams({ group: '99999', muted: true }), /SOCIAL_PARAM_INVALID/);
+  assert.throws(() => social.setParams({ idleMinutes: 1 }), /SOCIAL_PARAM_INVALID/);
+  assert.throws(() => social.setParams({ idleHours: '25-30' }), /SOCIAL_PARAM_INVALID/);
   const view = social.setParams({ enabled: true, threshold: 4, cooldownSeconds: 30, dailyLimit: 5 });
-  assert.deepEqual(view.params, { threshold: 4, cooldownSeconds: 30, dailyLimit: 5 });
+  assert.deepEqual(view.params, {
+    threshold: 4, cooldownSeconds: 30, dailyLimit: 5,
+    idleEnabled: false, idleMinutes: 45, idleHours: '0-23',
+  });
   assert.equal(social.describe().enabled, true);
   store.close();
 });

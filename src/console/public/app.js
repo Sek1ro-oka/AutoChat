@@ -112,6 +112,8 @@ const PERSONA_MSG = {
   STICKER_PARAM_INVALID: '参数不合法。',
   STICKER_NOT_FOUND: '该图片已不存在，可能已被删除。',
   STICKER_UPLOAD_INVALID: '上传失败：仅支持 PNG/JPG/GIF/WebP，每张最多 5MB。',
+  // 运行时设置（V2）
+  CONFIG_PARAM_INVALID: '参数不合法或超出范围。',
 };
 const explain = code => PERSONA_MSG[code] || code || '操作失败';
 
@@ -205,6 +207,9 @@ window.socialSave = () => socialSet({
   threshold: Number($('#sim-threshold').value),
   cooldownSeconds: Number($('#sim-cooldown').value),
   dailyLimit: Number($('#sim-daily').value),
+  idleEnabled: $('#sim-idle').checked,
+  idleMinutes: Number($('#sim-idle-minutes').value),
+  idleHours: $('#sim-idle-hours').value.trim(),
 });
 
 // --- 黑话词库（Phase 4）---
@@ -361,8 +366,8 @@ async function render() {
 }
 function schedule() {
   clearInterval(timer);
-  // 人格页与仿真/黑话/群设置/表情包页保存着可编辑字段，轮询会覆盖输入：这几页只在动作或手动刷新时重绘。
-  if (page === 'personas' || page === 'social' || page === 'slang' || page === 'groups' || page === 'stickers') return;
+  // 人格页与仿真/黑话/群设置/表情包/设置页保存着可编辑字段，轮询会覆盖输入：这几页只在动作或手动刷新时重绘。
+  if (page === 'personas' || page === 'social' || page === 'slang' || page === 'groups' || page === 'stickers' || page === 'settings') return;
   timer = setInterval(() => { if (!document.hidden) render(); }, 3000);
 }
 document.querySelectorAll('nav a').forEach(link => {

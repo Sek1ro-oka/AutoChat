@@ -1,19 +1,11 @@
 // Social simulation: the group member that decides for itself (V2 · Phase 3).
-//
-// Division of labour, copied from the one part of qq-bridge worth copying:
-// **rules decide *when* to speak, the model decides *what* to say.** Deciding to
-// stay silent costs nothing; only an actual utterance reaches the model, the
-// budget ledger and the chat.
-//
-// The engine is a runtime participant (see src/runtime.js). It observes every
-// group message — including its own, which it records itself because NapCat does
-// not reliably echo self-sent messages — and it never answers a message that
-// addresses the bot: that reply belongs to `Bot`, and two answers to one @ is
-// exactly the kind of bug that makes a bot obvious.
-//
-// Every gate below (switch, mute, daily cap, cooldown, budget) is checked before
-// the model is called, and the budget reservation is checked again atomically by
-// `store.reserve` — speech shares the one daily ledger with Q&A.
+// Rules decide *when* to speak, the model decides *what* to say — silence costs
+// nothing; only an utterance reaches the model, the ledger and the chat.
+// It observes every group message (its own included, recorded because NapCat
+// does not echo self-sent reliably) but never answers one that addresses the
+// bot: that reply belongs to `Bot`. Every gate (switch, mute, daily cap,
+// cooldown, budget) is checked before the model is called, and `store.reserve`
+// checks it again atomically — speech shares one daily ledger with Q&A.
 
 import { budgetDay } from '../store.js';
 import { costMicro, estimateInput, usageCost } from '../model.js';
@@ -62,17 +54,13 @@ export class Social extends IdleSpeech {
   }
 
   // --- parameters (runtime-overridable from the console) ---------------------
-  // Resolution lives in params.js; asking for one group yields that group's
-  // effective numbers, which is what makes the simulation specialisable per
-  // group. Called with no group it returns the global view.
+  // Resolution lives in params.js; with no group it returns the global view.
   params(group = null) { return resolveParams(this.store, this.config, group); }
 
   grouped() { return this.config.groupIds ?? [this.config.groupId]; }
 
-  // Validate and persist a console edit. Without `group` the global rows are
-  // written; with it, only that group's override rows. `group`+`muted` is the
-  // older per-group flag and keeps working unchanged. A `null` value clears the
-  // layer rather than writing it, so the console can say "inherit again".
+  // Persist a console edit. Without `group` the global rows are written; with it,
+  // that group's overrides. `null` clears the layer ("inherit again").
   setParams(patch = {}) {
     const { group, ...rest } = patch;
     if (group === undefined) {
@@ -391,6 +379,7 @@ export class Social extends IdleSpeech {
       params: {
         threshold: params.threshold, cooldownSeconds: Math.round(params.cooldownMs / 1000),
         dailyLimit: params.dailyLimit,
+        idleEnabled: params.idleEnabled, idleMinutes: params.idleMinutes, idleHours: params.idleHours,
       },
       defaults: {
         enabled: Boolean(this.config.socialEnabled), threshold: this.config.socialThreshold,
@@ -398,6 +387,7 @@ export class Social extends IdleSpeech {
         contextMessages: this.config.socialContextMessages, maxChunks: this.config.socialMaxChunks,
         minDelayMs: this.config.socialMinDelayMs, maxDelayMs: this.config.socialMaxDelayMs,
         messageTtlHours: Math.round(this.config.socialMessageTtlMs / 3600000),
+        idleEnabled: Boolean(this.config.socialIdleEnabled), idleMinutes: this.config.socialIdleMinutes, idleHours: this.config.socialIdleHours,
       },
       today: { day, spoke: groups.reduce((total, group) => total + group.spokeToday, 0) },
       groups,

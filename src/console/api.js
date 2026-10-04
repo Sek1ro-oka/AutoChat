@@ -4,6 +4,7 @@
 import { budgetDay, CHINA_OFFSET_MS } from '../store.js';
 import { reportCost, sampleCostMicro, splitTotals } from '../ledger.js';
 import { clearGroupOverrides } from '../group-settings.js';
+import { runtimeValues, applyRuntimeValue } from '../runtime-config.js';
 
 const SECRET = /(key|token|secret|password|passwd)/i;
 
@@ -69,6 +70,20 @@ export function buildConfig({ config }) {
     credentials: { apiKey: mask(apiKey), onebotToken: mask(onebotToken), consoleToken: mask(consoleToken) },
     modelProfiles: (modelProfiles ?? []).map(profile => redact(profile)),
   };
+}
+
+// --- Runtime settings (V2) -------------------------------------------------
+// The editable view of the non-secret knobs. The field table itself lives in
+// src/runtime-config.js so the proxy (reader) and this page (writer) can never
+// disagree on a key; a write re-describes the whole table, like every other
+// console page, so the client re-renders from one response.
+export function buildSettings({ config, store }) {
+  return runtimeValues(config, store);
+}
+
+export function applySetting({ config, store, name, value }) {
+  applyRuntimeValue(config, store, name, value);
+  return runtimeValues(config, store);
 }
 
 // --- Token & cost dashboard (Phase 5) --------------------------------------
