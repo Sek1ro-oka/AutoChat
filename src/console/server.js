@@ -27,10 +27,11 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const INDEX_PATH = join(HERE, 'public', 'index.html');
 // Whitelisted shell assets. The page logic lives in its own files so none of
 // them has to grow past the project's 400-line ceiling as pages are added.
-// pages.js must be listed (and loaded) before app.js: it defines the `pages`
-// object that app.js's render() dispatches to.
+// pages.js and pages-extra.js must be listed (and loaded) before app.js: they
+// define the `pages` object that app.js's render() dispatches to.
 const ASSETS = new Map([
   ['/pages.js', ['public/pages.js', 'text/javascript; charset=utf-8']],
+  ['/pages-extra.js', ['public/pages-extra.js', 'text/javascript; charset=utf-8']],
   ['/app.js', ['public/app.js', 'text/javascript; charset=utf-8']],
 ]);
 const TOKEN_HEADER = 'x-console-token';
