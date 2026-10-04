@@ -7,6 +7,7 @@ export function loadModelProfiles(env, legacy) {
   const native = new URL(legacy.baseUrl).hostname === 'api.deepseek.com' && legacy.model === 'deepseek-flash';
   const profiles = [{ id: 'default', model: legacy.model, baseUrl: legacy.baseUrl, apiKey: legacy.apiKey,
     inputPrice: legacy.inputPrice, outputPrice: legacy.outputPrice, priceDate: legacy.priceDate,
+    cacheHitPrice: legacy.cacheHitPrice ?? null,
     maxOutput: legacy.maxOutput, contextTokens: legacy.contextTokens,
     supportsVision: boolean('MODEL_SUPPORTS_VISION', native), supportsSearch: boolean('MODEL_SUPPORTS_SEARCH', native),
     imageInputReserve: 2048, sendThinking: boolean('MODEL_SEND_THINKING', native) }];
@@ -37,6 +38,9 @@ export function loadModelProfiles(env, legacy) {
     profiles.push({ id, model, baseUrl: url.href.replace(/\/$/, ''), apiKey: required('API_KEY'), priceDate,
       inputPrice: number('PRICE_INPUT_CNY_PER_MILLION', null, 0.000001, 10000),
       outputPrice: number('PRICE_OUTPUT_CNY_PER_MILLION', null, 0.000001, 10000),
+      cacheHitPrice: env[prefix + 'PRICE_CACHE_HIT_CNY_PER_MILLION']?.trim()
+        ? number('PRICE_CACHE_HIT_CNY_PER_MILLION', null, 0.000001, 10000)
+        : legacy.cacheHitPrice ?? null,
       maxOutput: number('MAX_OUTPUT_TOKENS', legacy.maxOutput, 1, 8192, true),
       contextTokens: number('CONTEXT_INPUT_TOKENS', legacy.contextTokens, 256, 1000000, true),
       supportsVision, supportsSearch: boolean(prefix + 'SUPPORTS_SEARCH', false),

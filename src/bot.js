@@ -50,9 +50,10 @@ export function parseEvent(event, config, now = Date.now()) {
 }
 
 export class Bot {
-  constructor(config, store, model, { now = Date.now, log = () => {}, imageLoader = loadImages } = {}) {
+  constructor(config, store, model, { now = Date.now, log = () => {}, imageLoader = loadImages, ledger = null } = {}) {
     this.imageLoader = imageLoader;
     this.config = config; this.store = store; this.model = model;
+    this.ledger = ledger;
     this.now = now; this.log = log; this.tail = Promise.resolve(); this.queued = 0;
     this.antiSpam = new AntiSpam(config, store, now, log);
     if (config.modelProfiles && !config.modelProfiles.some(p => p.id === store.setting('active_model', 'default'))) {
@@ -65,6 +66,7 @@ export class Bot {
   maintenance() {
     this.store.cleanupGroups(this.now(), this.config.clearMs);
     this.store.pruneEvents(this.now());
+    this.store.pruneSamples();
   }
   tick() {
     // At most one maintenance job pending; it runs between complete turns.
@@ -126,6 +128,16 @@ export class Bot {
     const config = profile ? { ...this.config, ...profile } : this.config;
     const sessionKey = profileSessionKey(message.key, profile);
     const reply = text => this.reply(message, text, send, alive);
+    // Token accounting (Phase 5). One trace per handled turn; `begin` is lazy so
+    // commands and rejected messages never burn a turn id, and `seq` orders the
+    // up-to-two model calls a single turn can make. Samples are written to SQLite
+    // the moment they arrive — this process keeps no running total.
+    let trace = null;
+    const sampleUsage = usage => {
+      if (!this.ledger) return;
+      trace = trace ?? this.ledger.begin(sessionKey);
+      this.ledger.sample(trace, usage, config, this.now());
+    };
     const text = message.text;
     const admin = !message.group && message.user === config.adminId;
     const adminCommands = new Map([
@@ -213,9 +225,10 @@ export class Bot {
       catch { this.log('image_failed'); return reply('图片读取失败：仅支持QQ图片（JPEG、PNG、GIF、WebP），每张最多5MB。请重新发送图片。'); }
       if (!alive()) return;
     }
-    const reservation = store.reserve(day, primaryEstimate(), config.budgetMicro, this.now());
+    const reservation = store.reserve(day, primaryEstimate(), config.budgetMicro, this.now(), { sessionKey });
     if (!reservation) return reply('今日模型预算不足或已停止，明日恢复；可使用 /清空。');
-    const answerReservation = searching ? store.reserve(day, answerEstimate(), config.budgetMicro, this.now()) : null;
+    const answerReservation = searching
+      ? store.reserve(day, answerEstimate(), config.budgetMicro, this.now(), { sessionKey }) : null;
     if (searching && !answerReservation) { store.settle(reservation, 0); return reply('今日预算不足以完成搜索和回答，明日恢复。'); }
     const cancelAnswer = () => { if (answerReservation) store.settle(answerReservation, 0); };
     if (searching) store.set(searchKey, Number(store.setting(searchKey, '0')) + 1);
@@ -224,7 +237,8 @@ export class Bot {
       const model = profile && profile.id !== 'default' ? this.model.forProfile(profile) : this.model;
       result = await model.complete(messages, searching ? { search: true, query } : seeing ? { images } : {});
       const actual = usageCost(result.usage, config);
-      if (actual === null) store.uncertain(reservation); else store.settle(reservation, actual);
+      if (actual === null) store.uncertain(reservation);
+      else { store.settle(reservation, actual); sampleUsage(result.usage); }
     } catch {
       store.uncertain(reservation);
       cancelAnswer();
@@ -248,7 +262,8 @@ export class Bot {
         const model = profile && profile.id !== 'default' ? this.model.forProfile(profile) : this.model;
         result = await model.complete(answerMessages);
         const actual = usageCost(result.usage, config);
-        if (actual === null) store.uncertain(answerReservation); else store.settle(answerReservation, actual);
+        if (actual === null) store.uncertain(answerReservation);
+        else { store.settle(answerReservation, actual); sampleUsage(result.usage); }
       } catch {
         store.uncertain(answerReservation); this.log('search_answer_failed');
         return reply('已搜索到资料，但整理回答暂时失败；未转发原始搜索摘要，此次费用预留暂不释放。');

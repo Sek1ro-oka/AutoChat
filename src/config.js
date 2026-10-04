@@ -58,6 +58,18 @@ export function loadConfig(env = process.env) {
     throw new Error('QQ 标识格式不正确：GROUP_QQS');
   }
   const privateUser = privateUsers[0];
+  const inputPrice = number('PRICE_INPUT_CNY_PER_MILLION', null, 0.000001, 10000);
+  const outputPrice = number('PRICE_OUTPUT_CNY_PER_MILLION', null, 0.000001, 10000);
+  // Reporting-only prices (Phase 5). Leaving the cache price empty means "use the
+  // DeepSeek ratio" (see ledger.js). The budget reservation keeps charging the
+  // peak, uncached price regardless, so these can never loosen the daily cap.
+  const cacheHitPrice = env.PRICE_CACHE_HIT_CNY_PER_MILLION?.trim()
+    ? number('PRICE_CACHE_HIT_CNY_PER_MILLION', null, 0.000001, 10000)
+    : null;
+  const costHolidays = (env.COST_HOLIDAYS || '').split(',').map(value => value.trim()).filter(Boolean);
+  if (costHolidays.some(day => !/^\d{4}-\d{2}-\d{2}$/.test(day) || Number.isNaN(Date.parse(day)))) {
+    throw new Error('COST_HOLIDAYS 必须是逗号分隔的 YYYY-MM-DD');
+  }
   const config = {
     botId: id('BOT_QQ'), privateUser, privateUsers: Object.freeze(privateUsers),
     groupId: groupIds[0], groupIds: Object.freeze(groupIds),
@@ -69,9 +81,12 @@ export function loadConfig(env = process.env) {
     apiKey: required('DEEPSEEK_API_KEY'), baseUrl: baseUrl.href.replace(/\/$/, ''),
     model: env.MODEL_NAME?.trim() || 'deepseek-flash',
     budgetMicro: Math.floor(number('DAILY_BUDGET_CNY', 1, 0.000001, 100) * 1e6),
-    inputPrice: number('PRICE_INPUT_CNY_PER_MILLION', null, 0.000001, 10000),
-    outputPrice: number('PRICE_OUTPUT_CNY_PER_MILLION', null, 0.000001, 10000),
+    inputPrice,
+    outputPrice,
     priceDate,
+    cacheHitPrice,
+    offPeakRatio: number('PRICE_OFFPEAK_RATIO', 0.5, 0.01, 1),
+    costHolidays: Object.freeze(costHolidays),
     maxOutput: integer('MAX_OUTPUT_TOKENS', 1024, 1, 8192),
     contextTokens: integer('CONTEXT_INPUT_TOKENS', 16000, 256, 1000000),
     timeoutMs: integer('MODEL_TIMEOUT_MS', 60000, 1000, 120000),

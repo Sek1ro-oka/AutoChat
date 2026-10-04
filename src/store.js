@@ -3,8 +3,12 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+// Billing and time-bucket boundaries are always China time (UTC+8, no DST).
+export const CHINA_OFFSET_MS = 8 * 3600000;
+const CHINA_SHIFT = CHINA_OFFSET_MS;
+
 export function budgetDay(now = Date.now()) {
-  return new Date(now + 8 * 3600000).toISOString().slice(0, 10);
+  return new Date(now + CHINA_OFFSET_MS).toISOString().slice(0, 10);
 }
 
 // Base schema. Tables are created with the current shape; older databases are
@@ -53,7 +57,21 @@ const SCHEMA = `
     bucket TEXT NOT NULL DEFAULT 'peak'
   );
   CREATE INDEX IF NOT EXISTS token_samples_at ON token_samples(at);
+  CREATE INDEX IF NOT EXISTS token_samples_session ON token_samples(session, turn);
+  -- Monotonic counters (Phase 5 uses 'turn'). Kept in SQLite, not in memory, so
+  -- the value survives a restart: reused turn ids would overwrite old samples.
+  CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
 `;
+
+// Six non-overlapping peak/off splits. Every aggregate that reports money reuses
+// this fragment so the console never has to guess which price a token paid.
+const SPLITS = `
+  COALESCE(SUM(CASE WHEN bucket='peak' THEN miss ELSE 0 END),0) AS missPeak,
+  COALESCE(SUM(CASE WHEN bucket='peak' THEN hit ELSE 0 END),0) AS hitPeak,
+  COALESCE(SUM(CASE WHEN bucket='peak' THEN out ELSE 0 END),0) AS outPeak,
+  COALESCE(SUM(CASE WHEN bucket!='peak' THEN miss ELSE 0 END),0) AS missOff,
+  COALESCE(SUM(CASE WHEN bucket!='peak' THEN hit ELSE 0 END),0) AS hitOff,
+  COALESCE(SUM(CASE WHEN bucket!='peak' THEN out ELSE 0 END),0) AS outOff`;
 
 const columns = (db, table) => new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name));
 
@@ -176,4 +194,60 @@ export class Store {
       .all(String(groupId), since, Math.max(1, Math.min(500, Number(limit) || 100)));
   }
   pruneMessages(cutoff) { return this.db.prepare('DELETE FROM messages WHERE at < ?').run(cutoff).changes; }
+  // --- Token samples (V2 · Phase 5) ----------------------------------------
+  // Global monotonic turn id, allocated in SQLite so it never restarts at 1.
+  nextTurn() {
+    return this.db.prepare(`INSERT INTO counters (name, value) VALUES ('turn', 1)
+      ON CONFLICT(name) DO UPDATE SET value = value + 1 RETURNING value`).get().value;
+  }
+  // Append one server-reported sample. Idempotent: a replayed `turn_key` only
+  // overwrites when it carries a strictly newer timestamp, so a retry after a
+  // crash cannot double-count a turn.
+  noteSample({ turnKey, session, turn, seq, at, miss, hit, out, bucket = 'peak' }) {
+    return this.db.prepare(`INSERT INTO token_samples (turn_key, session, turn, seq, at, miss, hit, out, bucket)
+      VALUES (?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(turn_key) DO UPDATE SET at=excluded.at, miss=excluded.miss, hit=excluded.hit,
+        out=excluded.out, bucket=excluded.bucket
+      WHERE excluded.at > token_samples.at`)
+      .run(String(turnKey), String(session), turn, seq, at, miss, hit, out, bucket).changes;
+  }
+  costTotals({ since = 0, until = Number.MAX_SAFE_INTEGER } = {}) {
+    return this.db.prepare(`SELECT ${SPLITS},
+      COUNT(*) AS calls, COUNT(DISTINCT session || ':' || turn) AS turns
+      FROM token_samples WHERE at >= ? AND at < ?`).get(since, until);
+  }
+  // Per time-slot aggregates. `slot` is derived in China time so a "day" bucket
+  // matches the billing day, not the UTC day.
+  costSeries({ since = 0, until = Number.MAX_SAFE_INTEGER, unitMs = 3600000 } = {}) {
+    const unit = Math.max(60000, Number(unitMs) || 3600000);
+    return this.db.prepare(`SELECT CAST((at + ${CHINA_SHIFT}) / ? AS INTEGER) AS slot, ${SPLITS},
+      COUNT(*) AS calls FROM token_samples WHERE at >= ? AND at < ?
+      GROUP BY slot ORDER BY slot`).all(unit, since, until)
+      .map(row => ({ t: row.slot * unit - CHINA_SHIFT, ...row }));
+  }
+  costSessions({ since = 0, until = Number.MAX_SAFE_INTEGER, limit = 50 } = {}) {
+    return this.db.prepare(`SELECT session, ${SPLITS}, COUNT(*) AS calls,
+      COUNT(DISTINCT turn) AS turns, MAX(at) AS last FROM token_samples
+      WHERE at >= ? AND at < ? GROUP BY session
+      ORDER BY (COALESCE(SUM(miss),0)+COALESCE(SUM(hit),0)+COALESCE(SUM(out),0)) DESC LIMIT ?`)
+      .all(since, until, Math.max(1, Math.min(200, Number(limit) || 50)));
+  }
+  costTurns({ session, limit = 100 } = {}) {
+    return this.db.prepare(`SELECT turn, ${SPLITS}, COUNT(*) AS calls,
+      MIN(at) AS at, MAX(at) AS last FROM token_samples WHERE session = ?
+      GROUP BY turn ORDER BY turn DESC LIMIT ?`)
+      .all(String(session), Math.max(1, Math.min(500, Number(limit) || 100)));
+  }
+  recentSamples(limit = 40) {
+    return this.db.prepare(`SELECT turn_key, session, turn, seq, at, miss, hit, out, bucket
+      FROM token_samples ORDER BY at DESC LIMIT ?`).all(Math.max(1, Math.min(500, Number(limit) || 40)));
+  }
+  // Bounded growth: keep the newest `cap` rows (the roadmap's 20000-row ceiling).
+  pruneSamples(cap = 20000) {
+    const total = this.db.prepare('SELECT COUNT(*) AS n FROM token_samples').get().n;
+    const excess = total - Math.max(100, Number(cap) || 20000);
+    if (excess <= 0) return 0;
+    return this.db.prepare(`DELETE FROM token_samples WHERE turn_key IN
+      (SELECT turn_key FROM token_samples ORDER BY at ASC LIMIT ?)`).run(excess).changes;
+  }
 }

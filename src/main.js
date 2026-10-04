@@ -4,6 +4,7 @@ import { Model } from './model.js';
 import { Bot } from './bot.js';
 import { OneBot } from './onebot.js';
 import { Runtime } from './runtime.js';
+import { Ledger } from './ledger.js';
 import { createLogger } from './logger.js';
 import { createConsole } from './console/server.js';
 
@@ -17,7 +18,8 @@ if (process.argv.includes('--check')) {
 const startedAt = Date.now();
 const store = new Store(config.databasePath);
 const log = createLogger();
-const bot = new Bot(config, store, new Model(config), { log });
+const ledger = new Ledger({ store, log });
+const bot = new Bot(config, store, new Model(config), { log, ledger });
 // Every OneBot event fans out through the runtime. V2 adds more participants
 // (social simulation, message ledger); the answering bot is simply the first.
 const runtime = new Runtime({ log });

@@ -10,7 +10,7 @@ test('a fresh store exposes every V2 table', () => {
   const store = new Store();
   const names = store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name);
   for (const table of ['settings', 'sessions', 'groups', 'events', 'charges',
-    'messages', 'personas', 'slang', 'sim_state', 'token_samples']) {
+    'messages', 'personas', 'slang', 'sim_state', 'token_samples', 'counters']) {
     assert.ok(names.includes(table), `missing table ${table}`);
   }
   store.close();
