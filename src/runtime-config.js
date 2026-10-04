@@ -149,24 +149,33 @@ const valueOf = (config, store, name) => {
 const ORIGINAL = new WeakMap();
 
 // Wrap `config` so every `config.xxx` read resolves through the settings table
-// for the fields above and falls back to the `.env` default otherwise. The
-// target stays frozen, so a write still throws — only the console (via
-// `applyRuntimeValue`) can change an effective value, never in-process code.
+// for the fields above and falls back to the `.env` default otherwise.
+//
+// The proxy target is a **writable shallow copy**, not `config` itself. `config`
+// arrives frozen, and a proxy is forbidden from reporting a different value for
+// a non-writable, non-configurable data property — the moment an override was
+// stored, every `{ ...config }` (Bot.handle does one per turn, as does
+// Model.forProfile) threw `TypeError: 'get' on proxy` and the bot answered
+// nothing at all. A copy keeps the invariants satisfiable. Writes stay rejected
+// so only the console (via `applyRuntimeValue`) can move an effective value.
 export function createRuntimeConfig(config, store) {
   const effective = name => valueOf(config, store, name);
-  const proxy = new Proxy(config, {
-    get(target, prop, receiver) {
+  const target = { ...config };
+  const proxy = new Proxy(target, {
+    get(holder, prop, receiver) {
       if (prop === 'privateUser') {
         const users = effective('privateUsers');
-        return (Array.isArray(users) ? users : listOf(users))[0] ?? Reflect.get(target, prop, receiver);
+        return (Array.isArray(users) ? users : listOf(users))[0] ?? Reflect.get(holder, prop, receiver);
       }
       if (prop === 'groupId') {
         const groups = effective('groupIds');
-        return (Array.isArray(groups) ? groups : listOf(groups))[0] ?? Reflect.get(target, prop, receiver);
+        return (Array.isArray(groups) ? groups : listOf(groups))[0] ?? Reflect.get(holder, prop, receiver);
       }
       if (FIELDS_BY_NAME.has(prop)) return effective(prop);
-      return Reflect.get(target, prop, receiver);
+      return Reflect.get(holder, prop, receiver);
     },
+    set() { throw new TypeError('CONFIG_READ_ONLY'); },
+    deleteProperty() { throw new TypeError('CONFIG_READ_ONLY'); },
   });
   ORIGINAL.set(proxy, config);
   return proxy;

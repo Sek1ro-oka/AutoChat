@@ -84,6 +84,29 @@ test('human units round-trip through their internal units', () => {
   assert.equal(config.clearMs, 48 * 3600000);
 });
 
+test('a frozen source config with overrides still spreads and reads', () => {
+  // Regression: the proxy used to target the frozen config itself, so the first
+  // `{ ...config }` after any override threw "TypeError: 'get' on proxy:
+  // property 'botName' is a read-only and non-configurable data property on the
+  // proxy target but the proxy did not return its actual value". Bot.handle
+  // spreads the config once per turn, so every message died and the bot answered
+  // nothing. The target must stay a writable copy.
+  const store = new Store();
+  const config = createRuntimeConfig(Object.freeze(makeConfig()), store);
+  applyRuntimeValue(config, store, 'botName', 'DeepSleep');
+  applyRuntimeValue(config, store, 'groupIds', '77777');
+  const spread = { ...config };
+  assert.equal(spread.botName, 'DeepSleep', 'the override survives the spread');
+  assert.equal(spread.botId, '10000', 'untouched fields pass through');
+  assert.equal(spread.groupId, '77777', 'the derived id follows the overridden list');
+  assert.equal(Object.keys(spread).length, Object.keys(makeConfig()).length);
+});
+
+test('the proxy rejects writes from in-process code', () => {
+  const { config } = harness();
+  assert.throws(() => { config.model = 'other'; }, /CONFIG_READ_ONLY/);
+});
+
 test('runtimeValues exposes one entry per field with value and default', () => {
   const { store, config } = harness();
   const view = runtimeValues(config, store);
