@@ -280,14 +280,18 @@ personas/
 
 ## 7. 安全与隐私基线
 
-新增 `docs/security.md`，与 qq-bridge 的 `SECURITY_BASELINE.md` 对齐：
+新增 `docs/security.md`，与 qq-bridge 的 `SECURITY_BASELINE.md` 对齐（结构与"威胁模型 + 检查单"的写法参考上游，内容全部换成本项目**实际实现**的边界）。**已交付**，逐条状态：
 
-1. **控制台**：只绑 `127.0.0.1`；token 鉴权；token 文件权限收紧；密钥在 API 返回里一律打码；不做"远程访问"。
-2. **注入面**：群消息/图片文字/搜索结果一律不可信；进入提示词前转义；不把群友文本当指令。
-3. **工具面**：Phase 6 若引入工具，必须有白名单与"只读优先"。
-4. **出站**：只连 `.env` 里配置的本机 OneBot 与模型 HTTPS 地址（现有校验保留）。
-5. **落盘**：`data/`、`runtime/`、`logs/` 继续 gitignore；控制台 token 不入库。
-6. **改动检查单**：动到鉴权/发送/预算的改动，必须先读 `docs/security.md` 并跑安全相关测试。
+1. **控制台** ✅ — 只绑 `127.0.0.1`；token 鉴权（`timingSafeEqual`）；**token 文件权限收紧**（见第 6 条与 `src/permissions.js`）；密钥在 API 返回里递归打码；不做"远程访问"。
+2. **注入面** ✅ — 群消息/图片文字/搜索结果/模型回复一律不可信；进提示词前转义（`escapeForPrompt`）并把 `[` 换全角；结构标记由我们先写死，群友无法伪造；`logger.js` 用 `/^[a-z_]+$/` 校验事件名，聊天正文**结构上不可能**进日志。
+3. **工具面** ⏸ — Phase 6 未启动，当前**没有任何工具面**。已作为**硬性约束**记录在 `docs/security.md` §3.8：真要做 Agent 模式时，工具白名单（只读优先）与"工具调用共用同一预算账本"是前提，不是可选项。
+4. **出站** ✅ — OneBot 在 `config.js` 层校验 `ws:` + 主机名恰为 `127.0.0.1`/`[::1]`；读图 `https:` + 主机白名单（`qpic.cn`/`*.qpic.cn`/`multimedia.nt.qq.com.cn`）+ 手动重定向**重新校验**；零遥测、控制台零外部资源。
+5. **落盘** ✅ — `data/`、`runtime/`、`logs/`、`napcat/`、`.env` 继续 gitignore；控制台 token **不入库**，只落 `runtime/` 文件。
+6. **改动检查单** ✅ — 写在 `docs/security.md` §5，并在文档开头要求"动鉴权/发送/预算/提示词拼装前先读本文"。
+
+**交付物**：`docs/security.md` + `src/permissions.js` + 控制台响应头 + `test/permissions.test.js`。
+**测试**：token 文件权限收紧（创建时与升级时）、目录 ACE 向已存在与新建子文件传播、失败不抛异常、控制台防框架化响应头。
+**验收**：`icacls data` 与 `icacls .env` 只剩三条 ACE；`data/` 之外的 `runtime/` 大目录不被遍历。
 
 ---
 
@@ -350,10 +354,16 @@ personas/
   5. **"文件不存在 ≠ 读失败"这条教训在本项目里只有一处落地。** 词库的事实来源是 SQLite（有事务保护），没有"文件读失败"这种状态；该教训只在**备份恢复**路径上有文件可谈，因此只在 `importAll()` 里实现：解析失败时把原文另存为 `runtime/slang-corrupt-<时间戳>.json` 并报错，绝不返回空数组导致词库被清空。
   6. **未实现"分词"或自动切词。** 词条的识别完全交给模型，本地只做"候选必须在记录原文里出现过"这一条校验（防止模型编词）。
 
+- **2026-10-04 · 安全与隐私基线（§7）交付**：新增 `src/permissions.js`（Windows 显式 DACL 收紧：`/inheritance:r` + `/remove:g` 宽主体清单 + `/grant:r` 三条；POSIX 退回 `chmod`；全程 best-effort，失败只记事件）；接入四处——启动时 `data/`（目录级）与 `.env`、控制台 token 文件（**读到旧文件时也收紧**，兼顾升级修复）、黑话损坏备份；控制台 `send()` 补 `X-Frame-Options: DENY` 与 `frame-ancestors 'none'` CSP。文档见 [安全与隐私基线](security.md)。测试 200 → 207，全绿。
+  - **这是路线图里唯一一条曾承诺但未兑现的条目。** 原因值得记录：`writeFileSync(path, text, { mode: 0o600 })` 在 Windows 上是**空操作**，源码里写着 `0o600` 看起来像做好了，实际 `data/autochat.sqlite`（聊天记录 + 账本）与 `.env`（API key）对任何本机已认证账号可读写 —— 实测真实 `data/` 的 DACL 里有 `NT AUTHORITY\Authenticated Users:(I)(M)`。
+  - **实现细节（均为本机实测，不是推测）**：不需要提权（所有者隐含 `WRITE_DAC`）；不需要 `/t`（目录上的可继承 ACE 会连已存在的子文件一起更新，实测先存的 `existing.txt` 变 `(I)(F)`，之后新建的也自动继承）。
+  - **踩到的两个坑**：① `/grant:r` 只替换它点名的主体的授权，`/inheritance:r` 也不动**显式** ACE，因此一个显式授给宽主体的 ACE 能同时躲过两步（加固后剩 4 条）；必须先用 `/remove:g` 加一份固定宽主体 SID 清单清一遍。② 系统工具要用绝对路径 —— `whoami` 在 Git Bash 下会被 coreutils 的同名程序抢走，而它不认 `/user`；子进程 stdin 也不能用默认管道（实测 `spawnSync` 报 `EBUSY`），改用 `['ignore','pipe','pipe']`。
+  - **范围收窄**：**不对 `runtime/` 整个目录下手**。那里有便携 Node、NapCat 安装与 >120 MB 下载缓存，`icacls` 会遍历传播，把一个 50 ms 的启动步骤变成几秒的整树重写。
+  - **不做**：Host 头校验 / DNS rebinding 硬化、静态加密、依赖审计流程 —— 理由逐条写在 `docs/security.md` §4「残余风险」，不粉饰。
+
 ---
 
 ## 10. 参考
-
 - [qq-bridge](https://github.com/Derpyu520/qq-bridge)：控制台交互、一代/二代仿真、黑话学习、峰谷分时看板、文档组织。
 - [DeepSeek 计价文档](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)：峰谷时段与单价。
 - 本项目既有：[开发方案](development.md)、[需求文档](requirements.md)、[配置与服务管理](configuration.md)、[人设说明](persona.md)。
