@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { SCHEMA } from './schema.js';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -11,58 +12,6 @@ export function budgetDay(now = Date.now()) {
   return new Date(now + CHINA_OFFSET_MS).toISOString().slice(0, 10);
 }
 
-// Base schema. Tables are created with the current shape; older databases are
-// upgraded in place by `migrate()` below (see the ALTER TABLE notes there).
-const SCHEMA = `
-  PRAGMA journal_mode=WAL;
-  PRAGMA busy_timeout=5000;
-  PRAGMA secure_delete=ON;
-  CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-  CREATE TABLE IF NOT EXISTS sessions (
-    key TEXT PRIMARY KEY, scope TEXT NOT NULL, history TEXT NOT NULL,
-    updated INTEGER, items INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, due INTEGER NOT NULL);
-  CREATE TABLE IF NOT EXISTS events (key TEXT PRIMARY KEY, created INTEGER NOT NULL);
-  CREATE TABLE IF NOT EXISTS charges (
-    id TEXT PRIMARY KEY, day TEXT NOT NULL, reserved INTEGER NOT NULL,
-    actual INTEGER, state TEXT NOT NULL, created INTEGER NOT NULL,
-    session_key TEXT, bucket TEXT NOT NULL DEFAULT 'peak'
-  );
-  CREATE INDEX IF NOT EXISTS charges_day ON charges(day);
-  -- Group message ledger: only what social simulation and slang learning need.
-  CREATE TABLE IF NOT EXISTS messages (
-    group_id TEXT NOT NULL, message_id TEXT NOT NULL, user_id TEXT NOT NULL,
-    at INTEGER NOT NULL, text TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'text',
-    PRIMARY KEY (group_id, message_id)
-  );
-  CREATE INDEX IF NOT EXISTS messages_at ON messages(at);
-  CREATE TABLE IF NOT EXISTS personas (name TEXT PRIMARY KEY, content TEXT NOT NULL, updated INTEGER NOT NULL);
-  CREATE TABLE IF NOT EXISTS slang (
-    id TEXT PRIMARY KEY, content TEXT NOT NULL, meaning TEXT NOT NULL DEFAULT '',
-    usage TEXT NOT NULL DEFAULT '', example TEXT NOT NULL DEFAULT '', risk TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'candidate', source TEXT NOT NULL DEFAULT 'ai',
-    count INTEGER NOT NULL DEFAULT 1, sources TEXT NOT NULL DEFAULT '[]',
-    evidence TEXT NOT NULL DEFAULT '[]', created INTEGER NOT NULL, updated INTEGER NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS slang_status ON slang(status);
-  CREATE TABLE IF NOT EXISTS sim_state (
-    group_id TEXT PRIMARY KEY, state TEXT NOT NULL, last_spoke_at INTEGER,
-    energy REAL NOT NULL DEFAULT 0, updated INTEGER NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS token_samples (
-    turn_key TEXT PRIMARY KEY, session TEXT NOT NULL, turn INTEGER NOT NULL,
-    seq INTEGER NOT NULL, at INTEGER NOT NULL, miss INTEGER NOT NULL DEFAULT 0,
-    hit INTEGER NOT NULL DEFAULT 0, out INTEGER NOT NULL DEFAULT 0,
-    bucket TEXT NOT NULL DEFAULT 'peak'
-  );
-  CREATE INDEX IF NOT EXISTS token_samples_at ON token_samples(at);
-  CREATE INDEX IF NOT EXISTS token_samples_session ON token_samples(session, turn);
-  -- Monotonic counters (Phase 5 uses 'turn'). Kept in SQLite, not in memory, so
-  -- the value survives a restart: reused turn ids would overwrite old samples.
-  CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
-`;
-
 // Six non-overlapping peak/off splits. Every aggregate that reports money reuses
 // this fragment so the console never has to guess which price a token paid.
 const SPLITS = `
@@ -74,6 +23,17 @@ const SPLITS = `
   COALESCE(SUM(CASE WHEN bucket!='peak' THEN out ELSE 0 END),0) AS outOff`;
 
 const columns = (db, table) => new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name));
+
+// `source(s)`/`evidence` columns are JSON arrays; a row that fails to parse is
+// treated as empty rather than throwing, so one bad row cannot hide the library.
+const parseArray = value => {
+  try {
+    const parsed = JSON.parse(value ?? '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+};
+const slangRow = row => (row ? { ...row, sources: parseArray(row.sources), evidence: parseArray(row.evidence) } : null);
+const unique = list => [...new Set((Array.isArray(list) ? list : []).map(item => String(item)).filter(Boolean))];
 
 export class Store {
   constructor(path = ':memory:') {
@@ -95,6 +55,11 @@ export class Store {
     add('charges', 'session_key', 'TEXT');
     add('charges', 'bucket', "TEXT NOT NULL DEFAULT 'peak'");
     this.db.exec('CREATE INDEX IF NOT EXISTS charges_session ON charges(session_key)');
+    // One row per term (Phase 4). No released code path has ever written to
+    // `slang`, so collapsing duplicates is only a safety net; both statements
+    // are idempotent and safe to run on every startup.
+    this.db.exec('DELETE FROM slang WHERE rowid NOT IN (SELECT MIN(rowid) FROM slang GROUP BY content)');
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS slang_content ON slang(content)');
     return this;
   }
   close() { this.db.close(); }
@@ -229,6 +194,120 @@ export class Store {
     return this.db.prepare('SELECT name, content, updated FROM personas WHERE name=?').get(String(name)) ?? null;
   }
   deletePersona(name) { this.db.prepare('DELETE FROM personas WHERE name=?').run(String(name)); }
+  // --- Slang library (V2 · Phase 4) ----------------------------------------
+  // One row per term. `status` is the only thing that decides whether a term is
+  // ever injected into a prompt, so an unconfirmed candidate is inert. `count`
+  // is how many times extraction has seen it; `sources`/`evidence` record where
+  // the meaning came from and which group messages backed it.
+  listSlang({ status = null, limit = 500 } = {}) {
+    const cap = Math.max(1, Math.min(5000, Number(limit) || 500));
+    if (status) {
+      return this.db.prepare(`SELECT * FROM slang WHERE status=? ORDER BY count DESC, updated DESC LIMIT ?`)
+        .all(String(status), cap).map(slangRow);
+    }
+    // Confirmed first: that is the order a human reads the console list in.
+    return this.db.prepare(`SELECT * FROM slang ORDER BY (status='confirmed') DESC, count DESC, updated DESC LIMIT ?`)
+      .all(cap).map(slangRow);
+  }
+  getSlang(id) { return slangRow(this.db.prepare('SELECT * FROM slang WHERE id=?').get(String(id))); }
+  countSlang() {
+    return this.db.prepare(`SELECT COUNT(*) AS total,
+      COALESCE(SUM(CASE WHEN status='confirmed' THEN 1 ELSE 0 END),0) AS confirmed,
+      COALESCE(SUM(CASE WHEN status='candidate' THEN 1 ELSE 0 END),0) AS candidate,
+      COALESCE(SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END),0) AS rejected
+      FROM slang`).get();
+  }
+  // Observation semantics: a new term is inserted as a candidate, an existing
+  // one only accumulates evidence and a counter. The status is deliberately not
+  // touched — a human rejection must survive the next extraction.
+  upsertSlang({ content, meaning = '', usage = '', example = '', risk = '', status = 'candidate',
+    source = 'ai', sources = [], evidence = [], now = Date.now() }) {
+    const term = String(content ?? '').trim();
+    if (!term) throw new Error('SLANG_TERM_INVALID');
+    return this.transaction(() => {
+      const existing = this.db.prepare('SELECT * FROM slang WHERE content=?').get(term);
+      if (!existing) {
+        const id = randomUUID();
+        this.db.prepare(`INSERT INTO slang (id, content, meaning, usage, example, risk, status, source,
+          count, sources, evidence, created, updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .run(id, term, String(meaning), String(usage), String(example), String(risk), String(status),
+            String(source), 1, JSON.stringify(unique(sources)), JSON.stringify(unique(evidence)), now, now);
+        return { id, content: term, created: true, count: 1 };
+      }
+      const count = Number(existing.count) + 1;
+      this.db.prepare(`UPDATE slang SET meaning=?, usage=?, example=?, risk=?, count=?,
+        sources=?, evidence=?, updated=? WHERE id=?`)
+        .run(existing.meaning || String(meaning), existing.usage || String(usage),
+          existing.example || String(example), existing.risk || String(risk), count,
+          JSON.stringify(unique([...parseArray(existing.sources), ...(Array.isArray(sources) ? sources : [])])),
+          JSON.stringify(unique([...parseArray(existing.evidence), ...(Array.isArray(evidence) ? evidence : [])])),
+          now, existing.id);
+      return { id: existing.id, content: term, created: false, count };
+    });
+  }
+  setSlangStatus(id, status, now = Date.now()) {
+    return this.db.prepare('UPDATE slang SET status=?, updated=? WHERE id=?')
+      .run(String(status), now, String(id)).changes;
+  }
+  // Text fields plus provenance (`source`/`sources`), which the web lookup sets
+  // together with the meaning it proposes.
+  updateSlang(id, fields = {}, now = Date.now()) {
+    const sets = [];
+    const values = [];
+    for (const key of ['meaning', 'usage', 'example', 'risk']) {
+      if (typeof fields[key] === 'string') { sets.push(`${key}=?`); values.push(fields[key]); }
+    }
+    if (typeof fields.source === 'string') { sets.push('source=?'); values.push(fields.source); }
+    if (Array.isArray(fields.sources)) { sets.push('sources=?'); values.push(JSON.stringify(unique(fields.sources))); }
+    if (!sets.length) return null;
+    this.db.prepare(`UPDATE slang SET ${sets.join(', ')}, updated=? WHERE id=?`).run(...values, now, String(id));
+    return this.getSlang(id);
+  }
+  deleteSlang(id) { return this.db.prepare('DELETE FROM slang WHERE id=?').run(String(id)).changes; }
+  exportSlang() { return this.db.prepare('SELECT * FROM slang ORDER BY created, content').all(); }
+  // Restore semantics for a backup file: keep every human decision that already
+  // exists locally, take the larger count, and fill blanks. Runs as one
+  // transaction so a partial import cannot leave half a library behind.
+  restoreSlang(rows, now = Date.now()) {
+    let added = 0; let merged = 0;
+    return this.transaction(() => {
+      for (const row of Array.isArray(rows) ? rows : []) {
+        const term = String(row?.content ?? '').trim();
+        if (!term) continue;
+        const existing = this.db.prepare('SELECT * FROM slang WHERE content=?').get(term);
+        if (!existing) {
+          const status = ['candidate', 'confirmed', 'rejected'].includes(row.status) ? row.status : 'candidate';
+          this.db.prepare(`INSERT INTO slang (id, content, meaning, usage, example, risk, status, source,
+            count, sources, evidence, created, updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+            .run(randomUUID(), term, String(row.meaning ?? ''), String(row.usage ?? ''), String(row.example ?? ''),
+              String(row.risk ?? ''), status, String(row.source ?? 'import'),
+              Math.max(1, Number(row.count) || 1), JSON.stringify(unique(row.sources)),
+              JSON.stringify(unique(row.evidence)), Number(row.created) || now, now);
+          added += 1;
+          continue;
+        }
+        this.db.prepare(`UPDATE slang SET meaning=?, usage=?, example=?, risk=?, count=?,
+          sources=?, evidence=?, updated=? WHERE id=?`)
+          .run(existing.meaning || String(row.meaning ?? ''), existing.usage || String(row.usage ?? ''),
+            existing.example || String(row.example ?? ''), existing.risk || String(row.risk ?? ''),
+            Math.max(Number(existing.count) || 1, Number(row.count) || 1),
+            JSON.stringify(unique([...parseArray(existing.sources), ...unique(row.sources)])),
+            JSON.stringify(unique([...parseArray(existing.evidence), ...unique(row.evidence)])), now, existing.id);
+        merged += 1;
+      }
+      return { added, merged };
+    });
+  }
+  // Capacity ceiling. Trim lowest-keep-priority first: an unconfirmed, rarely
+  // seen, stale term goes before a confirmed one.
+  trimSlang(cap = 2000) {
+    const limit = Math.max(1, Number(cap) || 2000);
+    const total = this.countSlang().total;
+    if (total <= limit) return 0;
+    return this.db.prepare(`DELETE FROM slang WHERE id IN
+      (SELECT id FROM slang ORDER BY (status='confirmed') ASC, count ASC, updated ASC LIMIT ?)`)
+      .run(total - limit).changes;
+  }
   // --- Token samples (V2 · Phase 5) ----------------------------------------
   // Global monotonic turn id, allocated in SQLite so it never restarts at 1.
   nextTurn() {
