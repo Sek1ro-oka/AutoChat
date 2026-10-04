@@ -7,6 +7,7 @@ import { Runtime } from './runtime.js';
 import { Ledger } from './ledger.js';
 import { Personas } from './personas.js';
 import { Social } from './social/engine.js';
+import { Slang } from './social/slang.js';
 import { DEFAULT_PERSONA } from './persona.js';
 import { createLogger } from './logger.js';
 import { createConsole } from './console/server.js';
@@ -31,24 +32,38 @@ const personas = new Personas({
   envPrompt: config.systemPromptOverride, fallback: DEFAULT_PERSONA,
   defaultName: config.personaDefault,
 });
-const bot = new Bot(config, store, new Model(config), { log, ledger, personas });
+const model = new Model(config);
+// Slang library (Phase 4). Always constructed so the console can read and review
+// it; extraction and injection are both gated on the enable switch, and automatic
+// extraction additionally needs SLANG_AUTO_EXTRACT. Confirmed terms are appended
+// to group prompts by Bot and Social — see docs/slang.md.
+const slang = new Slang({ config, store, model, ledger, log });
+const bot = new Bot(config, store, model, { log, ledger, personas, slang });
 // Social simulation (Phase 3). Always constructed, even when disabled, so the
 // console can turn it on at runtime; `observe` returns immediately while off and
 // writes nothing, so a stock `.env` keeps group messages out of the database.
-const social = new Social({ config, store, model: bot.model, ledger, personas, log });
+const social = new Social({ config, store, model, ledger, personas, slang, log });
 // Every OneBot event fans out through the runtime. The answering bot handles what
 // addresses it; the simulation handles everything else in the same groups.
 const runtime = new Runtime({ log });
 runtime.use('core', (event, send, alive) => bot.ingest(event, send, alive));
 runtime.use('social', (event, send, alive) => social.observe(event, send, alive));
 const transport = new OneBot(config, { onEvent: (...args) => runtime.dispatch(...args), log });
-const timer = setInterval(() => { bot.tick(); social.maintain(); }, 30000);
+// The maintenance tick also gives the slang library its periodic chance to
+// extract. Off unless SLANG_AUTO_EXTRACT is set; the promise is kept so shutdown
+// can wait for a paid call that is already in flight.
+let slangTick = Promise.resolve();
+const timer = setInterval(() => {
+  bot.tick();
+  social.maintain();
+  slangTick = slangTick.then(() => slang.maybeExtract()).catch(() => log('slang_auto_extract_failed'));
+}, 30000);
 transport.start();
 log('service_started');
 
 let consoleServer = null;
 if (config.consoleEnabled) {
-  consoleServer = createConsole({ config, store, bot, transport, runtime, personas, social, log, startedAt });
+  consoleServer = createConsole({ config, store, bot, transport, runtime, personas, social, slang, log, startedAt });
   consoleServer.start()
     .then(() => console.log(`AutoChat 控制台：${consoleServer.url()}`))
     .catch(error => { console.error(`控制台启动失败：${error.message}`); consoleServer = null; });
@@ -64,6 +79,7 @@ async function stop() {
   await bot.tail;
   await bot.antiSpam.tail;
   await social.drain();
+  await slangTick;
   store.close(); log('service_stopped');
 }
 process.on('SIGINT', stop);

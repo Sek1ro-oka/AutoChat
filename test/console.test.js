@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { Store } from '../src/store.js';
 import { Personas } from '../src/personas.js';
 import { Social } from '../src/social/engine.js';
+import { Slang } from '../src/social/slang.js';
 import { DEFAULT_PERSONA } from '../src/persona.js';
 import { createConsole } from '../src/console/server.js';
 import { buildSummary, buildConfig, buildCost, buildCostTurns, redact } from '../src/console/api.js';
@@ -57,6 +58,29 @@ function socialFixture(t) {
   return { store, social, server };
 }
 
+// A console wired to a real Slang library, for the Phase 4 read/write paths.
+function slangFixture(t) {
+  const store = new Store();
+  t.after(() => store.close());
+  const config = {
+    model: 'deepseek-flash', budgetMicro: 1000000, consoleToken: TOKEN, consolePort: 0,
+    botId: '10000', groupId: '20000', groupIds: ['20000'],
+    slangEnabled: true, slangInjectMax: 20, slangExtractMessages: 120,
+    slangAutoExtract: false, slangExtractIntervalHours: 12, webSearchEnabled: false,
+    maxOutput: 1024, inputPrice: 2, outputPrice: 8, systemPrompt: '人设',
+  };
+  const model = {
+    complete: async () => ({
+      text: '[{"term":"yyds","meaning":"永远的神","example":"这才是 yyds"}]',
+      usage: { prompt_tokens: 100, completion_tokens: 10 },
+    }),
+  };
+  store.noteMessage({ groupId: '20000', messageId: 'm1', userId: '30001', at: Date.now() - 1000, text: '这才是 yyds' });
+  const slang = new Slang({ config, store, model, log: () => {} });
+  const server = createConsole({ config, store, slang, log: () => {}, port: 0 });
+  return { store, slang, server };
+}
+
 const auth = { 'x-console-token': TOKEN };
 const jsonPost = (base, path, body, extra = {}) => fetch(base + path, {
   method: 'POST', headers: { ...auth, 'Content-Type': 'application/json', ...extra },
@@ -69,7 +93,8 @@ test('every api route requires the console token', async t => {
   t.after(() => server.stop());
   const base = `http://127.0.0.1:${server.address().port}`;
   for (const path of ['/api/summary', '/api/sessions', '/api/charges', '/api/logs', '/api/config',
-    '/api/cost', '/api/cost/turns', '/api/personas', '/api/personas/file', '/api/social']) {
+    '/api/cost', '/api/cost/turns', '/api/personas', '/api/personas/file', '/api/social',
+    '/api/slang', '/api/slang/entry', '/api/slang/export']) {
     assert.equal((await fetch(base + path)).status, 401, path);
   }
   assert.equal((await fetch(`${base}/api/summary?token=wrong`)).status, 401);
@@ -100,14 +125,18 @@ test('unknown api routes 404 and the shell page needs no token', async t => {
   assert.equal(page.status, 200);
   const html = await page.text();
   assert.match(html, /AutoChat 控制台/);
-  assert.match(html, /data-page="social"/, 'the simulation page is reachable from the nav');
-  assert.match(html, /<script src="app\.js"><\/script>/, 'the shell loads its logic from its own file');
-  // The script asset is served without a token: it is code, not data, and the
-  // browser cannot attach a header to its own <script> fetch.
-  const app = await fetch(`${base}/app.js`);
-  assert.equal(app.status, 200);
-  assert.match(app.headers.get('content-type'), /javascript/);
-  assert.match(await app.text(), /autochat\.console\.token/);
+  for (const page of ['social', 'slang']) assert.match(html, new RegExp(`data-page="${page}"`), `${page} is reachable from the nav`);
+  // Load order matters: pages.js defines the `pages` object that app.js renders from.
+  assert.match(html, /<script src="pages\.js"><\/script>\s*<script src="app\.js"><\/script>/);
+  // The script assets are served without a token: they are code, not data, and
+  // the browser cannot attach a header to its own <script> fetch.
+  for (const asset of ['app.js', 'pages.js']) {
+    const served = await fetch(`${base}/${asset}`);
+    assert.equal(served.status, 200, asset);
+    assert.match(served.headers.get('content-type'), /javascript/, asset);
+  }
+  assert.match(await (await fetch(`${base}/app.js`)).text(), /autochat\.console\.token/);
+  assert.match(await (await fetch(`${base}/pages.js`)).text(), /async slang\(\)/);
   assert.equal((await fetch(`${base}/../src/config.js`)).status, 404, 'no path traversal out of public/');
   assert.equal((await fetch(`${base}/app.js.bak`)).status, 404);
 });
@@ -284,4 +313,63 @@ test('the simulation page reads state and accepts only guarded parameter writes'
   assert.equal((await jsonPost(base, '/api/social/config', { threshold: 999 })).status, 400);
   assert.equal((await jsonPost(base, '/api/social/config', { cooldownSeconds: 1 })).status, 400);
   assert.equal((await jsonPost(base, '/api/social/config', { group: '99999', muted: true })).status, 400);
+});
+
+test('the slang page reads the library, guards its writes and keeps chat text out of the list', async t => {
+  const { server, slang, store } = slangFixture(t);
+  await server.start();
+  t.after(() => server.stop());
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const empty = await (await fetch(`${base}/api/slang`, { headers: auth })).json();
+  assert.equal(empty.available, true);
+  assert.equal(empty.enabled, true);
+  assert.equal(empty.stats.total, 0);
+  assert.equal(empty.preview, '', 'nothing is injected before a human confirms anything');
+  assert.deepEqual(empty.groups, ['20000']);
+
+  // Writes need the header token and a loopback origin, like every other write.
+  const onlyQuery = await fetch(`${base}/api/slang/config?token=${TOKEN}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(onlyQuery.status, 403);
+  assert.equal((await onlyQuery.json()).error, 'header_token_required');
+  const foreign = await jsonPost(base, '/api/slang/extract', { group: '20000' }, { Origin: 'http://evil.example' });
+  assert.equal(foreign.status, 403);
+  assert.equal((await foreign.json()).error, 'origin_rejected');
+
+  // Extraction costs a model call, so the failure modes must be real statuses.
+  assert.equal((await jsonPost(base, '/api/slang/extract', { group: '99999' })).status, 400);
+  assert.equal((await jsonPost(base, '/api/slang/extract', { group: '20000' })).status, 200);
+
+  const listed = await (await fetch(`${base}/api/slang`, { headers: auth })).json();
+  assert.equal(listed.stats.candidate, 1);
+  assert.equal(listed.entries[0].term, 'yyds');
+  assert.equal(listed.entries[0].example, undefined, 'a verbatim group quote never rides along with the list');
+  const id = listed.entries[0].id;
+
+  const detail = await (await fetch(`${base}/api/slang/entry?id=${id}`, { headers: auth })).json();
+  assert.equal(detail.entry.example, '这才是 yyds', 'it is served on an explicit click');
+
+  const confirmed = await (await jsonPost(base, '/api/slang/status', { id, status: 'confirmed' })).json();
+  assert.equal(confirmed.stats.confirmed, 1);
+  assert.match(confirmed.preview, /yyds = 永远的神/, 'the page shows exactly what would be injected');
+  assert.equal(store.listSlang({ status: 'confirmed' }).length, 1);
+
+  assert.equal((await jsonPost(base, '/api/slang/status', { id, status: 'nonsense' })).status, 400);
+  assert.equal((await jsonPost(base, '/api/slang/status', { id: 'missing', status: 'confirmed' })).status, 404);
+  assert.equal((await jsonPost(base, '/api/slang/entry', { id })).status, 400);
+  assert.equal((await jsonPost(base, '/api/slang/lookup', { id })).status, 409, 'web search is off in this fixture');
+  assert.equal((await jsonPost(base, '/api/slang/delete', { id: 'missing' })).status, 404);
+
+  // Backup export is a read; restore refuses a corrupt file instead of emptying the library.
+  const exported = await (await fetch(`${base}/api/slang/export`, { headers: auth })).json();
+  assert.equal(exported.version, 1);
+  assert.equal(exported.entries.length, 1);
+  assert.equal((await jsonPost(base, '/api/slang/import', { text: '{ broken' })).status, 400);
+  assert.equal(store.countSlang().total, 1, 'a failed restore changes nothing');
+
+  const removed = await (await jsonPost(base, '/api/slang/delete', { id })).json();
+  assert.equal(removed.stats.total, 0);
+  assert.equal(slang.describe().preview, '');
 });

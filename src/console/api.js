@@ -156,3 +156,16 @@ export function buildSocial({ social, now = Date.now() }) {
   if (!social) return { available: false };
   return { available: true, ...social.describe({ now }) };
 }
+
+// --- Slang library (Phase 4) -----------------------------------------------
+// The list is text-free apart from the curated meaning; the verbatim group quote
+// behind an entry is only served one at a time, on an explicit click.
+export function buildSlang({ slang }) {
+  if (!slang) return { available: false };
+  return { available: true, ...slang.describe(), exportable: true };
+}
+
+export function buildSlangEntry({ slang, id }) {
+  if (!slang) throw new Error('SLANG_UNAVAILABLE');
+  return slang.entry(id);
+}

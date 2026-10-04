@@ -17,19 +17,26 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   buildSummary, buildSessions, buildCharges, buildConfig, buildCost, buildCostTurns,
-  buildPersonas, buildPersonaFile, buildSocial,
+  buildPersonas, buildPersonaFile, buildSocial, buildSlang, buildSlangEntry,
 } from './api.js';
 import { readLogs } from './logs.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const INDEX_PATH = join(HERE, 'public', 'index.html');
-// Whitelisted shell assets. The page logic lives in its own file so neither
-// file has to grow past the project's 400-line ceiling as pages are added.
+// Whitelisted shell assets. The page logic lives in its own files so none of
+// them has to grow past the project's 400-line ceiling as pages are added.
+// pages.js must be listed (and loaded) before app.js: it defines the `pages`
+// object that app.js's render() dispatches to.
 const ASSETS = new Map([
+  ['/pages.js', ['public/pages.js', 'text/javascript; charset=utf-8']],
   ['/app.js', ['public/app.js', 'text/javascript; charset=utf-8']],
 ]);
 const TOKEN_HEADER = 'x-console-token';
 const MAX_BODY_BYTES = 128 * 1024;
+// A slang backup may legitimately hold the full 2000-entry library, which is far
+// larger than any structured body the other endpoints accept.
+const BODY_LIMITS = new Map([['/api/slang/import', 2 * 1024 * 1024]]);
+const bodyLimit = pathname => BODY_LIMITS.get(pathname) ?? MAX_BODY_BYTES;
 
 // Persona failures are the only ones a client can cause, so they get real
 // status codes instead of a blanket 500.
@@ -38,6 +45,12 @@ const ERROR_STATUS = new Map([
   ['PERSONA_CONTENT_TOO_LARGE', 413], ['PERSONA_LIMIT', 409], ['PERSONA_NOT_FOUND', 404],
   ['PERSONA_UNAVAILABLE', 503], ['BODY_TOO_LARGE', 413], ['bad_json', 400],
   ['SOCIAL_UNAVAILABLE', 503], ['SOCIAL_PARAM_INVALID', 400],
+  // The slang library: 4xx for what the operator can fix, 502 for upstream.
+  ['SLANG_UNAVAILABLE', 503], ['SLANG_PARAM_INVALID', 400], ['SLANG_NOT_FOUND', 404],
+  ['SLANG_DISABLED', 409], ['SLANG_BUDGET_BLOCKED', 409], ['SLANG_SEARCH_DISABLED', 409],
+  ['SLANG_SEARCH_LIMIT', 429], ['SLANG_IMPORT_INVALID', 400],
+  ['SLANG_MODEL_FAILED', 502], ['SLANG_EXTRACT_UNPARSABLE', 502],
+  ['SLANG_LOOKUP_UNVERIFIED', 502], ['SLANG_LOOKUP_EMPTY', 502],
 ]);
 
 const equal = (a, b) => {
@@ -82,13 +95,13 @@ function send(res, status, body, type = 'application/json; charset=utf-8') {
 }
 
 // Cap the body so a stuck or hostile client cannot grow the process heap.
-function readBody(req) {
+function readBody(req, max = MAX_BODY_BYTES) {
   return new Promise((resolveBody, reject) => {
     const chunks = [];
     let size = 0;
     req.on('data', chunk => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) { reject(new Error('BODY_TOO_LARGE')); req.destroy(); return; }
+      if (size > max) { reject(new Error('BODY_TOO_LARGE')); req.destroy(); return; }
       chunks.push(chunk);
     });
     req.on('end', () => resolveBody(Buffer.concat(chunks).toString('utf8')));
@@ -97,7 +110,7 @@ function readBody(req) {
 }
 
 export function createConsole({
-  config, store, bot, transport, runtime, personas = null, social = null, log = () => {},
+  config, store, bot, transport, runtime, personas = null, social = null, slang = null, log = () => {},
   startedAt = Date.now(), host = '127.0.0.1', port = null, logDirectory = 'logs',
 } = {}) {
   const token = resolveToken(config, log);
@@ -111,6 +124,10 @@ export function createConsole({
   const requireSocial = () => {
     if (!social) throw new Error('SOCIAL_UNAVAILABLE');
     return social;
+  };
+  const requireSlang = () => {
+    if (!slang) throw new Error('SLANG_UNAVAILABLE');
+    return slang;
   };
 
   const reads = {
@@ -130,6 +147,11 @@ export function createConsole({
       name: url.searchParams.get('name') ?? '',
     }),
     '/api/social': () => buildSocial({ social, now: now() }),
+    '/api/slang': () => buildSlang({ slang }),
+    '/api/slang/entry': (url) => buildSlangEntry({ slang: requireSlang(), id: url.searchParams.get('id') ?? '' }),
+    // The backup is served as a plain JSON document so the browser can save it
+    // with one click; restoring goes through the write route below.
+    '/api/slang/export': () => requireSlang().exportAll(),
   };
 
   // Every write returns the freshly described persona state so the page can
@@ -149,6 +171,15 @@ export function createConsole({
       return { active: target.setActive(body?.name ?? ''), ...buildPersonas({ personas }) };
     },
     '/api/social/config': (url, body) => requireSocial().setParams(body ?? {}),
+    // Slang review (Phase 4). Every write returns the re-described library, so
+    // the page re-renders from one response instead of chaining a read.
+    '/api/slang/config': (url, body) => requireSlang().setParams(body ?? {}),
+    '/api/slang/extract': (url, body) => requireSlang().extract({ group: body?.group ?? null }).then(result => ({ result, ...requireSlang().describe() })),
+    '/api/slang/status': (url, body) => requireSlang().setStatus(body?.id, body?.status),
+    '/api/slang/entry': (url, body) => requireSlang().edit(body?.id, body ?? {}),
+    '/api/slang/delete': (url, body) => requireSlang().remove(body?.id),
+    '/api/slang/lookup': (url, body) => requireSlang().lookup(body?.id),
+    '/api/slang/import': (url, body) => requireSlang().importAll(body?.text),
   };
 
   async function handle(req, res) {
@@ -189,7 +220,7 @@ export function createConsole({
     try {
       let body = null;
       if (writing) {
-        const raw = await readBody(req);
+        const raw = await readBody(req, bodyLimit(pathname));
         try { body = JSON.parse(raw || '{}'); } catch { throw new Error('bad_json'); }
       }
       send(res, 200, await route(url, body));

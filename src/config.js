@@ -136,6 +136,16 @@ export function loadConfig(env = process.env) {
     socialMessageTtlMs: number('SOCIAL_MESSAGE_TTL_HOURS', 24, 1, 720) * 3600000,
     botName: env.BOT_NAME?.trim() || '',
     botNicknames: Object.freeze((env.BOT_NICKNAMES || '').split(',').map(value => value.trim()).filter(Boolean)),
+    // Slang library (V2 · Phase 4). Off by default: with SLANG_ENABLED unset no
+    // group message ever reaches the extraction model and no table is injected,
+    // so a stock `.env` behaves exactly as it did before this phase.
+    slangEnabled: (env.SLANG_ENABLED || 'false').trim() === 'true',
+    slangInjectMax: integer('SLANG_INJECT_MAX', 20, 1, 30),
+    slangExtractMessages: integer('SLANG_EXTRACT_MESSAGES', 120, 10, 500),
+    // Automatic (timer-driven) extraction stays off unless asked for: it spends
+    // money without a human pressing anything.
+    slangAutoExtract: (env.SLANG_AUTO_EXTRACT || 'false').trim() === 'true',
+    slangExtractIntervalHours: number('SLANG_EXTRACT_INTERVAL_HOURS', 12, 1, 168),
   };
   if (!['true', 'false'].includes((env.CONSOLE_ENABLED || 'false').trim())) {
     throw new Error('CONSOLE_ENABLED 必须是 true 或 false');
@@ -170,6 +180,12 @@ export function loadConfig(env = process.env) {
   }
   if (config.botName.length > 24 || config.botNicknames.some(name => name.length > 24)) {
     throw new Error('BOT_NAME 与 BOT_NICKNAMES 每项最多 24 字');
+  }
+  if (!['true', 'false'].includes((env.SLANG_ENABLED || 'false').trim())) {
+    throw new Error('SLANG_ENABLED 必须是 true 或 false');
+  }
+  if (!['true', 'false'].includes((env.SLANG_AUTO_EXTRACT || 'false').trim())) {
+    throw new Error('SLANG_AUTO_EXTRACT 必须是 true 或 false');
   }
   config.modelProfiles = loadModelProfiles(env, config);
   config.sendThinking = config.modelProfiles[0].sendThinking;
