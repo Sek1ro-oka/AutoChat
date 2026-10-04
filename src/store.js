@@ -194,6 +194,28 @@ export class Store {
       .all(String(groupId), since, Math.max(1, Math.min(500, Number(limit) || 100)));
   }
   pruneMessages(cutoff) { return this.db.prepare('DELETE FROM messages WHERE at < ?').run(cutoff).changes; }
+  getMessage(groupId, messageId) {
+    return this.db.prepare(`SELECT group_id, message_id, user_id, at, text, kind FROM messages
+      WHERE group_id=? AND message_id=?`).get(String(groupId), String(messageId)) ?? null;
+  }
+  // --- Social simulation state (V2 · Phase 3) ------------------------------
+  // One small row per group: the state machine's whole memory. `last_spoke_at`
+  // is what every cooldown and idle calculation is measured from.
+  getSimState(groupId) {
+    return this.db.prepare(`SELECT group_id, state, last_spoke_at, energy, updated FROM sim_state
+      WHERE group_id=?`).get(String(groupId)) ?? null;
+  }
+  saveSimState({ groupId, state, lastSpokeAt = null, energy = 0, updated = Date.now() }) {
+    this.db.prepare(`INSERT INTO sim_state (group_id, state, last_spoke_at, energy, updated)
+      VALUES (?,?,?,?,?)
+      ON CONFLICT(group_id) DO UPDATE SET state=excluded.state, last_spoke_at=excluded.last_spoke_at,
+        energy=excluded.energy, updated=excluded.updated`)
+      .run(String(groupId), String(state), lastSpokeAt, Number(energy) || 0, updated);
+  }
+  listSimStates() {
+    return this.db.prepare(`SELECT group_id, state, last_spoke_at, energy, updated FROM sim_state
+      ORDER BY group_id`).all();
+  }
   // --- Persona mirror (V2 · Phase 2) ---------------------------------------
   // Character cards live on disk; this table keeps the last content the console
   // saved so a damaged card file can still be served. It is never the source of

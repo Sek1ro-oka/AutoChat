@@ -123,6 +123,19 @@ export function loadConfig(env = process.env) {
     consoleEnabled: (env.CONSOLE_ENABLED || 'false').trim() === 'true',
     consolePort: integer('CONSOLE_PORT', 3200, 1024, 65535),
     consoleToken: env.CONSOLE_TOKEN?.trim() || null,
+    // Social simulation (V2 · Phase 3). Default off: with SOCIAL_ENABLED unset
+    // the bot behaves exactly as it did before this phase.
+    socialEnabled: (env.SOCIAL_ENABLED || 'false').trim() === 'true',
+    socialThreshold: number('SOCIAL_THRESHOLD', 6, 0, 100),
+    socialCooldownSeconds: integer('SOCIAL_COOLDOWN_SECONDS', 45, 5, 3600),
+    socialDailyLimit: integer('SOCIAL_DAILY_LIMIT', 20, 1, 500),
+    socialContextMessages: integer('SOCIAL_CONTEXT_MESSAGES', 12, 1, 50),
+    socialMaxChunks: integer('SOCIAL_MAX_CHUNKS', 3, 1, 5),
+    socialMinDelayMs: integer('SOCIAL_MIN_DELAY_MS', 900, 0, 10000),
+    socialMaxDelayMs: integer('SOCIAL_MAX_DELAY_MS', 2600, 0, 20000),
+    socialMessageTtlMs: number('SOCIAL_MESSAGE_TTL_HOURS', 24, 1, 720) * 3600000,
+    botName: env.BOT_NAME?.trim() || '',
+    botNicknames: Object.freeze((env.BOT_NICKNAMES || '').split(',').map(value => value.trim()).filter(Boolean)),
   };
   if (!['true', 'false'].includes((env.CONSOLE_ENABLED || 'false').trim())) {
     throw new Error('CONSOLE_ENABLED 必须是 true 或 false');
@@ -148,6 +161,15 @@ export function loadConfig(env = process.env) {
   if (config.groupManagerId === config.botId) throw new Error('群管理控制者不能是机器人自身');
   if (privateUsers.includes(config.botId) || config.botId === config.adminId) {
     throw new Error('机器人与私聊用户／管理员 QQ 号不能相同');
+  }
+  if (!['true', 'false'].includes((env.SOCIAL_ENABLED || 'false').trim())) {
+    throw new Error('SOCIAL_ENABLED 必须是 true 或 false');
+  }
+  if (config.socialMinDelayMs > config.socialMaxDelayMs) {
+    throw new Error('SOCIAL_MIN_DELAY_MS 不能大于 SOCIAL_MAX_DELAY_MS');
+  }
+  if (config.botName.length > 24 || config.botNicknames.some(name => name.length > 24)) {
+    throw new Error('BOT_NAME 与 BOT_NICKNAMES 每项最多 24 字');
   }
   config.modelProfiles = loadModelProfiles(env, config);
   config.sendThinking = config.modelProfiles[0].sendThinking;

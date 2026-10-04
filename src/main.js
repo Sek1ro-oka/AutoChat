@@ -6,6 +6,7 @@ import { OneBot } from './onebot.js';
 import { Runtime } from './runtime.js';
 import { Ledger } from './ledger.js';
 import { Personas } from './personas.js';
+import { Social } from './social/engine.js';
 import { DEFAULT_PERSONA } from './persona.js';
 import { createLogger } from './logger.js';
 import { createConsole } from './console/server.js';
@@ -31,18 +32,23 @@ const personas = new Personas({
   defaultName: config.personaDefault,
 });
 const bot = new Bot(config, store, new Model(config), { log, ledger, personas });
-// Every OneBot event fans out through the runtime. V2 adds more participants
-// (social simulation, message ledger); the answering bot is simply the first.
+// Social simulation (Phase 3). Always constructed, even when disabled, so the
+// console can turn it on at runtime; `observe` returns immediately while off and
+// writes nothing, so a stock `.env` keeps group messages out of the database.
+const social = new Social({ config, store, model: bot.model, ledger, personas, log });
+// Every OneBot event fans out through the runtime. The answering bot handles what
+// addresses it; the simulation handles everything else in the same groups.
 const runtime = new Runtime({ log });
 runtime.use('core', (event, send, alive) => bot.ingest(event, send, alive));
+runtime.use('social', (event, send, alive) => social.observe(event, send, alive));
 const transport = new OneBot(config, { onEvent: (...args) => runtime.dispatch(...args), log });
-const timer = setInterval(() => bot.tick(), 30000);
+const timer = setInterval(() => { bot.tick(); social.maintain(); }, 30000);
 transport.start();
 log('service_started');
 
 let consoleServer = null;
 if (config.consoleEnabled) {
-  consoleServer = createConsole({ config, store, bot, transport, runtime, personas, log, startedAt });
+  consoleServer = createConsole({ config, store, bot, transport, runtime, personas, social, log, startedAt });
   consoleServer.start()
     .then(() => console.log(`AutoChat 控制台：${consoleServer.url()}`))
     .catch(error => { console.error(`控制台启动失败：${error.message}`); consoleServer = null; });
@@ -57,6 +63,7 @@ async function stop() {
   await runtime.drain();
   await bot.tail;
   await bot.antiSpam.tail;
+  await social.drain();
   store.close(); log('service_stopped');
 }
 process.on('SIGINT', stop);
