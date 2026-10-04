@@ -106,6 +106,7 @@
     <a data-page="sessions">会话</a>
     <a data-page="cost">花费与令牌</a>
     <a data-page="personas">人格</a>
+    <a data-page="social">仿真</a>
     <a data-page="logs">日志</a>
     <a data-page="config">配置</a>
   </nav>
@@ -133,6 +134,7 @@ document.getElementById('theme').onclick = () => {
 };
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const $ = sel => document.querySelector(sel);
 const cny = micro => '¥' + (Number(micro || 0) / 1e6).toFixed(4);
 const num = n => Number(n || 0).toLocaleString('zh-CN');
 const time = value => value ? new Date(Number(value)).toLocaleString('zh-CN', { hour12: false }) : '—';
@@ -273,6 +275,34 @@ window.pfActivate = async name => {
 };
 
 const SOURCE_LABEL = { env: 'SYSTEM_PROMPT（.env）', card: '人格卡', builtin: '内置默认' };
+
+// --- 拟人化群友仿真（Phase 3）---
+const SIM_LABEL = { observing: '观望', probing: '试探', active: '活跃', retreating: '退场' };
+const REASON_LABEL = {
+  addressed_by_core: '被点名，交给问答路径回复',
+  scored: '相关度达标，主动接话',
+  below_threshold: '相关度不足，保持沉默',
+  disabled: '模型回复已停止', group_off: '群回复已关闭', muted: '该群已静音',
+  image: '图片消息（由问答路径处理）', empty: '空消息', blocked: '命中屏蔽词',
+  daily_limit: '已达当日主动发言上限', cooldown: '冷却中', budget: '预算不足',
+};
+const socialNotice = { text: '', bad: false };
+const socialParams = d => ({
+  threshold: d.params.threshold, cooldownSeconds: d.params.cooldownSeconds, dailyLimit: d.params.dailyLimit,
+});
+window.socialSet = async patch => {
+  try {
+    await post('/api/social/config', patch);
+    socialNotice.text = '已保存，立即生效。'; socialNotice.bad = false;
+  } catch (error) { socialNotice.text = reason(error); socialNotice.bad = true; }
+  render();
+};
+window.socialToggle = () => socialSet({ enabled: !($('#sim-switch').dataset.on === '1') });
+window.socialSave = () => socialSet({
+  threshold: Number($('#sim-threshold').value),
+  cooldownSeconds: Number($('#sim-cooldown').value),
+  dailyLimit: Number($('#sim-daily').value),
+});
 
 const pages = {
   async overview() {
@@ -460,6 +490,61 @@ const pages = {
         <div class="muted" style="font-size:12px;margin-top:8px">最终顺序：<code>SYSTEM_PROMPT</code>（若有，独占）→ 行为层 → 人格卡 → 内置默认。人格卡每次对话都会重新读取，保存后无需重启。</div>
       </div>`;
   },
+  async social() {
+    const d = await api('/api/social');
+    if (!d.available) return '<div class="empty">仿真模块不可用。</div>';
+    stamp.textContent = d.enabled ? '仿真已开启' : '仿真已关闭';
+    const banners = [];
+    if (!d.gate.core) banners.push('<div class="banner warn">模型回复已停止（<code>/停止</code>）。仿真同样不会发言。</div>');
+    if (!d.gate.group) banners.push('<div class="banner warn">群回复已关闭（<code>/群关闭</code>）。仿真同样不会发言。</div>');
+    if (!d.enabled) banners.push('<div class="banner">仿真未开启：群里仍然是「只 @ 才回」。开启后机器人才会自己判断该不该接话。</div>');
+    if (socialNotice.text) banners.push(`<div class="banner ${socialNotice.bad ? 'bad' : 'ok'}">${esc(socialNotice.text)}</div>`);
+    const groupRows = d.groups.map(g => {
+      const dec = g.decision;
+      const decided = dec
+        ? `${esc(REASON_LABEL[dec.reason] || dec.reason)}<div class="muted" style="font-size:11px">分数 ${dec.score}${dec.need === null ? '' : ` / 需要 ${dec.need}`} · ${time(dec.at)}</div>`
+        : '<span class="muted">尚无判定</span>';
+      return `<tr>
+        <td><code>${esc(g.id)}</code></td>
+        <td><span class="pill ${g.state === 'active' ? 'ok' : ''}">${esc(SIM_LABEL[g.state] || g.state)}</span></td>
+        <td>${(Number(g.energy) * 100).toFixed(0)}%</td>
+        <td>${num(g.activity)}</td>
+        <td>${num(g.spokeToday)} / ${num(g.dailyLimit)}</td>
+        <td class="muted">${g.lastSpokeAt ? dur(g.idleMs) + '前' : '—'}</td>
+        <td>${decided}</td>
+        <td><button onclick="socialSet({group:${esc(JSON.stringify(g.id))}, muted:${g.muted ? 'false' : 'true'}})">${g.muted ? '取消静音' : '静音'}</button></td>
+      </tr>`;
+    }).join('');
+    return `${banners.join('')}
+      <div class="section grid">
+        <div class="card"><h3>仿真开关</h3><div class="metric" style="font-size:20px">${d.enabled ? '已开启' : '已关闭'}</div>
+          <div class="muted" style="font-size:12px">规则决定<b>何时说</b>，模型决定<b>说什么</b></div></div>
+        <div class="card"><h3>今日主动发言</h3><div class="metric">${num(d.today.spoke)}<small>条</small></div>
+          <div class="muted" style="font-size:12px">账期 ${esc(d.today.day)}（北京时间），每群上限 ${num(d.params.dailyLimit)}</div></div>
+        <div class="card"><h3>相关度阈值</h3><div class="metric">${num(d.params.threshold)}</div>
+          <div class="muted" style="font-size:12px">低于阈值=保持沉默（不调用模型，不花钱）</div></div>
+        <div class="card"><h3>发言冷却</h3><div class="metric">${num(d.params.cooldownSeconds)}<small>秒</small></div>
+          <div class="muted" style="font-size:12px">与上一条主动发言的最小间隔</div></div>
+      </div>
+      <div class="section card">
+        <h3>参数（立即生效，写入本机设置）</h3>
+        <div class="row" style="gap:14px">
+          <button id="sim-switch" data-on="${d.enabled ? '1' : '0'}" onclick="socialToggle()">${d.enabled ? '关闭仿真' : '开启仿真'}</button>
+          <label class="muted" style="font-size:12px">阈值 <input type="text" id="sim-threshold" style="min-width:70px" value="${esc(d.params.threshold)}"></label>
+          <label class="muted" style="font-size:12px">冷却（秒） <input type="text" id="sim-cooldown" style="min-width:70px" value="${esc(d.params.cooldownSeconds)}"></label>
+          <label class="muted" style="font-size:12px">每群日上限 <input type="text" id="sim-daily" style="min-width:70px" value="${esc(d.params.dailyLimit)}"></label>
+          <button onclick="socialSave()">保存参数</button>
+        </div>
+        <div class="muted" style="font-size:12px;margin-top:8px">默认值来自 <code>.env</code>：阈值 ${num(d.defaults.threshold)}、冷却 ${num(d.defaults.cooldownSeconds)} 秒、每群上限 ${num(d.defaults.dailyLimit)}；上下文 ${num(d.defaults.contextMessages)} 条、最多 ${num(d.defaults.maxChunks)} 条消息、发送间隔 ${num(d.defaults.minDelayMs)}~${num(d.defaults.maxDelayMs)} 毫秒、群消息保留 ${num(d.defaults.messageTtlHours)} 小时。上表可覆盖前三项。</div>
+      </div>
+      <div class="section card">
+        <h3>每群状态</h3>
+        ${d.groups.length ? `<table><thead><tr><th>群号</th><th>状态</th><th>能量</th><th>2 分钟内消息</th><th>今日发言</th><th>上次发言</th><th>最近判定</th><th></th></tr></thead><tbody>
+          ${groupRows}
+        </tbody></table>` : '<div class="empty">未配置群</div>'}
+        <div class="muted" style="font-size:12px;margin-top:8px">状态含义：观望＝默认；试探＝刚开口，等回应；活跃＝有人接话，意愿更高；退场＝被冷落，长期少说。控制台不展示任何聊天正文。</div>
+      </div>`;
+  },
   async logs() {
     const d = await api('/api/logs?limit=150');
     stamp.textContent = `最近 ${d.logs.length} 条`;
@@ -484,8 +569,8 @@ async function render() {
 }
 function schedule() {
   clearInterval(timer);
-  // 人格页保存着未提交的编辑内容，轮询会打断输入：该页只在动作或手动刷新时重绘。
-  if (page === 'personas') return;
+  // 人格页与仿真页保存着可编辑字段，轮询会覆盖输入：这两页只在动作或手动刷新时重绘。
+  if (page === 'personas' || page === 'social') return;
   timer = setInterval(() => { if (!document.hidden) render(); }, 3000);
 }
 document.querySelectorAll('nav a').forEach(link => {

@@ -17,7 +17,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   buildSummary, buildSessions, buildCharges, buildConfig, buildCost, buildCostTurns,
-  buildPersonas, buildPersonaFile,
+  buildPersonas, buildPersonaFile, buildSocial,
 } from './api.js';
 import { readLogs } from './logs.js';
 
@@ -32,6 +32,7 @@ const ERROR_STATUS = new Map([
   ['PERSONA_NAME_INVALID', 400], ['PERSONA_CONTENT_INVALID', 400], ['PERSONA_CONTENT_EMPTY', 400],
   ['PERSONA_CONTENT_TOO_LARGE', 413], ['PERSONA_LIMIT', 409], ['PERSONA_NOT_FOUND', 404],
   ['PERSONA_UNAVAILABLE', 503], ['BODY_TOO_LARGE', 413], ['bad_json', 400],
+  ['SOCIAL_UNAVAILABLE', 503], ['SOCIAL_PARAM_INVALID', 400],
 ]);
 
 const equal = (a, b) => {
@@ -91,7 +92,7 @@ function readBody(req) {
 }
 
 export function createConsole({
-  config, store, bot, transport, runtime, personas = null, log = () => {},
+  config, store, bot, transport, runtime, personas = null, social = null, log = () => {},
   startedAt = Date.now(), host = '127.0.0.1', port = null, logDirectory = 'logs',
 } = {}) {
   const token = resolveToken(config, log);
@@ -101,6 +102,10 @@ export function createConsole({
   const requirePersonas = () => {
     if (!personas) throw new Error('PERSONA_UNAVAILABLE');
     return personas;
+  };
+  const requireSocial = () => {
+    if (!social) throw new Error('SOCIAL_UNAVAILABLE');
+    return social;
   };
 
   const reads = {
@@ -119,6 +124,7 @@ export function createConsole({
       personas, kind: url.searchParams.get('kind') === 'behavior' ? 'behavior' : 'card',
       name: url.searchParams.get('name') ?? '',
     }),
+    '/api/social': () => buildSocial({ social, now: now() }),
   };
 
   // Every write returns the freshly described persona state so the page can
@@ -137,6 +143,7 @@ export function createConsole({
       const target = requirePersonas();
       return { active: target.setActive(body?.name ?? ''), ...buildPersonas({ personas }) };
     },
+    '/api/social/config': (url, body) => requireSocial().setParams(body ?? {}),
   };
 
   async function handle(req, res) {

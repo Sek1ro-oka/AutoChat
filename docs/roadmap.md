@@ -307,7 +307,7 @@ personas/
 | Phase 0 | 地基重构 + 数据层扩展 | — | ✅ 2026-10-04 |
 | Phase 1 | 控制台 v1（只读） | Phase 0 | ✅ 2026-10-04 |
 | Phase 2 | 人格两层提示词 | Phase 1 | ✅ 2026-10-04 |
-| Phase 3 | 拟人化群友（一代仿真） | Phase 1、2 | 待开始 |
+| Phase 3 | 拟人化群友（一代仿真） | Phase 1、2 | ✅ 2026-10-04 |
 | Phase 4 | 黑话词库 | Phase 3 | 待开始 |
 | Phase 5 | 令牌与花费看板 | Phase 1 | ✅ 2026-10-04 |
 | Phase 6 | Agent 模式（可选） | Phase 0~5 | 不做（后置） |
@@ -325,8 +325,14 @@ personas/
 - **2026-10-04 · Phase 2 完成**：新增 `src/personas.js`（两层加载器：行为层启动快照 + 人格卡逐轮 mtime 重校验；回退顺序 `SYSTEM_PROMPT` > 人格卡 > 内置默认；名称白名单与路径包含校验；原子写入；文件损坏时以 SQLite 镜像兜底）；`store.js` 增加 `personas` 镜像读写；`config.js` 增加 `systemPromptOverride` / `personaDirectory` / `personaDefault` 并让 `systemPrompt` 保持向后兼容；`bot.js` 每轮经 `personas.resolve()` 组装提示词；控制台新增「人格」页与 `/api/personas`、`/api/personas/file`、`/api/personas/delete`、`/api/personas/active`（写接口限请求头令牌 + 回环 Origin）。新增 `personas/` 示例目录。文档见 [人设与两层提示词](persona.md)。测试从 126 增至 140，全绿。
   - 行为层读取**在启动时冻结**，保存后 `behaviorFile()` 读的是磁盘而不是快照，因此「待重启生效」提示准确；人格卡不缓存跨轮，改完下一条消息即生效。
 
+- **2026-10-04 · Phase 3 完成**：新增 `src/social/`（`quote.js` 段解析/转义/引用格式化、`attention.js` 相关度打分、`renderer.js` 去包装与分句、`engine.js` 状态机与运行时参与者）；`store.js` 增加 `getMessage` 与 `sim_state` 读写；`config.js` 增加 `SOCIAL_*` 与 `BOT_NAME`/`BOT_NICKNAMES`（全部默认关闭/保守）；`main.js` 把仿真注册为 runtime 第二个参与者并注入控制台；控制台新增「仿真」页与 `/api/social`、`/api/social/config`。文档见 [拟人化群友](simulation.md)。测试从 140 增至 169，全绿。
+  - **与本文档的偏差（有意）**：§5 写「被 @ / 被引用机器人 → 强正，直接进入必回」。实际实现里被 @ **不由仿真回复** —— 问答路径已经在回，仿真再回一次就会出现两条回复。仿真把这类消息记为 `addressed_by_core`：状态机照常推进到活跃，但不出声。
+  - **另一处补充**：群消息流水只记录**他人**的发言。NapCat 对机器人自身消息的回执不可靠，若同时本地记录，重复入库会让机器人在上下文里看到两条自己，从而回复自己。机器人自己的话只保存在进程内环形缓冲（每群 20 条），重启后丢失（已知取舍，见文档）。
+  - **状态推进是惰性的**：没有定时器，只有新消息到达时才按「距上次发言多久」推进状态，因此停机期间不会积压任何定时任务。
+  - 一条范围收窄：§5 提到的「口癖与变体」**没有**在渲染层随机拼接。语气与口癖属于人格层（Phase 2），渲染层只负责去包装、分句、间隔与「不重复自己」。
+
 **建议推进顺序**：0 → 1 → 5 → 2 → 3 → 4。
-（「看得见」这条线（控制台 + 花费看板）已收尾；「像人」这条线已起步：Phase 2 人格分层 ✅，下一步 Phase 3 拟人化仿真 → Phase 4 黑话词库。）
+（「看得见」这条线（控制台 + 花费看板）已收尾；「像人」这条线：Phase 2 人格分层 ✅、Phase 3 拟人化仿真 ✅，下一步 Phase 4 黑话词库。）
 
 ---
 

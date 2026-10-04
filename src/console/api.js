@@ -148,3 +148,11 @@ export function buildPersonaFile({ personas, kind = 'card', name = '' }) {
   if (!personas) throw new Error('PERSONA_UNAVAILABLE');
   return kind === 'behavior' ? personas.behaviorFile() : personas.card(name);
 }
+
+// --- Social simulation (Phase 3) -------------------------------------------
+// Everything the page shows, in one call. Deliberately text-free: states,
+// counters and the reason for the last decision, never a group message.
+export function buildSocial({ social, now = Date.now() }) {
+  if (!social) return { available: false };
+  return { available: true, ...social.describe({ now }) };
+}

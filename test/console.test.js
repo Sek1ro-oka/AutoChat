@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Store } from '../src/store.js';
 import { Personas } from '../src/personas.js';
+import { Social } from '../src/social/engine.js';
 import { DEFAULT_PERSONA } from '../src/persona.js';
 import { createConsole } from '../src/console/server.js';
 import { buildSummary, buildConfig, buildCost, buildCostTurns, redact } from '../src/console/api.js';
@@ -38,6 +39,24 @@ function personaFixture(t) {
   return { store, personas, server };
 }
 
+// A console wired to a real Social engine, for the Phase 3 read/write paths.
+function socialFixture(t) {
+  const store = new Store();
+  t.after(() => store.close());
+  const config = {
+    model: 'deepseek-flash', budgetMicro: 1000000, consoleToken: TOKEN, consolePort: 0,
+    botId: '10000', groupId: '20000', groupIds: ['20000'],
+    socialEnabled: false, socialThreshold: 6, socialCooldownSeconds: 45, socialDailyLimit: 20,
+    socialContextMessages: 12, socialMaxChunks: 3, socialMinDelayMs: 0, socialMaxDelayMs: 0,
+    socialMessageTtlMs: 24 * 3600000, botName: '', botNicknames: [],
+    blockTerms: [], maxOutput: 1024, inputPrice: 2, outputPrice: 8, systemPrompt: '人设',
+  };
+  const model = { complete: async () => ({ text: '好', usage: { prompt_tokens: 1, completion_tokens: 1 } }) };
+  const social = new Social({ config, store, model, log: () => {}, now: () => 1800000000000 });
+  const server = createConsole({ config, store, social, log: () => {}, port: 0 });
+  return { store, social, server };
+}
+
 const auth = { 'x-console-token': TOKEN };
 const jsonPost = (base, path, body, extra = {}) => fetch(base + path, {
   method: 'POST', headers: { ...auth, 'Content-Type': 'application/json', ...extra },
@@ -50,7 +69,7 @@ test('every api route requires the console token', async t => {
   t.after(() => server.stop());
   const base = `http://127.0.0.1:${server.address().port}`;
   for (const path of ['/api/summary', '/api/sessions', '/api/charges', '/api/logs', '/api/config',
-    '/api/cost', '/api/cost/turns', '/api/personas', '/api/personas/file']) {
+    '/api/cost', '/api/cost/turns', '/api/personas', '/api/personas/file', '/api/social']) {
     assert.equal((await fetch(base + path)).status, 401, path);
   }
   assert.equal((await fetch(`${base}/api/summary?token=wrong`)).status, 401);
@@ -79,7 +98,9 @@ test('unknown api routes 404 and the shell page needs no token', async t => {
   assert.equal((await fetch(`${base}/api/nope`, { headers: auth })).status, 404);
   const page = await fetch(`${base}/`);
   assert.equal(page.status, 200);
-  assert.match(await page.text(), /AutoChat 控制台/);
+  const html = await page.text();
+  assert.match(html, /AutoChat 控制台/);
+  assert.match(html, /data-page="social"/, 'the simulation page is reachable from the nav');
 });
 
 test('credentials never appear in console responses', async t => {
@@ -223,4 +244,35 @@ test('the behaviour layer round-trips through the console but only applies after
   assert.equal(after.behavior.loaded, false, 'the running process keeps its old protocol');
   assert.equal(after.behavior.pending, true);
   assert.equal(personas.resolve(), DEFAULT_PERSONA);
+});
+
+test('the simulation page reads state and accepts only guarded parameter writes', async t => {
+  const { server } = socialFixture(t);
+  await server.start();
+  t.after(() => server.stop());
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const view = await (await fetch(`${base}/api/social`, { headers: auth })).json();
+  assert.equal(view.available, true);
+  assert.equal(view.enabled, false, 'off by default, matching a stock .env');
+  assert.equal(view.groups[0].id, '20000');
+  assert.equal(view.groups[0].state, 'observing');
+  assert.equal(view.groups[0].decision, null);
+
+  const onlyQuery = await fetch(`${base}/api/social/config?token=${TOKEN}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(onlyQuery.status, 403);
+  assert.equal((await onlyQuery.json()).error, 'header_token_required');
+  const foreign = await jsonPost(base, '/api/social/config', { enabled: true }, { Origin: 'http://evil.example' });
+  assert.equal(foreign.status, 403);
+  assert.equal((await foreign.json()).error, 'origin_rejected');
+
+  const enabled = await (await jsonPost(base, '/api/social/config', { enabled: true, threshold: 3 })).json();
+  assert.equal(enabled.enabled, true);
+  assert.equal(enabled.params.threshold, 3);
+  assert.equal((await jsonPost(base, '/api/social/config', { threshold: 999 })).status, 400);
+  assert.equal((await jsonPost(base, '/api/social/config', { cooldownSeconds: 1 })).status, 400);
+  assert.equal((await jsonPost(base, '/api/social/config', { group: '99999', muted: true })).status, 400);
 });
