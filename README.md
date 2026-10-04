@@ -33,6 +33,8 @@ AI 回复可能不准确或包含不恰当表达；默认角色带调侃和毒�
 
 修改 `.env` 或人设后双击 **restart.cmd**，停止机器人双击 **stop.cmd**。每天 1 元为所有用户共用预算。压缩包校验值见 [SHA-256](downloads/AutoChat-v0.1.13-windows.zip.sha256)。
 
+电脑重启后双击 **start.cmd**，同时启动NapCat与AutoChat并检查QQ登录；需要扫码时打开二维码，确认后自动重连。已有进程不会重复启动，首次安装仍使用 **deploy.cmd**。
+
 开发者运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package.ps1` 可重建压缩包；打包采用文件白名单，附带锁定版本的 `ws` 和许可证。
 
 ## 开发与启动

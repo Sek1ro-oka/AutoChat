@@ -33,6 +33,8 @@ SYSTEM_PROMPT="你是一位熟悉网络梗的傲娇女生。说话简短、嘴�
 
 ## 其他常用配置
 
+电脑重启后恢复运行：双击根目录 `start.cmd`，会同时启动NapCat和AutoChat、检查账号连接；登录失效时刷新并打开二维码，扫码确认后自动重连。`restart.cmd` 仍用于仅重启AutoChat，首次安装用 `deploy.cmd`。
+
 ### 多模型配置与私聊切换
 
 旧字段 `MODEL_NAME`、`MODEL_BASE_URL`、`DEEPSEEK_API_KEY` 和原计价字段组成 `default` 配置，现有 `.env` 可继续使用。额外模型在 `MODEL_PROFILES` 列出标识，每个标识使用对应的大写前缀。例如 `MODEL_PROFILES=alt,backup` 对应 `MODEL_ALT_*` 和 `MODEL_BACKUP_*`，最多10个额外配置；标识只能使用小写字母、数字和下划线。

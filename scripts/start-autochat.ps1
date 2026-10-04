@@ -10,7 +10,7 @@ if (Test-Path -LiteralPath $pidPath) {
     $existing = Get-CimInstance Win32_Process -Filter "ProcessId = $savedProcessId"
     if ($existing -and $existing.CommandLine.Contains($mainPath)) {
         Write-Output 'AutoChat is already running.'
-        exit 0
+        return
     }
 }
 . (Join-Path $PSScriptRoot 'node-runtime.ps1')
