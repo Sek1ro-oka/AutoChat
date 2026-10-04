@@ -20,7 +20,8 @@ import { costMicro, estimateInput, usageCost } from '../model.js';
 import { containsTerm } from '../terms.js';
 import { isRepeat, score } from './attention.js';
 import { GroupMemory } from './memory.js';
-import { escapeForPrompt, formatQuote, parseSegments } from './quote.js';
+import { parseSegments } from './quote.js';
+import { buildSocialRequest, withSlang } from './prompt.js';
 import { render } from './renderer.js';
 import { ENERGY_BY_STATE, SIM_STATES, energyFor, requiredScore, transition } from './state.js';
 
@@ -35,18 +36,9 @@ const RETREAT_MS = 900000;
 // Handled by the answering path, not by the simulation (images, `search`, …).
 const SILENCE_MARK = '不回';
 
-// The behaviour protocol from `personas/behavior.md` says what kind of member
-// this is; this addendum says what *this* call is: one line in a live chat.
-const SOCIAL_ADDENDUM = [
-  '你正在一个 QQ 群里，收到的是一段群聊记录。请判断是否值得参与。',
-  '只输出你要发送的聊天内容本身：不要称呼自己、不要解释、不要 markdown、不要括号动作、不要写旁白。',
-  '一次最多 2~3 句短句，总共不超过 60 字，像在手机上打字。',
-  '不要重复你刚才说过的话；不确定、无话可说、或插不上嘴时，只输出两个字：不回。',
-].join('\n');
-
 export class Social {
   constructor({
-    config, store, model, ledger = null, personas = null, log = () => {},
+    config, store, model, ledger = null, personas = null, slang = null, log = () => {},
     now = Date.now, random = Math.random, sleep = null,
   } = {}) {
     this.config = config;
@@ -54,6 +46,7 @@ export class Social {
     this.model = model;
     this.ledger = ledger;
     this.personas = personas;
+    this.slang = slang;
     this.log = log;
     this.now = now;
     this.random = random;
@@ -268,30 +261,24 @@ export class Social {
   }
 
   // --- speech ---------------------------------------------------------------
+  // The group's confirmed slang table (Phase 4) rides along with the persona
+  // here; `slang` is optional, and without it the prompt is unchanged.
   systemPrompt() {
-    if (!this.personas) return this.config.systemPrompt;
-    try { return this.personas.resolve(); }
-    catch { this.log('social_persona_failed'); return this.config.systemPrompt; }
+    let base = this.config.systemPrompt;
+    if (this.personas) {
+      try { base = this.personas.resolve(); }
+      catch { this.log('social_persona_failed'); }
+    }
+    return withSlang(base, this.slang);
   }
 
+  // Building the prompt (history, quoting, escaping) lives in prompt.js — it is
+  // about rendering untrusted group text, a different failure mode from the
+  // "should we speak at all" decisions this file makes.
   request(message, params) {
-    // The current message is shown on its own line, so drop its ring copy.
-    const history = this.memory.ring(message.group).filter(entry => entry.id !== message.id)
-      .slice(-params.contextMessages);
-    const lines = history.map(entry => `${entry.bot ? '你' : this.memory.label(message.group, entry.user)}：${escapeForPrompt(entry.text, 160)}`);
-    const parts = ['[群聊记录开始]', ...lines, '[群聊记录结束]'];
-    if (message.replyId) {
-      const quoted = this.memory.lookup(message.group, message.replyId);
-      parts.push(quoted
-        ? formatQuote({ name: quoted.user === this.config.botId ? '你' : this.memory.label(message.group, quoted.user), text: quoted.text })
-        : '[引用 一条更早的消息]');
-    }
-    parts.push(`[当前这条消息] ${this.memory.label(message.group, message.user)}：${escapeForPrompt(message.text, 200)}`);
-    parts.push('请只输出你要发送的内容，或只输出「不回」。');
-    return [
-      { role: 'system', content: `${this.systemPrompt()}\n\n${SOCIAL_ADDENDUM}` },
-      { role: 'user', content: parts.join('\n') },
-    ];
+    return buildSocialRequest({
+      memory: this.memory, config: this.config, message, params, system: this.systemPrompt(),
+    });
   }
 
   sample(sessionKey, usage) {

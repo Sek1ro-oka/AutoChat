@@ -7,6 +7,7 @@ import { loadImages, IMAGE_TOKEN_RESERVE, MAX_IMAGES } from './vision.js';
 import { conversationText } from './emoji.js';
 import { AntiSpam } from './anti-spam.js';
 import { activeProfile, profileSessionKey } from './model-profiles.js';
+import { withSlang } from './social/prompt.js';
 
 const HELP = '私聊直接发送文本；群聊请@机器人。/帮助 /状态 /清空；群内@机器人 /搜索 完整问题 可联网查询，私聊同样可用。启用自动搜索后，天气、新闻、最新动态等问题会自动联网。普通对话与上下文会发送给模型服务商；联网搜索只发送本条问题，不发送已有历史。';
 const fmt = micro => (micro / 1e6).toFixed(4);
@@ -50,11 +51,12 @@ export function parseEvent(event, config, now = Date.now()) {
 }
 
 export class Bot {
-  constructor(config, store, model, { now = Date.now, log = () => {}, imageLoader = loadImages, ledger = null, personas = null } = {}) {
+  constructor(config, store, model, { now = Date.now, log = () => {}, imageLoader = loadImages, ledger = null, personas = null, slang = null } = {}) {
     this.imageLoader = imageLoader;
     this.config = config; this.store = store; this.model = model;
     this.ledger = ledger;
     this.personas = personas;
+    this.slang = slang;
     this.now = now; this.log = log; this.tail = Promise.resolve(); this.queued = 0;
     this.antiSpam = new AntiSpam(config, store, now, log);
     if (config.modelProfiles && !config.modelProfiles.some(p => p.id === store.setting('active_model', 'default'))) {
@@ -114,10 +116,18 @@ export class Bot {
   // card is revalidated by mtime there, so a console edit reaches the very next
   // message; the behaviour layer stays a startup snapshot. Without a loader this
   // returns `config.systemPrompt`, i.e. exactly the pre-Phase-2 behaviour.
-  systemPrompt() {
-    if (!this.personas) return this.config.systemPrompt;
-    try { return this.personas.resolve(); }
-    catch { this.log('persona_failed'); return this.config.systemPrompt; }
+  //
+  // The slang table (Phase 4) is appended for group turns only — a private chat
+  // has no group vocabulary — and it is read fresh every turn so confirming a
+  // term in the console reaches the next message. Absent the module, this is
+  // byte-for-byte the old prompt.
+  systemPrompt(message = null) {
+    let base = this.config.systemPrompt;
+    if (this.personas) {
+      try { base = this.personas.resolve(); }
+      catch { this.log('persona_failed'); }
+    }
+    return withSlang(base, this.slang, { grouped: Boolean(message?.group) });
   }
   async reply(message, text, send, alive) {
     if (!alive()) return false;
@@ -135,7 +145,7 @@ export class Bot {
   async handle(message, send, alive) {
     const { store } = this;
     const profile = activeProfile(this.config, store);
-    const base = { ...this.config, systemPrompt: this.systemPrompt() };
+    const base = { ...this.config, systemPrompt: this.systemPrompt(message) };
     const config = profile ? { ...base, ...profile } : base;
     const sessionKey = profileSessionKey(message.key, profile);
     const reply = text => this.reply(message, text, send, alive);
