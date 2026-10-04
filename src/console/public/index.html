@@ -75,6 +75,20 @@
   svg.chart { width: 100%; height: auto; display: block; }
   tbody tr.click { cursor: pointer; }
   tbody tr.sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  textarea { width: 100%; min-height: 230px; resize: vertical; box-sizing: border-box;
+    font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; font-size: 12.5px; line-height: 1.65;
+    color: var(--text); background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+  input[type=text] { font: inherit; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 8px; padding: 5px 10px; min-width: 220px; }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; align-items: center; }
+  .warn-text { color: var(--warn); }
+  .ok-text { color: var(--ok); }
+  .bad-text { color: var(--bad); }
+  .banner { border-radius: 10px; padding: 9px 12px; font-size: 12.5px; margin-bottom: 12px; border: 1px solid var(--border); }
+  .banner.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+  .banner.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+  .banner.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
 </style>
 </head>
 <body>
@@ -91,6 +105,7 @@
     <a data-page="overview" class="active">运行总览</a>
     <a data-page="sessions">会话</a>
     <a data-page="cost">花费与令牌</a>
+    <a data-page="personas">人格</a>
     <a data-page="logs">日志</a>
     <a data-page="config">配置</a>
   </nav>
@@ -177,6 +192,87 @@ async function api(path) {
   if (!res.ok) throw new Error('HTTP ' + res.status);
   return res.json();
 }
+
+// --- 人格管理（Phase 2）---
+// 写入一律走请求头令牌 + JSON，且只在「人格」页发起；该页不做自动轮询，
+// 避免定时刷新打断正在编辑的文本。
+const PERSONA_MSG = {
+  PERSONA_NAME_INVALID: '名称不合法：1~40 字，可用中英文、数字、空格、点、短横线、间隔号；不能以点或空格开头/结尾。',
+  PERSONA_CONTENT_EMPTY: '内容不能为空。',
+  PERSONA_CONTENT_TOO_LARGE: '内容超过 64KB 上限。',
+  PERSONA_LIMIT: '人格卡数量已达上限（50 张）。',
+  PERSONA_NOT_FOUND: '该人格卡不存在。',
+  PERSONA_UNAVAILABLE: '人格模块不可用。',
+  header_token_required: '写入必须从控制台页面发起。',
+  origin_rejected: '来源校验失败：写入只接受本机回环页面。',
+  bad_json: '请求格式错误。',
+  BODY_TOO_LARGE: '请求体过大。',
+};
+const explain = code => PERSONA_MSG[code] || code || '操作失败';
+
+async function post(path, body) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'x-console-token': token, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body ?? {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  return data;
+}
+
+const personaState = { ready: false, file: { kind: 'card', name: '', content: '', exists: false }, notice: '', bad: false };
+const setNotice = (text, bad = false) => { personaState.notice = text; personaState.bad = bad; };
+
+// 合并同一次 API 调用的两种失败来源：HTTP 层与错误码。
+const reason = error => explain(String(error?.message ?? error).replace(/^HTTP \d+$/, ''));
+
+window.pfEdit = async (kind, name) => {
+  try {
+    const d = await api(`/api/personas/file?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(name || '')}`);
+    personaState.file = { kind: d.kind, name: d.name, content: d.content, exists: d.exists };
+    setNotice(d.exists ? `已载入 ${d.name}` : '新人格卡，填写名称后保存。');
+  } catch (error) { setNotice(reason(error), true); }
+  render();
+};
+window.pfNew = () => {
+  personaState.file = { kind: 'card', name: '', content: '', exists: false };
+  setNotice('新建人格卡：填写名称与内容后点保存。');
+  render();
+};
+window.pfName = value => { personaState.file.name = value; };
+window.pfContent = value => { personaState.file.content = value; };
+window.pfSave = async () => {
+  const { kind, name, content } = personaState.file;
+  try {
+    const d = await post('/api/personas/file', { kind, name, content });
+    if (kind === 'behavior') {
+      setNotice(`行为层已保存（${d.bytes} 字节）。重启后生效。`);
+    } else {
+      personaState.file.exists = true;
+      setNotice(`已保存人格卡「${d.saved.name}」（${d.saved.bytes} 字节）。下一条消息起生效。`);
+    }
+  } catch (error) { setNotice(reason(error), true); }
+  render();
+};
+window.pfDelete = async name => {
+  if (!window.confirm(`删除人格卡「${name}」？该操作不可撤销。`)) return;
+  try {
+    await post('/api/personas/delete', { name });
+    if (personaState.file.name === name) personaState.file = { kind: 'card', name: '', content: '', exists: false };
+    setNotice(`已删除「${name}」。`);
+  } catch (error) { setNotice(reason(error), true); }
+  render();
+};
+window.pfActivate = async name => {
+  try {
+    await post('/api/personas/active', { name: name ?? '' });
+    setNotice(name ? `已启用「${name}」，下一条消息起生效。` : '已恢复内置默认人设。');
+  } catch (error) { setNotice(reason(error), true); }
+  render();
+};
+
+const SOURCE_LABEL = { env: 'SYSTEM_PROMPT（.env）', card: '人格卡', builtin: '内置默认' };
 
 const pages = {
   async overview() {
@@ -287,6 +383,83 @@ const pages = {
         </tbody></table>` : '<div class="empty">暂无记账</div>'}
       </div>`;
   },
+  async personas() {
+    const d = await api('/api/personas');
+    if (!d.available) return '<div class="empty">人格模块不可用。</div>';
+    if (!personaState.ready) {
+      personaState.ready = true;
+      const pick = d.active && d.characters.some(c => c.name === d.active) ? d.active : (d.characters[0]?.name ?? '');
+      if (pick) {
+        try {
+          const file = await api(`/api/personas/file?kind=card&name=${encodeURIComponent(pick)}`);
+          personaState.file = { kind: 'card', name: file.name, content: file.content, exists: file.exists };
+        } catch { /* 编辑器留空，用户可手动打开 */ }
+      }
+    }
+    stamp.textContent = `${d.characters.length} 张人格卡`;
+    const f = personaState.file;
+    const banners = [];
+    if (d.override) banners.push(`<div class="banner warn"><strong>SYSTEM_PROMPT 已在 .env 中设置</strong>，它优先级最高：人格卡的改动不会生效。清空该字段并重启后才会使用人格卡。</div>`);
+    if (personaState.notice) banners.push(`<div class="banner ${personaState.bad ? 'bad' : 'ok'}">${esc(personaState.notice)}</div>`);
+    const limit = d.limits;
+    return `${banners.join('')}
+      <div class="section grid">
+        <div class="card"><h3>当前生效来源</h3><div class="metric" style="font-size:18px">${esc(SOURCE_LABEL[d.source] || d.source)}</div>
+          <div class="muted" style="font-size:12px">${d.source === 'card' ? `人格卡「${esc(d.active)}」` : d.source === 'env' ? '最高优先级覆盖' : 'src/persona.js'}</div></div>
+        <div class="card"><h3>启用的人格卡</h3><div class="metric" style="font-size:18px">${d.active ? esc(d.active) : '（内置默认）'}</div>
+          <div class="muted" style="font-size:12px">${d.active && !d.activeExists ? '<span class="bad-text">文件已不存在，实际回退到内置默认</span>' : '私聊与群聊共用'}</div></div>
+        <div class="card"><h3>合成提示词</h3><div class="metric">${num(d.resolved.bytes)}<small>字节</small></div>
+          <div class="muted" style="font-size:12px">行为层${d.behavior.loaded ? `已加载 ${num(d.behavior.bytes)} 字节` : '本进程未加载'}（需重启）＋ 人格层（即时）</div></div>
+        <div class="card"><h3>人数上限</h3><div class="metric">${d.characters.length}<small>/ ${limit.maxCharacters}</small></div>
+          <div class="muted" style="font-size:12px">单卡上限 ${Math.round(limit.maxBytes / 1024)} KB</div></div>
+      </div>
+      <div class="section card">
+        <h3>行为层 · <code>${esc(d.behavior.path)}</code></h3>
+        <div class="row" style="justify-content:space-between">
+          <span class="muted" style="font-size:12px">定义「作为群友的行为协议」（何时可以开口、怎么分句、什么时候闭嘴）。改动<strong>需要重启</strong>才生效。</span>
+          <span class="toolbar" style="margin:0">
+            <span class="pill ${d.behavior.loaded ? 'ok' : ''}">${d.behavior.loaded ? `本进程已加载 ${num(d.behavior.bytes)} 字节` : d.behavior.onDisk ? '文件已存在，本进程未加载' : '未设置'}</span>
+            ${d.behavior.pending ? '<span class="pill bad">待重启生效</span>' : ''}
+            <button onclick="pfEdit('behavior','')">编辑行为层</button>
+          </span>
+        </div>
+      </div>
+      <div class="section card">
+        <h3>人格卡</h3>
+        ${d.characters.length ? `<table><thead><tr><th>名称</th><th>大小</th><th>最后修改</th><th>状态</th><th></th></tr></thead><tbody>
+          ${d.characters.map(c => `<tr class="${c.active ? 'sel' : ''}">
+            <td>${esc(c.name)}</td><td>${num(c.bytes)} B</td><td class="muted">${time(c.updated)}</td>
+            <td>${c.active ? '<span class="ok-text">启用中</span>' : '<span class="muted">—</span>'}</td>
+            <td><span class="toolbar" style="margin:0">
+              <button onclick="pfEdit('card',${esc(JSON.stringify(c.name))})">编辑</button>
+              ${c.active ? '<button onclick="pfActivate(\'\')">停用</button>' : `<button onclick="pfActivate(${esc(JSON.stringify(c.name))})">启用</button>`}
+              <button onclick="pfDelete(${esc(JSON.stringify(c.name))})">删除</button>
+            </span></td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty">还没有人格卡。点下方「新建」创建第一张。</div>'}
+        <div class="toolbar">
+          <button onclick="pfNew()">新建</button>
+          <button onclick="pfActivate('')">恢复内置默认</button>
+        </div>
+      </div>
+      <div class="section card">
+        <h3>编辑器 · ${f.kind === 'behavior' ? '行为层（需重启）' : f.exists ? `人格卡「${esc(f.name)}」` : '新人格卡'}</h3>
+        ${f.kind === 'card' ? `<div class="row" style="margin-bottom:10px">
+          <label class="muted" style="font-size:12px">名称</label>
+          <input type="text" value="${esc(f.name)}" oninput="pfName(this.value)" placeholder="例如 默认角色" maxlength="40">
+          <span class="muted" style="font-size:12px">改名称后再保存即为「另存为」。</span>
+        </div>` : '<div class="banner warn">行为层的改动不会立即生效：保存后需要重启 AutoChat。</div>'}
+        <textarea oninput="pfContent(this.value)" placeholder="${f.kind === 'behavior' ? '例如：在群里默认保持沉默，只有被点名或话题与你相关时才开口；一次最多发三句短句。' : '角色设定：语气、口癖、偏好与禁区。'}">${esc(f.content)}</textarea>
+        <div class="toolbar">
+          <button onclick="pfSave()">保存</button>
+          ${f.kind === 'card' && f.exists ? `<button onclick="pfDelete(${esc(JSON.stringify(f.name))})">删除这张卡</button>` : ''}
+        </div>
+      </div>
+      <div class="section card">
+        <h3>合成后的系统提示词（前 800 字）</h3>
+        <pre>${esc(d.resolved.preview)}${d.resolved.bytes > new Blob([d.resolved.preview]).size ? '\n…' : ''}</pre>
+        <div class="muted" style="font-size:12px;margin-top:8px">最终顺序：<code>SYSTEM_PROMPT</code>（若有，独占）→ 行为层 → 人格卡 → 内置默认。人格卡每次对话都会重新读取，保存后无需重启。</div>
+      </div>`;
+  },
   async logs() {
     const d = await api('/api/logs?limit=150');
     stamp.textContent = `最近 ${d.logs.length} 条`;
@@ -311,6 +484,8 @@ async function render() {
 }
 function schedule() {
   clearInterval(timer);
+  // 人格页保存着未提交的编辑内容，轮询会打断输入：该页只在动作或手动刷新时重绘。
+  if (page === 'personas') return;
   timer = setInterval(() => { if (!document.hidden) render(); }, 3000);
 }
 document.querySelectorAll('nav a').forEach(link => {

@@ -135,3 +135,16 @@ export function buildCostTurns({ config, store, session = '', limit = 100 }) {
     })),
   };
 }
+
+// --- Personas (Phase 2) -----------------------------------------------------
+// Thin wrappers so the route table stays declarative; every rule (fallback
+// order, name validation, path containment) lives in src/personas.js.
+export function buildPersonas({ personas }) {
+  if (!personas) return { available: false };
+  return { available: true, ...personas.describe() };
+}
+
+export function buildPersonaFile({ personas, kind = 'card', name = '' }) {
+  if (!personas) throw new Error('PERSONA_UNAVAILABLE');
+  return kind === 'behavior' ? personas.behaviorFile() : personas.card(name);
+}

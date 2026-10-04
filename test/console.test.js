@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { Store } from '../src/store.js';
+import { Personas } from '../src/personas.js';
+import { DEFAULT_PERSONA } from '../src/persona.js';
 import { createConsole } from '../src/console/server.js';
 import { buildSummary, buildConfig, buildCost, buildCostTurns, redact } from '../src/console/api.js';
 
@@ -22,7 +27,22 @@ function fixture(t, overrides = {}) {
   return { store, config, server };
 }
 
+// A console wired to a real persona directory, for the Phase 2 write paths.
+function personaFixture(t) {
+  const root = mkdtempSync(join(tmpdir(), 'autochat-console-personas-'));
+  const store = new Store();
+  const personas = new Personas({ directory: root, store, log: () => {} });
+  t.after(() => { store.close(); rmSync(root, { recursive: true, force: true }); });
+  const config = { model: 'deepseek-flash', budgetMicro: 1000000, consoleToken: TOKEN, consolePort: 0 };
+  const server = createConsole({ config, store, personas, log: () => {}, port: 0 });
+  return { store, personas, server };
+}
+
 const auth = { 'x-console-token': TOKEN };
+const jsonPost = (base, path, body, extra = {}) => fetch(base + path, {
+  method: 'POST', headers: { ...auth, 'Content-Type': 'application/json', ...extra },
+  body: JSON.stringify(body),
+});
 
 test('every api route requires the console token', async t => {
   const { server } = fixture(t);
@@ -30,7 +50,7 @@ test('every api route requires the console token', async t => {
   t.after(() => server.stop());
   const base = `http://127.0.0.1:${server.address().port}`;
   for (const path of ['/api/summary', '/api/sessions', '/api/charges', '/api/logs', '/api/config',
-    '/api/cost', '/api/cost/turns']) {
+    '/api/cost', '/api/cost/turns', '/api/personas', '/api/personas/file']) {
     assert.equal((await fetch(base + path)).status, 401, path);
   }
   assert.equal((await fetch(`${base}/api/summary?token=wrong`)).status, 401);
@@ -131,4 +151,76 @@ test('the cost dashboard zero-fills its range and prices samples supplied by the
   assert.equal(turns.turns[0].calls, 2);
   assert.equal(turns.turns[0].peakMicro + turns.turns[0].offMicro, turns.turns[0].totalMicro);
   store.close();
+});
+
+test('persona writes require the header token and a loopback origin', async t => {
+  const { server } = personaFixture(t);
+  await server.start();
+  t.after(() => server.stop());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  // A query-string token is fine for reads (that is how the printed link works)
+  // but never for writes: a URL can be replayed by a third party.
+  const onlyQuery = await fetch(`${base}/api/personas/file?token=${TOKEN}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: '甲', content: '内容' }),
+  });
+  assert.equal(onlyQuery.status, 403);
+  assert.equal((await onlyQuery.json()).error, 'header_token_required');
+  const foreign = await jsonPost(base, '/api/personas/file', { name: '甲', content: '内容' },
+    { Origin: 'http://evil.example' });
+  assert.equal(foreign.status, 403);
+  assert.equal((await foreign.json()).error, 'origin_rejected');
+  assert.equal((await jsonPost(base, '/api/personas/file', { name: '甲', content: '内容' })).status, 200);
+});
+
+test('a card saved in the console changes the very next resolved prompt', async t => {
+  const { server, personas } = personaFixture(t);
+  await server.start();
+  t.after(() => server.stop());
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const saved = await (await jsonPost(base, '/api/personas/file', { name: '测试卡', content: '你是测试角色。' })).json();
+  assert.equal(saved.saved.name, '测试卡');
+  assert.equal(saved.characters.length, 1);
+  assert.equal(saved.characters[0].active, false);
+
+  const activated = await (await jsonPost(base, '/api/personas/active', { name: '测试卡' })).json();
+  assert.equal(activated.source, 'card');
+  assert.equal(personas.resolve(), '你是测试角色。');
+
+  const file = await (await fetch(`${base}/api/personas/file?name=${encodeURIComponent('测试卡')}`, { headers: auth })).json();
+  assert.equal(file.content, '你是测试角色。');
+  assert.equal(file.exists, true);
+
+  // Only client-caused failures get a real status code instead of a blanket 500.
+  const bad = await jsonPost(base, '/api/personas/file', { name: '../evil', content: '内容' });
+  assert.equal(bad.status, 400);
+  assert.equal((await bad.json()).error, 'PERSONA_NAME_INVALID');
+  assert.equal((await jsonPost(base, '/api/personas/file', { name: '测试卡', content: '' })).status, 400);
+  assert.equal((await jsonPost(base, '/api/personas/active', { name: '不存在' })).status, 404);
+  assert.equal((await jsonPost(base, '/api/personas/file', null)).status, 400, 'a malformed body is 400');
+
+  const removed = await (await jsonPost(base, '/api/personas/delete', { name: '测试卡' })).json();
+  assert.equal(removed.deleted, '测试卡');
+  assert.equal(removed.active, '', 'deleting the active card clears the selection');
+  assert.equal((await jsonPost(base, '/api/personas/delete', { name: '测试卡' })).status, 404);
+});
+
+test('the behaviour layer round-trips through the console but only applies after a restart', async t => {
+  const { server, personas } = personaFixture(t);
+  await server.start();
+  t.after(() => server.stop());
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const before = await (await fetch(`${base}/api/personas/file?kind=behavior`, { headers: auth })).json();
+  assert.equal(before.kind, 'behavior');
+  assert.equal(before.exists, false);
+  assert.equal(before.restart, true);
+
+  const after = await (await jsonPost(base, '/api/personas/file', { kind: 'behavior', content: '先观察再开口。' })).json();
+  assert.equal(after.restart, true);
+  assert.equal(after.behavior.onDisk, true);
+  assert.equal(after.behavior.loaded, false, 'the running process keeps its old protocol');
+  assert.equal(after.behavior.pending, true);
+  assert.equal(personas.resolve(), DEFAULT_PERSONA);
 });

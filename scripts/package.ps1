@@ -5,7 +5,7 @@ $stagePath = Join-Path $workspacePath ('dist\package-' + [guid]::NewGuid().ToStr
 $bundlePath = Join-Path $stagePath 'AutoChat'
 New-Item -ItemType Directory -Path $bundlePath -Force | Out-Null
 # Explicit allowlist: never copy the live .env, databases, account sessions or logs.
-$items = @('src', 'scripts', 'test', 'docs', '.env.example', '.gitignore', 'package.json', 'package-lock.json', 'README.md', 'deploy.cmd', 'start.cmd', 'restart.cmd', 'stop.cmd', 'THIRD_PARTY_NOTICES.md')
+$items = @('src', 'scripts', 'test', 'docs', 'personas', '.env.example', '.gitignore', 'package.json', 'package-lock.json', 'README.md', 'deploy.cmd', 'start.cmd', 'restart.cmd', 'stop.cmd', 'THIRD_PARTY_NOTICES.md')
 foreach ($item in $items) {
     Copy-Item -LiteralPath (Join-Path $workspacePath $item) -Destination $bundlePath -Recurse
 }

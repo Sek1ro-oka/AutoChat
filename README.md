@@ -26,7 +26,8 @@ AI 回复可能不准确或包含不恰当表达；默认角色带调侃和毒�
 - 可选私聊群管理：配置的控制者可执行禁言、解除禁言，开关 `GROUP_MANAGEMENT_ENABLED` 默认关闭；执行前检查群白名单和机器人权限。
 - 群聊联网搜索：`@机器人 /搜索 完整问题` 或 `@机器人 搜索 完整问题`，私聊也可使用。总开关 `WEB_SEARCH_ENABLED`；自动搜索开关 `WEB_SEARCH_AUTO_ENABLED` 默认关闭，开启后天气、新闻、最新动态等问题可自动联网。只发送当前问题，回答附真实来源，使用现有DeepSeek密钥并计入每日预算。
 - 搜索资料交给当前模型，结合人设与上下文生成自然纯文本回答，不直接转发Markdown搜索报告；搜索与最终回答两次调用分别计入共同预算。
-- 可选本机只读控制台：`CONSOLE_ENABLED=true` 后通过启动日志里的地址访问，查看运行状态、会话、花费、日志与生效配置；仅绑定 127.0.0.1 并需访问令牌，不展示聊天正文。详见 [控制台说明](docs/console.md)。
+- 可选本机控制台：`CONSOLE_ENABLED=true` 后通过启动日志里的地址访问，查看运行状态、会话、花费、日志与生效配置，并在「人格」页管理两层提示词；仅绑定 127.0.0.1 并需访问令牌，写操作额外要求请求头令牌，不展示聊天正文。详见 [控制台说明](docs/console.md)。
+- 两层提示词：`personas/behavior.md` 定义群友行为协议（保存后需重启），`personas/characters/*.md` 是人格卡（控制台保存后**下一条消息即生效**）。未启用任何卡时回退到 `src/persona.js` 内置默认；`.env` 的 `SYSTEM_PROMPT` 若填写则独占最高优先级（向后兼容）。详见 [人设与两层提示词](docs/persona.md)。
 - 令牌与花费看板：逐次记录每次模型调用的输入（区分缓存命中/未命中）与输出 token，按**峰谷分时**计价（DeepSeek：工作日 9:00–12:00、14:00–18:00 为高峰，其余含周末与法定节假日为空闲，空闲价为高峰价的一半），提供 24h／3d／7d／30d 走势图、按会话汇总与逐轮下钻。**看板只是报表，不改变每日预算的保守预留口径**。详见 [令牌与花费看板](docs/cost.md)。
 
 ## 一键部署（Windows x64）
@@ -73,9 +74,9 @@ NapCat 的 WebSocket **服务器**应绑定 `127.0.0.1:3001`，Token 与 `.env` 
 
 模型请求不自动重试，QQ 发送结果未知不盲目重发。连续三次发送失败停止模型回复。首次验证先发送本地命令，再进行文本对话。离线／休眠期间无法回复，也不批量补发历史消息。
 
-开发阶段、接口依据和验收计划见 [开发文档](docs/development.md)；产品需求见 [需求文档](docs/requirements.md)；下一步方向（Web 控制台与拟人化群友）见 [V2 开发路线图](docs/roadmap.md)，控制台用法见 [控制台说明](docs/console.md)，计费口径见 [令牌与花费看板](docs/cost.md)。
+开发阶段、接口依据和验收计划见 [开发文档](docs/development.md)；产品需求见 [需求文档](docs/requirements.md)；下一步方向（Web 控制台与拟人化群友）见 [V2 开发路线图](docs/roadmap.md)，控制台用法见 [控制台说明](docs/console.md)，计费口径见 [令牌与花费看板](docs/cost.md)，人设分层见 [人设与两层提示词](docs/persona.md)。
 
-默认聊天角色是熟悉网络梗、嘴毒但有分寸的傲娇女生，见 [人设说明](docs/persona.md)。系统提示词维护在 `src/persona.js`，可通过 `.env` 的 `SYSTEM_PROMPT` 覆盖。
+默认聊天角色是熟悉网络梗、嘴毒但有分寸的傲娇女生，见 [人设说明](docs/persona.md)。系统提示词维护在 `src/persona.js`，可通过 `.env` 的 `SYSTEM_PROMPT` 覆盖；更常用的做法是在控制台「人格」页维护 `personas/` 下的行为层与人格卡，无需改 `.env`。
 
 修改预设、白名单、预算及启动／停止／重启的方法见 [配置与服务管理](docs/configuration.md)。后台服务命令为 `npm run bot:start`、`npm run bot:stop`、`npm run bot:restart`。
 

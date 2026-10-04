@@ -306,7 +306,7 @@ personas/
 | --- | --- | --- | --- |
 | Phase 0 | 地基重构 + 数据层扩展 | — | ✅ 2026-10-04 |
 | Phase 1 | 控制台 v1（只读） | Phase 0 | ✅ 2026-10-04 |
-| Phase 2 | 人格两层提示词 | Phase 1 | 待开始 |
+| Phase 2 | 人格两层提示词 | Phase 1 | ✅ 2026-10-04 |
 | Phase 3 | 拟人化群友（一代仿真） | Phase 1、2 | 待开始 |
 | Phase 4 | 黑话词库 | Phase 3 | 待开始 |
 | Phase 5 | 令牌与花费看板 | Phase 1 | ✅ 2026-10-04 |
@@ -322,8 +322,11 @@ personas/
   - **与本文档的偏差（已修正）**：§5 写的幂等键 `(session, turn, seq)` 直接用进程内 turn 计数会踩坑 —— 重启后 turn 从 1 重来会覆盖上一轮的历史采样。实际实现把 turn 号交给 SQLite 的 `counters` 表分配，跨重启单调，键永不重复。
   - **另一处口径澄清**：qq-bridge 的「以服务端 totals 为权威值 + 基线增量」是对着账号级总量接口做的；本项目服务商只返回单次调用的 `usage`，因此等价实现是「逐次原样落盘 + SQL 聚合 + 进程内零累加器」，不设基线。
 
+- **2026-10-04 · Phase 2 完成**：新增 `src/personas.js`（两层加载器：行为层启动快照 + 人格卡逐轮 mtime 重校验；回退顺序 `SYSTEM_PROMPT` > 人格卡 > 内置默认；名称白名单与路径包含校验；原子写入；文件损坏时以 SQLite 镜像兜底）；`store.js` 增加 `personas` 镜像读写；`config.js` 增加 `systemPromptOverride` / `personaDirectory` / `personaDefault` 并让 `systemPrompt` 保持向后兼容；`bot.js` 每轮经 `personas.resolve()` 组装提示词；控制台新增「人格」页与 `/api/personas`、`/api/personas/file`、`/api/personas/delete`、`/api/personas/active`（写接口限请求头令牌 + 回环 Origin）。新增 `personas/` 示例目录。文档见 [人设与两层提示词](persona.md)。测试从 126 增至 140，全绿。
+  - 行为层读取**在启动时冻结**，保存后 `behaviorFile()` 读的是磁盘而不是快照，因此「待重启生效」提示准确；人格卡不缓存跨轮，改完下一条消息即生效。
+
 **建议推进顺序**：0 → 1 → 5 → 2 → 3 → 4。
-（「看得见」这条线（控制台 + 花费看板）已收尾；下一步转「像人」：Phase 2 人格分层 → Phase 3 拟人化仿真 → Phase 4 黑话词库。）
+（「看得见」这条线（控制台 + 花费看板）已收尾；「像人」这条线已起步：Phase 2 人格分层 ✅，下一步 Phase 3 拟人化仿真 → Phase 4 黑话词库。）
 
 ---
 
