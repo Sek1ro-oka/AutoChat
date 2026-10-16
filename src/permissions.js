@@ -9,23 +9,49 @@
 // The fix on Windows is an explicit DACL: break inheritance and grant only the
 // own account, SYSTEM and Administrators. Measured on this machine (2026-10-04)
 // this needs no elevation — the owner of an object implicitly holds WRITE_DAC —
-// and it needs no `/t`: once inheritable ACEs are set on a directory, icacls
-// updates the already-existing children too, so a directory holding a handful of
-// files is done in one shot.
+// and it needs no recursive walk: once inheritable ACEs are set on a directory,
+// icacls updates the already-existing children too (see incident (1) below for why
+// the recursive flag is not merely unnecessary here but forbidden), so a directory
+// holding a handful of files is done in one shot.
 //
-// Deliberately NOT applied to `runtime/` as a whole: that directory also holds
-// the portable Node runtime, the NapCat install and the download cache (>120 MB),
-// and icacls walks inherited children, which would turn a 50 ms startup step into
-// a multi-second tree rewrite for no security gain. Individual sensitive files
-// are tightened at the moment they are written instead.
+// Two upstream incidents shape the hardening below. Both produced a *reported*
+// failure on top of real damage — the log line was accurate and still useless —
+// so what follows is enforced by structure and by assertions, not by memory.
 //
+// (1) Never add the recursive flag to the command. The `(OI)(CI)` flags mean
+// "object inherit / container inherit": they are *directory-only propagation*
+// flags, and a file that carries them fails the grant. `/inheritance:r` drops the
+// parent's inherited ACEs *before* the grant is attempted, so a file that ends up
+// with no explicit ACE has an empty DACL — and an empty DACL is not "no policy",
+// it is "everyone denied", up to and including the owner. Upstream passed the
+// recursive flag with the directory flags, which is exactly how 50 children under
+// `state/` became unreadable by their own owner. We do not need the flag: once
+// inheritable ACEs are set on a directory, icacls updates the already-existing
+// children too (asserted in test/permissions.test.js), so the flag is both
+// unnecessary and forbidden. The test asserts that no quoted recursive-flag
+// literal (`/` + `t` in either case, quoted) appears in this file, so the comment
+// above spells the flag out in prose only: the incident is one short argument away.
+//
+// (2) "Is it already tightened?" must be answered by parsing access control
+// entries, never by searching the whole output for the inherited marker. icacls
+// prints `Mandatory Label\Low Mandatory Level:(I)(NW)` for an integrity label,
+// and that line carries the inherited marker per *mandatory label* rather than
+// per access control entry. A whole-output search therefore reports "not
+// tightened" for a directory that is tightened, every single run — and if it is
+// wired to the command above, every startup rewrites the DACL and re-runs a
+// destructive step. So: drop the `Mandatory Label\` line first (a naive parse of
+// it reads a principal called `Level`), keep the `subject:(flags)` lines, and let
+// *their* flags decide. The reference implementation is `aces()`/`parseAces()` in
+// test/permissions.test.js. Nothing in `src/` reads icacls output today, so this
+// paragraph is a constraint on the next reader, not dead code.
+
 // Everything here is best-effort. A failure is reported, never thrown: refusing
 // to start because an ACL could not be set would push operators to disable the
 // whole mechanism.
 
 import { execFileSync } from 'node:child_process';
-import { chmodSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, existsSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 
 const IS_WINDOWS = process.platform === 'win32';
 const TIMEOUT_MS = 10000;
@@ -63,6 +89,38 @@ export const BROAD_SIDS = Object.freeze([
 // unused pipe turns a working probe into a spurious `EBUSY` failure.
 const STDIO = ['ignore', 'pipe', 'pipe'];
 
+// The set of paths a startup tightens, as data rather than as a literal inside
+// `main.js`: a list buried in the entry point cannot be asserted on, and it had
+// silently stayed at two entries while two more directories filled up with
+// secrets. Order is fixed and asserted by test/permissions.test.js.
+//
+// Deliberately NOT applied to `runtime/` as a whole: that directory also holds
+// the portable Node runtime, the NapCat install and the download cache (>120 MB),
+// and icacls walks inherited children, which would turn a 50 ms startup step into
+// a multi-second tree rewrite for no security gain. Individual sensitive files are
+// tightened at the moment they are written instead (`runtime/console-token.txt`,
+// the corrupt-import stashes). Keeping the reason here rather than in `main.js` is
+// the point of the move: the list and its rationale must not drift apart again.
+export function secretTargets(config, { exists = existsSync, logDirectory = resolve('logs') } = {}) {
+  const dataDirectory = dirname(config?.databasePath ?? join('data', 'autochat.sqlite'));
+  const targets = [
+    // No `exists` guard on these two: `new Store(path)` creates the database
+    // directory, and `createLogger()` creates its directory, both before the
+    // startup sweep runs. A guard would only hide the day one of them changes.
+    { path: dataDirectory, directory: true, label: 'data' },
+    // `logs/*.jsonl` carries the hardening failure reasons themselves, so a
+    // log directory left readable would document the hole it is part of.
+    { path: logDirectory, directory: true, label: 'logs' },
+  ];
+  const envFile = resolve('.env');
+  if (exists(envFile)) targets.push({ path: envFile, label: 'env' });
+  // Guarded: `src/personas.js` only creates this directory when a card or the
+  // behaviour layer is saved, so a fresh clone may not have it yet.
+  const personas = resolve(config?.personaDirectory ?? join('personas'));
+  if (exists(personas)) targets.push({ path: personas, directory: true, label: 'personas' });
+  return targets;
+}
+
 const run = args => execFileSync(ICACLS, args, { stdio: STDIO, timeout: TIMEOUT_MS, windowsHide: true });
 
 // `whoami /user /fo csv /nh` prints `"DOMAIN\user","S-1-5-21-…"`.
@@ -97,7 +155,7 @@ export function harden(path, { directory = false, log = () => {}, label = null }
       chmodSync(path, directory ? 0o700 : 0o600);
       return { path, applied: true, ok: true };
     } catch (error) {
-      log('permissions_failed');
+      log('permissions_failed', { label: tag, reason: String(error?.message ?? error) });
       return { path, applied: true, ok: false, reason: String(error?.message ?? error), label: tag };
     }
   }
@@ -120,13 +178,19 @@ export function harden(path, { directory = false, log = () => {}, label = null }
     log('permissions_hardened');
     return { path, applied: true, ok: true };
   } catch (error) {
-    // Non-fatal by design; see the module comment.
-    log('permissions_failed');
-    return { path, applied: true, ok: false, reason: String(error?.message ?? error), label: tag };
+    // Non-fatal by design; see the module comment. The reason rides along in the
+    // event as well as in the return value: a return value only ever reaches the
+    // one caller that looked, and an ACL failure otherwise leaves no trace in
+    // `logs/*.jsonl` to diagnose after the fact.
+    const reason = String(error?.message ?? error);
+    log('permissions_failed', { label: tag, reason });
+    return { path, applied: true, ok: false, reason, label: tag };
   }
 }
 
-// Tighten several paths, swallowing nothing but reporting everything.
+// Tighten several paths, swallowing nothing but reporting everything. Both the
+// per-path failure and this summary carry the failing labels, so one grep of the
+// day's log answers "which target, and why" without a repro.
 export function hardenAll(paths, { log = () => {} } = {}) {
   const results = [];
   for (const entry of paths) {
@@ -135,6 +199,6 @@ export function hardenAll(paths, { log = () => {} } = {}) {
     results.push({ ...harden(spec.path, { directory: Boolean(spec.directory), log, label: spec.label }), label: spec.label ?? spec.path });
   }
   const failed = results.filter(item => !item.ok);
-  if (failed.length) log('permissions_incomplete');
+  if (failed.length) log('permissions_incomplete', { failed: failed.map(item => item.label) });
   return { results, ok: failed.length === 0, failed: failed.length };
 }

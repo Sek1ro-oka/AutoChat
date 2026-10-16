@@ -25,8 +25,8 @@
 // tests have a single entry point for "the slang feature".
 export { MAX_CANDIDATES_PER_RUN, extractJsonArray, sanitiseCandidates, sanitiseText } from './slang-parse.js';
 
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { mkdirSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { budgetDay } from '../store.js';
 import { costMicro, estimateInput, usageCost } from '../model.js';
 import { escapeForPrompt } from './quote.js';
@@ -45,11 +45,16 @@ const STATUSES = ['candidate', 'confirmed', 'rejected'];
 // Field caps for human edits; the parser applies the same limits to model output.
 const MAX_FIELD_CHARS = 200;
 const MAX_MEANING_CHARS = 160;
+// Corrupt-import stashes kept on disk. The stash holds whatever the operator
+// tried to import, which can include verbatim group messages; keeping every one
+// of them forever turns a diagnostic aid into an unbounded pile of chat text
+// (measured: 28 files that no code path ever read or removed).
+export const MAX_CORRUPT_STASHES = 20;
 
 export class Slang extends SlangExtraction {
   constructor({
     config, store, model, ledger = null, log = () => {}, now = Date.now,
-    corruptDirectory = 'runtime',
+    corruptDirectory = null,
   } = {}) {
     super();
     this.config = config;
@@ -58,7 +63,14 @@ export class Slang extends SlangExtraction {
     this.ledger = ledger;
     this.log = log;
     this.now = now;
-    this.corruptDirectory = corruptDirectory;
+    // A corrupt-import stash holds the raw text the operator tried to import, so
+    // it belongs beside the database: `<data>/slang-corrupt/` inherits that
+    // directory's ACL hardening *and* its gitignore entry. It used to default to
+    // a relative `runtime/`, which is neither — and `runtime/` is deliberately not
+    // tightened as a whole (see src/permissions.js). Callers may still pass an
+    // explicit directory, which is what the tests do.
+    const dataDirectory = config?.databasePath ? dirname(config.databasePath) : 'data';
+    this.corruptDirectory = corruptDirectory ? resolve(corruptDirectory) : join(dataDirectory, 'slang-corrupt');
     // Read by the extraction half (slang-extract.js) when it trims the library.
     this.entryCap = MAX_ENTRIES;
   }
@@ -301,15 +313,36 @@ export class Slang extends SlangExtraction {
     return { ...outcome, trimmed, ...this.describe() };
   }
 
+  // Ascending by file name = oldest first: an ISO timestamp is lexicographically
+  // sortable, so the name alone orders the stashes by age — no stat() needed.
+  pruneCorruptStashes() {
+    let names;
+    try { names = readdirSync(this.corruptDirectory).filter(name => /^slang-corrupt-.*\.json$/.test(name)).sort(); }
+    catch { return 0; } // nothing readable yet; a write must never fail over this
+    const excess = names.slice(0, Math.max(0, names.length - MAX_CORRUPT_STASHES));
+    let removed = 0;
+    for (const name of excess) {
+      try { unlinkSync(join(this.corruptDirectory, name)); removed += 1; }
+      catch { /* best-effort: a stash that cannot be removed must not fail the import */ }
+    }
+    return removed;
+  }
+
   stashCorrupt(text) {
     const stamp = new Date(this.now()).toISOString().replace(/[:.]/g, '-');
     const file = join(this.corruptDirectory, `slang-corrupt-${stamp}.json`);
     try {
-      mkdirSync(dirname(file), { recursive: true });
+      mkdirSync(this.corruptDirectory, { recursive: true });
       writeFileSync(file, text, 'utf8');
       // The stash holds whatever the operator tried to import, which can include
       // verbatim group messages: tighten it like any other secret-bearing file.
+      // Keep this even though the default directory is already covered by the
+      // startup sweep — defence in depth, and it also covers an explicit
+      // `corruptDirectory` pointing somewhere unprotected.
       harden(file, { log: this.log, label: 'slang-corrupt' });
+      // Only ever called after a successful write: pruning is housekeeping for a
+      // stash that now exists, never a way for the failure path to do extra work.
+      this.pruneCorruptStashes();
       return file;
     } catch { return null; }
   }

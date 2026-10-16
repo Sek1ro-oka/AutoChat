@@ -1,7 +1,12 @@
 // Read the append-only event log for the console.
 //
-// `logs/*.jsonl` only ever contains `{ time, event }` records — never chat text
-// or credentials (see `src/logger.js`), so exposing the tail here leaks nothing.
+// `logs/*.jsonl` never contains chat text or credentials (see `src/logger.js`):
+// the event name must match `/^[a-z_]+$/`, and the optional `detail` field only
+// accepts a plain object, which is how the hardening failures record the target
+// label and the reason. `detail` holds labels, paths and error reasons — never
+// message bodies and never keys — so exposing the tail here leaks nothing. This
+// reader deliberately returns `{ time, event }` only; `detail` is not surfaced in
+// the console yet.
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
