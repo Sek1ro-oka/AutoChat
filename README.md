@@ -62,6 +62,12 @@ npm start
 
 NapCat 的 WebSocket **服务器**应绑定 `127.0.0.1:3001`，Token 与 `.env` 相同，消息格式选择 **array**。AutoChat 的 `ONEBOT_WS_URL` 对应 `ws://127.0.0.1:3001`。本服务在连接后校验实际登录 QQ 号，账号不匹配会停止连接。完整步骤见 [本机运行手册](docs/local-setup.md)。
 
+## 控制台（可选）
+
+控制台是一个本机网页面板，**可选、默认关闭**。在 `.env` 里设 `CONSOLE_ENABLED=true`（端口用 `CONSOLE_PORT`，默认 `3200`）后重启，启动日志会打印带令牌的地址；也可以直接打开 http://127.0.0.1:3200/ ，把 `runtime/console-token.txt` 里的令牌粘进去。
+
+它以只观测为主：运行状态、会话、花费与令牌、日志、生效配置，以及人格／仿真／群设置／黑话／表情包的编辑页；**不展示聊天正文**。安全前提是它只绑定 `127.0.0.1`（局域网访问不到），读接口可用查询串里的令牌，**写操作必须带请求头令牌**。开启步骤见 [Windows 本机部署](docs/local-setup.md)，页面与 API 细节、安全边界见 [控制台说明](docs/console.md)。
+
 ## 命令
 
 | 命令 | 可用范围 |
@@ -80,11 +86,13 @@ NapCat 的 WebSocket **服务器**应绑定 `127.0.0.1:3001`，Token 与 `.env` 
 
 模型请求不自动重试，QQ 发送结果未知不盲目重发。连续三次发送失败停止模型回复。首次验证先发送本地命令，再进行文本对话。离线／休眠期间无法回复，也不批量补发历史消息。
 
-开发阶段、接口依据和验收计划见 [开发文档](docs/development.md)；产品需求见 [需求文档](docs/requirements.md)；下一步方向见 [V2 开发路线图](docs/roadmap.md)，控制台用法见 [控制台说明](docs/console.md)，计费口径见 [令牌与花费看板](docs/cost.md)，人设分层见 [人设与两层提示词](docs/persona.md)，拟人化群友见 [拟人化群友](docs/simulation.md)，黑话词库见 [群聊黑话词库](docs/slang.md)，按群特异化见 [按群特异化](docs/groups.md)，表情包见 [表情包库](docs/stickers.md)，安全边界见 [安全与隐私基线](docs/security.md)。
-
 默认聊天角色是熟悉网络梗、嘴毒但有分寸的傲娇女生，见 [人设说明](docs/persona.md)。系统提示词维护在 `src/persona.js`，可通过 `.env` 的 `SYSTEM_PROMPT` 覆盖；更常用的做法是在控制台「人格」页维护 `personas/` 下的行为层与人格卡，无需改 `.env`。
 
 修改预设、白名单、预算及启动／停止／重启的方法见 [配置与服务管理](docs/configuration.md)。后台服务命令为 `npm run bot:start`、`npm run bot:stop`、`npm run bot:restart`。
+
+## 文档索引
+
+全部文档的入口是 [docs/README.md](docs/README.md)：一篇一行，写明每篇管什么、当前是否仍然有效、最后核对到哪天，附带一张「想找什么，去哪看」的路由表。不知道该翻哪一篇时，从那里开始。
 
 ## 参考文献与参考项目
 

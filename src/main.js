@@ -12,6 +12,7 @@ import { Slang } from './social/slang.js';
 import { StickerLib } from './sticker-lib.js';
 import { DEFAULT_PERSONA } from './persona.js';
 import { createLogger } from './logger.js';
+import { HOLIDAY_YEARS, warnStaleHolidayTable } from './holidays.js';
 import { createConsole } from './console/server.js';
 import { hardenAll, secretTargets } from './permissions.js';
 import { acquireLock, lockPathFor, withTimeout } from './lifecycle.js';
@@ -45,6 +46,10 @@ if (!lock.ok) {
 // `unlinkSync` is legal in an exit hook, and `release()` is idempotent, so the
 // normal shutdown path below can call it a second time.
 process.on('exit', () => lock.release());
+// The built-in holiday table is maintained by hand once a year, and a year it does
+// not know about is silently priced as "not a holiday". Say so once, here, on the
+// path that actually starts serving — a refused start stays as quiet as before.
+warnStaleHolidayTable(log, HOLIDAY_YEARS);
 const store = new Store(config.databasePath);
 // Runtime-overridable settings (V2). From here on every component reads
 // `config.xxx` through a proxy that resolves the settings table first and the

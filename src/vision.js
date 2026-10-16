@@ -39,6 +39,9 @@ export async function loadImages(segments, call, fetchImage = fetch) {
       url = imageUrl(new URL(response.headers.get('location'), url).href);
     }
     if (!response.ok) { await response.body?.cancel(); throw new Error('IMAGE_DOWNLOAD'); }
+    // Early exit only: a declared `content-length` above the cap is refused without
+    // reading a byte. The authoritative limit is the streaming check below, and this
+    // line not firing when the header is missing (`Number(null) === 0`) is expected.
     if (Number(response.headers.get('content-length')) > MAX_IMAGE_BYTES) {
       await response.body?.cancel(); throw new Error('IMAGE_SIZE');
     }

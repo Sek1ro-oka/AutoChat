@@ -43,6 +43,9 @@ export async function fetchStickerBytes(segment, { call = null, fetchImage = fet
     url = imageUrl(new URL(response.headers.get('location'), url).href);
   }
   if (!response.ok) { await response.body?.cancel(); return null; }
+  // Early exit only: a declared `content-length` above the cap is refused without
+  // reading a byte. The authoritative limit is the streaming check below, and this
+  // line not firing when the header is missing (`Number(null) === 0`) is expected.
   if (Number(response.headers.get('content-length')) > MAX_IMAGE_BYTES) {
     await response.body?.cancel(); return null;
   }
