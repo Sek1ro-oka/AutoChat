@@ -44,3 +44,9 @@ napcat/
 
 # Local assistant workspace and notes
 .workbuddy/
+
+# Local-only collaboration scratch: third-party reference clones and raw
+# upstream source snapshots kept for citation verification. The Markdown
+# deliverables under work/agent-tasks/*/ are intentionally NOT ignored.
+work/reference/
+work/agent-tasks/*/_src/
