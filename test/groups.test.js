@@ -7,7 +7,7 @@ import { Store } from '../src/store.js';
 import { Personas } from '../src/personas.js';
 import { Social } from '../src/social/engine.js';
 import { Slang } from '../src/social/slang.js';
-import { clearGroupOverrides } from '../src/group-settings.js';
+import { GROUP_KEYS, GROUP_LIMITS, clearGroupOverrides, numberOverride, withinRange } from '../src/group-settings.js';
 import { createConsole } from '../src/console/server.js';
 
 const TOKEN = 'test-console-token-1234';
@@ -183,4 +183,173 @@ test('the group page reads both groups and writes each subsystem through one end
   assert.equal((await jsonPost(base, '/api/groups/config', { group: '99999', subsystem: 'social', enabled: true })).status, 404);
   assert.equal((await jsonPost(base, '/api/groups/config', { group: '20000', subsystem: 'nope' })).status, 400);
   assert.equal((await jsonPost(base, '/api/groups/config', { subsystem: 'persona', name: '' })).status, 400);
+});
+
+// --- I-01 D-01: 空值不是 0（花钱路径）---------------------------------------
+
+// The settings table is the whole state these writes can touch, so comparing a
+// dump before and after a rejected patch is the strongest form of "nothing was
+// written": not "the field I checked is fine" but "the row set is identical".
+const settingsDump = store => store.db.prepare('SELECT key, value FROM settings ORDER BY key').all()
+  .map(row => `${row.key}=${row.value}`).join('\n');
+
+test('withinRange rejects blank and non-decimal text instead of reading it as 0', () => {
+  const { threshold } = GROUP_LIMITS;
+  assert.equal(withinRange('', threshold), null, '空串没有值，绝不能变成 0');
+  assert.equal(withinRange('   ', threshold), null, '只有空白的输入同样没有值');
+  assert.equal(withinRange(null, threshold), null);
+  assert.equal(withinRange(undefined, threshold), null);
+  assert.equal(withinRange(true, threshold), null);
+  assert.equal(withinRange(NaN, threshold), null);
+  assert.equal(withinRange(Infinity, threshold), null);
+  assert.equal(withinRange('0x10', threshold), null, '十六进制不再被 Number() 顺手接下');
+  assert.equal(withinRange('1e2', threshold), null, '指数写法同样不再被接下');
+  assert.equal(withinRange('.5', threshold), null, '必须写成 0.5');
+  assert.equal(withinRange('12abc', threshold), null);
+  assert.equal(withinRange(0, threshold), 0, '0 仍然合法：它是阈值最低的一档，不是非法值');
+  assert.equal(withinRange('0', threshold), 0);
+  assert.equal(withinRange('50', threshold), 50);
+  assert.equal(withinRange(' 50 ', threshold), 50, '两侧空白被 trim 掉');
+  assert.equal(withinRange('6.5', threshold), 6.5);
+  assert.equal(withinRange(101, threshold), null);
+  assert.equal(withinRange('-1', threshold), null);
+  assert.equal(withinRange('', GROUP_LIMITS.cooldownSeconds), null);
+  assert.equal(withinRange('5', GROUP_LIMITS.cooldownSeconds), 5);
+});
+
+test('a blank number row is read as "no override" while a blank persona row stays a value', t => {
+  const { store, personas, social } = harness(t);
+  const rows = { [GROUP_KEYS.socialThreshold('20000')]: '' };
+  assert.equal(numberOverride({ setting: (key, fallback) => (key in rows ? rows[key] : fallback) }, GROUP_KEYS.socialThreshold('20000')), undefined);
+  rows[GROUP_KEYS.socialThreshold('20000')] = '   ';
+  assert.equal(numberOverride({ setting: (key, fallback) => (key in rows ? rows[key] : fallback) }, GROUP_KEYS.socialThreshold('20000')), undefined);
+  rows[GROUP_KEYS.socialThreshold('20000')] = '0';
+  assert.equal(numberOverride({ setting: (key, fallback) => (key in rows ? rows[key] : fallback) }, GROUP_KEYS.socialThreshold('20000')), 0, '库里真的是 0 就要读出 0');
+
+  // 同一个 store 里两种空串：人格行是真实值（rawOverride），数字行不是值（numberOverride）。
+  store.set(GROUP_KEYS.persona('20000'), '');
+  store.set(GROUP_KEYS.socialThreshold('20000'), '');
+  const card = personas.groupView('20000');
+  assert.equal(card.override, '', '空串是「显式使用内置默认」，不是「没有覆盖」');
+  assert.equal(card.source, 'group');
+  assert.equal(social.params('20000').threshold, 6, '数字行的空串回落到全局值，不是 0');
+  assert.equal(social.params('20000').overridden.threshold, false);
+  store.set('social_threshold', '   ');
+  assert.equal(social.params('20001').threshold, 6, '全局行被写成空白时回落到 .env 默认值');
+  store.set('social_threshold', '0');
+  assert.equal(social.params('20001').threshold, 0, '全局行真的写 0 时仍然读回 0');
+  assert.equal(clearGroupOverrides(store, '20000').length, 2, '两行都还在库里：谁都没有被折叠掉');
+});
+
+test('a blank number sent straight to the API is refused and writes nothing', async t => {
+  const { server, store, social } = consoleFixture(t);
+  await server.start();
+  t.after(() => server.stop());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const before = settingsDump(store);
+
+  const scoped = await jsonPost(base, '/api/groups/config', { group: '20000', subsystem: 'social', threshold: '' });
+  assert.equal(scoped.status, 400, '客户端可以绕过输入框，服务端必须自己拒绝');
+  assert.equal((await scoped.json()).error, 'SOCIAL_PARAM_INVALID');
+  const global = await jsonPost(base, '/api/social/config', { threshold: '' });
+  assert.equal(global.status, 400);
+  assert.equal(settingsDump(store), before, '空值没有写进任何一行');
+  assert.equal(social.params('20000').threshold, 6);
+});
+
+test('threshold 0 is still saveable and reads back as 0, per group and globally', async t => {
+  const { server, store, social } = consoleFixture(t);
+  await server.start();
+  t.after(() => server.stop());
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const scoped = await jsonPost(base, '/api/groups/config', { group: '20000', subsystem: 'social', threshold: 0 });
+  assert.equal(scoped.status, 200);
+  const view = (await scoped.json()).groups.find(g => g.id === '20000').social;
+  assert.equal(view.threshold, 0);
+  assert.equal(view.overridden.threshold, true);
+  assert.equal(store.setting(GROUP_KEYS.socialThreshold('20000'), 'absent'), '0');
+
+  assert.equal((await jsonPost(base, '/api/social/config', { threshold: 0 })).status, 200);
+  assert.equal(store.setting('social_threshold', 'absent'), '0');
+  assert.equal(social.params('20001').threshold, 0, '其他群继承这个 0');
+});
+
+test('a group-scoped idle-only patch is refused instead of silently ignored', async t => {
+  const { server, store } = consoleFixture(t);
+  await server.start();
+  t.after(() => server.stop());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const before = settingsDump(store);
+
+  const res = await jsonPost(base, '/api/groups/config', { group: '20000', subsystem: 'social', idleMinutes: 60 });
+  assert.equal(res.status, 400, '界面必须看到失败，而不是「已保存」');
+  assert.equal((await res.json()).error, 'SOCIAL_PARAM_NOT_GROUP_SCOPED');
+  assert.equal(settingsDump(store), before, '一个字段都没写');
+  assert.equal(store.setting('social_idle_minutes', 'absent'), 'absent');
+
+  // 同一个字段在全局作用域下仍然可以改。
+  assert.equal((await jsonPost(base, '/api/social/config', { idleMinutes: 60 })).status, 200);
+  assert.equal(store.setting('social_idle_minutes', 'absent'), '60');
+});
+
+test('a group patch that fails validation writes nothing at all (E-05)', async t => {
+  const { server, store, social } = consoleFixture(t);
+  await server.start();
+  t.after(() => server.stop());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const before = settingsDump(store);
+
+  // threshold 合法、cooldownSeconds 非法：旧实现会先把 threshold 写成 0 再报错。
+  const res = await jsonPost(base, '/api/groups/config', { group: '20000', subsystem: 'social', threshold: 0, cooldownSeconds: 0 });
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, 'SOCIAL_PARAM_INVALID');
+  assert.equal(settingsDump(store), before, '抛错之后 settings 表逐字节不变');
+  assert.equal(store.setting(GROUP_KEYS.socialThreshold('20000'), 'absent'), 'absent', '阈值没有被写成 0');
+  assert.equal(store.setting(GROUP_KEYS.socialCooldown('20000'), 'absent'), 'absent');
+  assert.equal(social.params('20000').threshold, 6, '这个群仍然继承全局阈值');
+
+  // 对照组：同一个补丁只把非法项改对，就应该整体成功。
+  assert.equal((await jsonPost(base, '/api/groups/config', { group: '20000', subsystem: 'social', threshold: 0, cooldownSeconds: 45 })).status, 200);
+  assert.equal(store.setting(GROUP_KEYS.socialThreshold('20000'), 'absent'), '0');
+  assert.equal(store.setting(GROUP_KEYS.socialCooldown('20000'), 'absent'), '45');
+});
+
+test('the group list and the group writer agree on the same set of groups', async t => {
+  const { server } = consoleFixture(t);
+  await server.start();
+  t.after(() => server.stop());
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const ids = (await (await fetch(`${base}/api/groups`, { headers: auth })).json()).groups.map(g => g.id);
+  assert.deepEqual(ids, ['20000', '20001']);
+  for (const id of ids) {
+    assert.equal((await jsonPost(base, '/api/groups/config', { group: id, subsystem: 'slang', enabled: false })).status, 200, `${id} 在列表里就必须写得进去`);
+  }
+  assert.equal((await jsonPost(base, '/api/groups/config', { group: '20002', subsystem: 'slang', enabled: false })).status, 404, '不在列表里的群号写不进去');
+});
+
+test('with no subsystem able to enumerate groups the list is empty and the writer refuses every group', async t => {
+  const { store, personas, config } = harness(t);
+  const server = createConsole({ config, store, personas, log: () => {}, port: 0 });
+  await server.start();
+  t.after(() => server.stop());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const before = settingsDump(store);
+
+  const view = await (await fetch(`${base}/api/groups`, { headers: auth })).json();
+  assert.deepEqual(view.available, { personas: true, social: false, slang: false });
+  // 读取端与写入端共用同一个集合：没有子系统能枚举群时它为空，`.env` 的 GROUP_QQS
+  // 不再是兜底 —— 否则列表里会躺着一批根本没有子系统可以写入的群号。
+  assert.deepEqual(view.groups, [], '枚举不出群时列表就是空的');
+
+  // 「已知群号集合为空」的含义是「当前没有任何群可以操作」，不是「那就都放行」。
+  for (const id of config.groupIds) {
+    assert.equal((await jsonPost(base, '/api/groups/config', { group: id, subsystem: 'social', enabled: true })).status, 404, `${id} 写在 .env 里也一样写不进去`);
+  }
+  assert.equal((await jsonPost(base, '/api/groups/config', { group: '20000', subsystem: 'slang', enabled: true })).status, 404);
+  assert.equal((await jsonPost(base, '/api/groups/config', { group: '20000', subsystem: 'reset' })).status, 404);
+  assert.equal((await jsonPost(base, '/api/groups/config', { group: '99999', subsystem: 'social', enabled: true })).status, 404);
+  assert.equal((await jsonPost(base, '/api/groups/config', { group: '20000', subsystem: 'nope' })).status, 404, '群号检查在前，未知群号一律 404');
+  assert.equal(settingsDump(store), before, '被拒绝的写入一个字节都没落库');
 });

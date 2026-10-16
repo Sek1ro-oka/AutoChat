@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import vm from 'node:vm';
 import { Store } from '../src/store.js';
+import { GROUP_KEYS } from '../src/group-settings.js';
 import { Personas } from '../src/personas.js';
 import { Social } from '../src/social/engine.js';
 import { Slang } from '../src/social/slang.js';
@@ -431,4 +433,155 @@ test('the slang page reads the library, guards its writes and keeps chat text ou
   const removed = await (await jsonPost(base, '/api/slang/delete', { id })).json();
   assert.equal(removed.stats.total, 0);
   assert.equal(slang.describe().preview, '');
+});
+
+// 控制台前端是经典脚本，没有模块边界，只能按 index.html 的顺序在同一 vm 上下文里跑。
+// 这里搭一个最小假 DOM：只实现这三个脚本真正碰到的接口，其余返回空值走各自的兜底分支。
+const fakeConsole = created => {
+  class El {
+    constructor(tag = 'div') {
+      this.tagName = tag; this.value = ''; this.textContent = ''; this.className = '';
+      this.dataset = {}; this.style = {}; this.attrs = {}; this.writes = 0;
+      this._html = ''; this._classes = new Set(); this.validity = { badInput: false };
+      this.classList = {
+        add: name => this._classes.add(name),
+        remove: name => this._classes.delete(name),
+        contains: name => this._classes.has(name),
+      };
+    }
+    set innerHTML(value) { this._html = String(value); this.writes += 1; }
+    get innerHTML() { return this._html; }
+    setAttribute(name, value) { this.attrs[name] = String(value); }
+    getAttribute(name) { return this.attrs[name] ?? null; }
+    before(node) { this.anchor = node; }
+    prepend(node) { this.anchor = node; }
+    remove() {}
+    querySelector() { return null; }
+    querySelectorAll() { return []; }
+  }
+  const pick = (map, key) => { if (!map.has(key)) map.set(key, new El()); return map.get(key); };
+  const ids = new Map(), selectors = new Map();
+  const document = {
+    hidden: false,
+    documentElement: new El('html'),
+    getElementById: id => pick(ids, id),
+    querySelector: selector => pick(selectors, selector),
+    querySelectorAll: () => [],
+    createElement: tag => { const node = new El(tag); created.push(node); return node; },
+  };
+  return { document, main: pick(ids, 'main'), input: selector => pick(selectors, selector) };
+};
+
+// 只把真请求转给测试服务器，其余（主题、图标之类）就地成功即可。
+const loadConsoleScripts = base => {
+  const created = [], calls = [];
+  const { document, main, input } = fakeConsole(created);
+  const stored = new Map([['autochat.console.token', TOKEN]]);
+  const context = vm.createContext({
+    document,
+    location: { search: '', pathname: '/' },
+    history: { replaceState: () => {} },
+    localStorage: {
+      getItem: key => (stored.has(key) ? stored.get(key) : null),
+      setItem: (key, value) => stored.set(key, String(value)),
+      removeItem: key => stored.delete(key),
+    },
+    window: { matchMedia: () => ({ matches: false }), confirm: () => true },
+    fetch: (target, init = {}) => {
+      const path = String(target);
+      calls.push({ path, method: (init.method ?? 'GET').toUpperCase(), body: init.body ? JSON.parse(init.body) : null });
+      if (!path.startsWith('/api/')) return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+      return fetch(base + path, { ...init, headers: { 'x-console-token': TOKEN, ...(init.headers ?? {}) } });
+    },
+    setInterval: () => 0, clearInterval: () => {}, setTimeout, clearTimeout,
+    console, URLSearchParams, URL, Blob,
+  });
+  for (const name of ['pages.js', 'pages-extra.js', 'app.js']) {
+    const file = new URL(`../src/console/public/${name}`, import.meta.url);
+    new vm.Script(readFileSync(file, 'utf8'), { filename: name }).runInContext(context);
+  }
+  // 顶层 const 在 vm 里可见但不会挂到 context 对象上，取出来才能直接调页面函数。
+  vm.runInContext('globalThis.__pages = pages;', context);
+  return { calls, created, context, input, main };
+};
+
+test('the group page marks an override, clears it by english key, and refuses a blank locally', async t => {
+  const { store, server } = socialFixture(t);
+  await server.start();
+  t.after(() => server.stop());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  store.set(GROUP_KEYS.socialThreshold('20000'), '3');
+  store.set(GROUP_KEYS.socialCooldown('20000'), '30');
+  store.set(GROUP_KEYS.socialDailyLimit('20000'), '9');
+  const dump = () => store.db.prepare('SELECT key, value FROM settings ORDER BY key').all()
+    .map(row => `${row.key}=${row.value}`).join('\n');
+
+  const { calls, created, context, input, main } = loadConsoleScripts(base);
+  await new Promise(resolve => setTimeout(resolve, 150)); // 等首次渲染的请求落地，别和下面的快照抢
+
+  const html = await context.__pages.groups();
+  const blockOf = (source, name) => {
+    const id = source.indexOf(`id="g-${name}-20000"`);
+    assert.ok(id > 0, `群设置页缺 ${name} 输入框`);
+    // 从 <input 开始切，这样「输入框自己的属性」和它后面的说明都落在同一块里。
+    return source.slice(source.lastIndexOf('<input', id), source.indexOf('</label>', id));
+  };
+  const noteOf = (source, name) => {
+    const span = blockOf(source, name).match(/<span class="muted">([^<]*)<\/span>/);
+    assert.ok(span, `${name} 缺少继承状态说明`);
+    return span[1];
+  };
+  for (const name of ['threshold', 'cooldownSeconds', 'dailyLimit']) {
+    assert.match(blockOf(html, name), /type="number"/, `${name} 要用数字输入框`);
+    assert.match(noteOf(html, name), /本群自定义/, '有覆盖的行必须说出来，不能一律显示成继承');
+    assert.doesNotMatch(noteOf(html, name), /继承全局/);
+    assert.match(blockOf(html, name), new RegExp(`groupSocialInherit\\(&quot;20000&quot;,'${name}'\\)`),
+      '清除按钮必须把接口认识的英文键传回去');
+  }
+
+  calls.length = 0;
+  await context.window.groupSocialInherit('20000', 'threshold');
+  const cleared = calls.filter(call => call.method === 'POST');
+  assert.equal(cleared.length, 1);
+  assert.equal(cleared[0].path, '/api/groups/config');
+  assert.deepEqual(cleared[0].body, { group: '20000', subsystem: 'social', threshold: null });
+  assert.equal(store.setting(GROUP_KEYS.socialThreshold('20000'), 'absent'), 'absent');
+  const refreshed = await context.__pages.groups();
+  assert.match(noteOf(refreshed, 'threshold'), /继承全局（6）/, '清掉覆盖后要说清楚继承的是哪个全局值');
+  assert.match(noteOf(refreshed, 'cooldownSeconds'), /本群自定义/, '别的字段不能被连带说成继承');
+  await new Promise(resolve => setTimeout(resolve, 150)); // 上面那次重绘落地再取快照
+
+  input('#g-threshold-20000').value = '';
+  input('#g-cooldownSeconds-20000').value = '30';
+  input('#g-dailyLimit-20000').value = '9';
+  const before = dump(), renders = main.writes, banners = created.length;
+  calls.length = 0;
+  await context.window.groupSocialSave('20000');
+  assert.equal(calls.filter(call => call.method === 'POST').length, 0,
+    '空值必须在客户端就地拦下：整个保存动作一个请求都不发');
+  assert.equal(dump(), before, '一次都没写库');
+  assert.equal(main.writes, renders, '不重绘，操作者刚填的其它字段要留着');
+  const banner = created.slice(banners).find(node => String(node.className).includes('banner'));
+  assert.ok(banner, '必须给出可见提示，不能悄悄不发请求');
+  assert.match(banner.textContent, /阈值不能为空/);
+  assert.match(banner.textContent, /本次没有保存任何改动/);
+  assert.equal(input('#g-threshold-20000').value, '', '输入框内容保持，让人接着改');
+  assert.equal(input('#g-cooldownSeconds-20000').value, '30', '同一行别的字段不能被清掉');
+  assert.equal(input('#g-threshold-20000').style.borderColor, 'var(--bad)');
+
+  // B-3：失败原因要让操作者看懂，但不能把没收录的码也一起吞掉。
+  const ui = vm.runInContext('({ explain, reason })', context);
+  assert.doesNotMatch(ui.explain('SOCIAL_PARAM_NOT_GROUP_SCOPED'), /^SOCIAL_PARAM_NOT_GROUP_SCOPED$/,
+    '页面不该把内部错误码原样丢给操作者');
+  assert.match(ui.reason(new Error('SOCIAL_PARAM_NOT_GROUP_SCOPED')), /不能按群单独设置/);
+  assert.equal(ui.explain('SOMETHING_NEW'), 'SOMETHING_NEW', '没收录的码照原样显示');
+
+  // 入口 A（全局仿真页）走的是同一个判据，I-01 §11 担心的「客户端先 Number('') 成 0」在这里关闭。
+  input('#sim-idle-hours').value = '9-22';
+  input('#sim-threshold').value = '';
+  const requestsBefore = calls.length;
+  await vm.runInContext('window.socialSave()', context);
+  assert.equal(calls.length, requestsBefore, '全局仿真页留空时也不该发出请求');
+  assert.match(created.filter(node => node.className.includes('banner')).at(-1).textContent, /阈值不能为空/);
+  assert.equal(input('#sim-threshold').value, '', '输入的其它字段要原样留在框里');
 });

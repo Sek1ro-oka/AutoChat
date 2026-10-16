@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { Store, budgetDay } from '../src/store.js';
 import { Ledger } from '../src/ledger.js';
 import { Social } from '../src/social/engine.js';
+import { applyParams } from '../src/social/params.js';
+import { GROUP_KEYS } from '../src/group-settings.js';
 import { GroupMemory } from '../src/social/memory.js';
 
 // 2027-01-15 16:00 北京时间：白天、非节假日，所以时段只影响计价不影响决策。
@@ -270,5 +272,79 @@ test('console parameters are validated and clamped to their documented ranges', 
     idleEnabled: false, idleMinutes: 45, idleHours: '0-23',
   });
   assert.equal(social.describe().enabled, true);
+  store.close();
+});
+
+// --- I-01 D-06 / E-05: 群作用域写不进去的补丁不许沉默，写一半也不行 -------
+
+// A store that records every operation, so "nothing was written" can be asserted
+// as "no operation happened at all" rather than "the row I looked at is fine".
+const spyStore = (rows = {}) => {
+  const state = { rows: { ...rows }, ops: [] };
+  return {
+    get rows() { return state.rows; },
+    get ops() { return state.ops; },
+    setting: (key, fallback = null) => (key in state.rows ? state.rows[key] : fallback),
+    set: (key, value) => { state.rows[key] = String(value); state.ops.push(`set ${key}=${value}`); },
+    remove: key => { delete state.rows[key]; state.ops.push(`remove ${key}`); },
+  };
+};
+
+test('a group-scoped patch that names only idle fields is refused, not dropped', () => {
+  const config = makeConfig();
+  const store = spyStore();
+  const seen = [];
+  const log = op => seen.push(op);
+
+  assert.throws(
+    () => applyParams({ store, config, group: '20000', patch: { idleMinutes: 60 }, log }),
+    /SOCIAL_PARAM_NOT_GROUP_SCOPED/,
+    '群作用域明确拒绝了：这是失败，不是「保存成功」',
+  );
+  assert.deepEqual(store.ops, [], '被拒绝的补丁一个操作都没有发生');
+  assert.deepEqual(store.rows, {});
+
+  // 真正的空操作：engine.setParams({group, muted}) 会把 numbers 变成 {} 传进来，那不是错误。
+  seen.length = 0;
+  assert.equal(applyParams({ store, config, group: '20000', patch: {}, log }), false);
+  assert.deepEqual(seen, ['social_params_noop']);
+  assert.deepEqual(store.ops, []);
+
+  // 合法字段照旧写入，返回值语义不变。
+  assert.equal(applyParams({ store, config, group: '20000', patch: { threshold: 30 }, log }), true);
+  assert.deepEqual(store.rows, { [GROUP_KEYS.socialThreshold('20000')]: '30' });
+  assert.deepEqual(store.ops, [`set ${GROUP_KEYS.socialThreshold('20000')}=30`]);
+  assert.deepEqual(seen, ['social_params_noop', 'social_params_changed']);
+});
+
+test('a group patch that fails half way through leaves the earlier field untouched', () => {
+  const config = makeConfig();
+  const key = GROUP_KEYS.socialThreshold('20000');
+  const store = spyStore({ [key]: '11' });
+  const before = { ...store.rows };
+
+  // threshold 合法、cooldownSeconds 非法：旧实现会先把 threshold 写成 0 再抛错。
+  assert.throws(
+    () => applyParams({ store, config, group: '20000', patch: { threshold: 0, cooldownSeconds: 0 } }),
+    /SOCIAL_PARAM_INVALID/,
+  );
+  assert.deepEqual(store.rows, before, 'store 与调用前逐字节一致');
+  assert.deepEqual(store.ops, [], '校验阶段失败时没有任何写操作');
+  assert.equal(store.setting(key), '11', '阈值没有被写成 0');
+
+  // 同一个补丁把非法项改对，就应该整体成功。
+  assert.equal(applyParams({ store, config, group: '20000', patch: { threshold: 0, cooldownSeconds: 45 } }), true);
+  assert.equal(store.setting(key), '0');
+  assert.equal(store.setting(GROUP_KEYS.socialCooldown('20000')), '45');
+});
+
+test('setParams still returns its describe view and only mutes when asked', () => {
+  const { store, social } = harness();
+  const view = social.setParams({ group: '20000', muted: true });
+  assert.equal(Array.isArray(view.groups), true, '返回类型必须是 describe() 视图');
+  assert.equal(view.params.threshold, 6);
+  assert.equal(store.setting('social_mute:20000', 'absent'), '1');
+  assert.throws(() => social.setParams({ group: '20000', idleMinutes: 60 }), /SOCIAL_PARAM_NOT_GROUP_SCOPED/);
+  assert.equal(store.setting(GROUP_KEYS.socialThreshold('20000'), 'absent'), 'absent', '群作用域被拒绝后没有顺手写别的');
   store.close();
 });

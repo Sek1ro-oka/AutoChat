@@ -2,6 +2,53 @@
 // 本文件在 app.js 之前加载：`pages` 是经典脚本的全局词法绑定，
 // 因此 app.js 的 render() 与内联 onclick 都能直接引用它。
 
+// index.html 只为 input[type=text] 写了样式，而数字字段现在是真正的 number 输入
+// （I-01 / D-01），所以把同一份外观内联带上。min/max/step 只是浏览器的第一道门槛，
+// 不是判据：任何值都会由服务端按 GROUP_LIMITS 重新校验一遍。
+const NUM_INPUT_STYLE = 'font:inherit;color:var(--text);background:var(--panel-2);'
+  + 'border:1px solid var(--border);border-radius:8px;padding:5px 10px;min-width:70px';
+
+// 数字字段的读法与空值判据（I-01 / D-01）：`Number('')` 是 0，所以「清空输入框再保存」
+// 过去等于「把这一项设成 0」，而阈值 0 几乎不再过滤任何消息。空值在这里就地拦下：
+// 不发请求、不重绘（重绘会连操作者刚填的其它字段一起抹掉），只给提示并标记输入框。
+// 用户已拍板方案一：留空=错误；留空恢复默认（提交 null）已被否决，不要改回去。
+// 这几个工具挂在 pages.js，是因为 app.js 已经贴着 400 行硬上限（C3）——本文件先加载，
+// 顶层 const 对 app.js 与内联 onclick 都可见（见文件头注释）。
+const readNumberFields = fields => {
+  const patch = {}, missing = [];
+  for (const [name, label, selector] of fields) {
+    const el = $(selector);
+    if (!el) continue;
+    const raw = el.value.trim();
+    if (raw === '') {
+      missing.push(`${label}${el.validity && el.validity.badInput ? '不是有效的数字' : '不能为空'}`);
+      el.style.borderColor = 'var(--bad)';
+      continue;
+    }
+    el.style.borderColor = '';
+    patch[name] = Number(raw);
+  }
+  return { patch, missing };
+};
+// 空值的统一出口：同一句话既写进页面状态（重绘后仍然看得见），也就地显示成红色提示。
+// 页面状态里提示字段的名字历史上不统一（socialNotice.text / groupState.notice），两种都写。
+const blankNotice = (state, missing, tail) => {
+  const text = `${missing.join('；')}。空值不等于 0，${tail}`;
+  if ('notice' in state) state.notice = text; else state.text = text;
+  state.bad = true;
+  flash(text);
+};
+// 就地把提示插在当前页顶部，不走整页重绘；它带 data-flash，下一次重绘就消失了。
+const flash = text => {
+  main.querySelectorAll('.banner[data-flash]').forEach(x => x.remove());
+  const box = document.createElement('div');
+  box.className = 'banner bad';
+  box.dataset.flash = '1';
+  box.textContent = text;
+  const first = main.querySelector('.section');
+  if (first) first.before(box); else main.prepend(box);
+};
+
 const pages = {
   async overview() {
     const d = await api('/api/summary');
@@ -228,14 +275,14 @@ const pages = {
         <h3>参数（立即生效，写入本机设置）</h3>
         <div class="row" style="gap:14px">
           <button id="sim-switch" data-on="${d.enabled ? '1' : '0'}" onclick="socialToggle()">${d.enabled ? '关闭仿真' : '开启仿真'}</button>
-          <label class="muted" style="font-size:12px">阈值 <input type="text" id="sim-threshold" style="min-width:70px" value="${esc(d.params.threshold)}"></label>
-          <label class="muted" style="font-size:12px">冷却（秒） <input type="text" id="sim-cooldown" style="min-width:70px" value="${esc(d.params.cooldownSeconds)}"></label>
-          <label class="muted" style="font-size:12px">每群日上限 <input type="text" id="sim-daily" style="min-width:70px" value="${esc(d.params.dailyLimit)}"></label>
+          <label class="muted" style="font-size:12px">阈值 <input type="number" id="sim-threshold" min="0" max="100" step="1" style="${NUM_INPUT_STYLE}" value="${esc(d.params.threshold)}"></label>
+          <label class="muted" style="font-size:12px">冷却（秒） <input type="number" id="sim-cooldown" min="5" max="3600" step="1" style="${NUM_INPUT_STYLE}" value="${esc(d.params.cooldownSeconds)}"></label>
+          <label class="muted" style="font-size:12px">每群日上限 <input type="number" id="sim-daily" min="1" max="500" step="1" style="${NUM_INPUT_STYLE}" value="${esc(d.params.dailyLimit)}"></label>
           <button onclick="socialSave()">保存参数</button>
         </div>
         <div class="row" style="gap:14px;margin-top:10px">
           <label class="muted" style="font-size:12px"><input type="checkbox" id="sim-idle" ${d.params.idleEnabled ? 'checked' : ''}> 冷场冒泡</label>
-          <label class="muted" style="font-size:12px">静默（分钟） <input type="text" id="sim-idle-minutes" style="min-width:70px" value="${esc(d.params.idleMinutes)}"></label>
+          <label class="muted" style="font-size:12px">静默（分钟） <input type="number" id="sim-idle-minutes" min="5" max="720" step="1" style="${NUM_INPUT_STYLE}" value="${esc(d.params.idleMinutes)}"></label>
           <label class="muted" style="font-size:12px">时段 <input type="text" id="sim-idle-hours" style="min-width:70px" value="${esc(d.params.idleHours)}" title="H-H，如 9-22"></label>
         </div>
         <div class="muted" style="font-size:12px;margin-top:8px">默认值来自 <code>.env</code>：阈值 ${num(d.defaults.threshold)}、冷却 ${num(d.defaults.cooldownSeconds)} 秒、每群上限 ${num(d.defaults.dailyLimit)}；上下文 ${num(d.defaults.contextMessages)} 条、最多 ${num(d.defaults.maxChunks)} 条消息、发送间隔 ${num(d.defaults.minDelayMs)}~${num(d.defaults.maxDelayMs)} 毫秒、群消息保留 ${num(d.defaults.messageTtlHours)} 小时。上表可覆盖前三项。冷场冒泡默认 ${d.defaults.idleEnabled ? '开' : '关'}、静默 ${num(d.defaults.idleMinutes)} 分钟、时段 ${esc(d.defaults.idleHours)}——群里安静超过静默时长后机器人自己开口，其余门（时段/日上限/预算）照常把关。</div>

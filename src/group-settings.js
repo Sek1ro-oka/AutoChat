@@ -32,8 +32,18 @@ export const GROUP_LIMITS = Object.freeze({
   idleMinutes: Object.freeze({ min: 5, max: 720 }),
 });
 
+// Strict numeric parsing. `Number('')` is 0, so a loose Number() silently turns
+// "the operator left the box empty" into a real 0 — and for the silence
+// threshold 0 is the most expensive value there is (nothing is ever filtered
+// out). Blank therefore means "no value" (null), never 0, and only a plain
+// decimal literal counts: `0x10` / `1e2` / `true` are rejected instead of being
+// reinterpreted. A real 0 stays inside `threshold`'s bounds and is still valid.
 export const withinRange = (value, { min, max }) => {
-  const parsed = Number(value);
+  if (typeof value === 'number') return Number.isFinite(value) && value >= min && value <= max ? value : null;
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (text === '' || !/^-?\d+(?:\.\d+)?$/.test(text)) return null;
+  const parsed = Number(text);
   return Number.isFinite(parsed) && parsed >= min && parsed <= max ? parsed : null;
 };
 
@@ -50,9 +60,16 @@ export function boolOverride(store, key) {
   return value === undefined ? undefined : value === '1';
 }
 
+// A stored empty string means "this layer wrote nothing usable" and is treated
+// as absent, so the value falls through to the next layer up. Older writers could
+// leave such a row behind (a blank console box became `String(0)`), and reading
+// one back as 0 would hand the group the cheapest possible threshold while the
+// page claims the field is inherited. This does not touch `rawOverride`: for the
+// persona reader an empty string is still a real value.
 export function numberOverride(store, key) {
   const value = rawOverride(store, key);
   if (value === undefined) return undefined;
+  if (typeof value === 'string' && value.trim() === '') return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
 }

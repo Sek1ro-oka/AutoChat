@@ -112,6 +112,11 @@ Object.assign(pages, {
   async groups() {
     const d = await api('/api/groups');
     stamp.textContent = `${d.groups.length} 个群`;
+    // 两个子系统都枚举不出群时集合恒为空：既没有可管理的群，写入端也一个群都不认
+    // （见 api.js 的 knownGroupIds）。只认显式的 false，payload 没有 available 时不走这一支。
+    if (d.available?.social === false && d.available?.slang === false) {
+      return '<div class="empty">仿真与黑话子系统均不可用（<code>SOCIAL_ENABLED</code> / <code>SLANG_ENABLED</code>），枚举不出任何群：这里暂无可管理的群，也不会接受任何群参数写入。</div>';
+    }
     if (!d.groups.length) return '<div class="empty">未配置群。请在 <code>.env</code> 的 <code>GROUP_QQS</code> 里用逗号列出群号。</div>';
     const banners = [];
     if (groupState.notice) banners.push(`<div class="banner ${groupState.bad ? 'bad' : 'ok'}">${esc(groupState.notice)}</div>`);
@@ -131,9 +136,15 @@ Object.assign(pages, {
 
       const ov = s?.overridden ?? {};
       const socialEnabled = s?.enabled;
-      const field = (key, id, value, min, max, unit) => `<label class="muted" style="font-size:12px">${key}
-        <input type="text" id="${id}" style="min-width:64px" value="${esc(value)}">
-        ${ov[key] ? `<button onclick="groupSocialInherit(${esc(JSON.stringify(row.id))},'${key}')" title="清除该群覆盖，改回继承全局">清除</button>` : '<span class="muted">继承</span>'}
+      // `name` 必须是接口认识的英文键（overridden 的键、groupSocialInherit 提交的键）。
+      // 这里曾经拿中文标签当键去查 ov[...]，恒为 undefined：三项永远显示「继承」、
+      // 「清除」按钮从不渲染，用户既看不出哪项被单独设过，也没有办法改回继承。
+      // 输入框 id 也由 name 拼出（g-<键>-<群号>），和 app.js 的读取保持一致。
+      const field = (label, name, value, min, max) => `<label class="muted" style="font-size:12px">${label}
+        <input type="number" id="g-${name}-${row.id}" min="${min}" max="${max}" step="1" style="${NUM_INPUT_STYLE}" value="${esc(value)}">
+        ${ov[name]
+          ? `<span class="muted">● 本群自定义</span> <button onclick="groupSocialInherit(${esc(JSON.stringify(row.id))},'${name}')" title="清除该群覆盖，改回继承全局">清除</button>`
+          : `<span class="muted">继承全局（${esc(g[name])}）</span>`}
       </label>`;
 
       return `<div class="card">
@@ -149,9 +160,9 @@ Object.assign(pages, {
         </div>
         <div class="row" style="margin-top:10px">
           <button onclick="groupSocialToggle(${esc(JSON.stringify(row.id))},${socialEnabled ? 'false' : 'true'})">${socialEnabled ? '关闭仿真' : '开启仿真'}</button>
-          ${field('阈值', `g-threshold-${row.id}`, s?.threshold ?? g.threshold, 0, 100)}
-          ${field('冷却(秒)', `g-cooldown-${row.id}`, s?.cooldownSeconds ?? g.cooldownSeconds, 5, 3600)}
-          ${field('日上限', `g-daily-${row.id}`, s?.dailyLimit ?? g.dailyLimit, 1, 500)}
+          ${field('阈值', 'threshold', s?.threshold ?? g.threshold, 0, 100)}
+          ${field('冷却（秒）', 'cooldownSeconds', s?.cooldownSeconds ?? g.cooldownSeconds, 5, 3600)}
+          ${field('日上限', 'dailyLimit', s?.dailyLimit ?? g.dailyLimit, 1, 500)}
           <button onclick="groupSocialSave(${esc(JSON.stringify(row.id))})">保存仿真参数</button>
         </div>
         <div class="row" style="margin-top:10px">

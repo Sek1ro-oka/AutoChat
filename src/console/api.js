@@ -200,10 +200,24 @@ export function buildStickerEntry({ stickers, id }) {
 }
 
 // --- Per-group specialisation ----------------------------------------------
+// The group ids the console may act on. The page builder (what we list) and the
+// writer (what we accept) go through this one helper: they used to be two
+// hand-copied expressions that agreed everywhere except their last branch. With
+// no subsystem able to enumerate groups the set is empty, so the list and the
+// writer agree by construction — and "the set is empty" has to mean "there is
+// nothing to operate on", never "let everything through". `.env`'s GROUP_QQS is
+// deliberately not a fallback: both subsystems enumerate exactly those ids, so
+// it would only ever add groups that nothing can actually write.
+function knownGroupIds({ social, slang }) {
+  if (social) return social.grouped();
+  if (slang) return slang.groups();
+  return [];
+}
+
 // One card per served group, pulling the three specialisable subsystems into a
 // single row so the operator sees "what this group actually is" in one place.
-export function buildGroups({ config, personas, social, slang, now = Date.now() }) {
-  const groupIds = social ? social.grouped() : (slang ? slang.groups() : (config?.groupIds ?? []));
+export function buildGroups({ personas, social, slang, now = Date.now() }) {
+  const groupIds = knownGroupIds({ social, slang });
   const socialView = social ? social.describe({ now }) : null;
   const socialByGroup = new Map((socialView?.groups ?? []).map(g => [String(g.id), g]));
   return {
@@ -230,8 +244,8 @@ export function buildGroups({ config, personas, social, slang, now = Date.now() 
 export function applyGroupPatch({ personas, social, slang, store, group, patch = {} }) {
   const scoped = String(group ?? '');
   if (!scoped) throw new Error('GROUP_PARAM_INVALID');
-  const known = social ? social.grouped() : (slang ? slang.groups() : []);
-  if (known.length && !known.includes(scoped)) throw new Error('GROUP_NOT_FOUND');
+  const known = knownGroupIds({ social, slang });
+  if (!known.includes(scoped)) throw new Error('GROUP_NOT_FOUND');
   const { subsystem, ...rest } = patch;
   if (subsystem === 'persona') {
     if (!personas) throw new Error('PERSONA_UNAVAILABLE');

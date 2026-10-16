@@ -51,6 +51,10 @@ const ERROR_STATUS = new Map([
   ['PERSONA_CONTENT_TOO_LARGE', 413], ['PERSONA_LIMIT', 409], ['PERSONA_NOT_FOUND', 404],
   ['PERSONA_UNAVAILABLE', 503], ['BODY_TOO_LARGE', 413], ['bad_json', 400],
   ['SOCIAL_UNAVAILABLE', 503], ['SOCIAL_PARAM_INVALID', 400],
+  // A group-scoped patch that could not write anything (the idle fields only
+  // exist globally). Without this entry the operator sees a 500 "internal"
+  // instead of the reason, which is exactly the class of failure I-01 is about.
+  ['SOCIAL_PARAM_NOT_GROUP_SCOPED', 400],
   // The slang library: 4xx for what the operator can fix, 502 for upstream.
   ['SLANG_UNAVAILABLE', 503], ['SLANG_PARAM_INVALID', 400], ['SLANG_NOT_FOUND', 404],
   ['SLANG_DISABLED', 409], ['SLANG_BUDGET_BLOCKED', 409], ['SLANG_SEARCH_DISABLED', 409],

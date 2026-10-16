@@ -49,10 +49,13 @@ export function resolveParams(store, config, group = null) {
     const value = store.setting(key, null);
     return value === null ? fallback : value;
   };
+  // A blank row is not a number: `Number('')` is 0, which for the threshold is
+  // the most expensive reading possible. Blank falls back to the `.env` default.
   const globalNumber = (key, fallback) => {
     const value = store.setting(key, null);
+    if (value === null || String(value).trim() === '') return fallback;
     const parsed = Number(value);
-    return value !== null && Number.isFinite(parsed) ? parsed : fallback;
+    return Number.isFinite(parsed) ? parsed : fallback;
   };
   const globalEnabled = globalText('social_enabled', config.socialEnabled ? '1' : '0') === '1';
   const globalThreshold = globalNumber('social_threshold', config.socialThreshold);
@@ -91,40 +94,64 @@ export function resolveParams(store, config, group = null) {
   };
 }
 
-// Apply a console patch. Unknown keys are ignored on purpose: the endpoint takes
-// a patch, not a replacement. `group` absent writes the global rows (the
+// Apply a console patch. Unknown keys are never written: the endpoint takes a
+// patch, not a replacement. `group` absent writes the global rows (the
 // pre-existing behaviour); `group` present writes that group's override rows.
+//
+// Two phases on purpose. The whole patch is turned into a list of writes first,
+// and only a patch that validates completely is applied. The previous version
+// wrote as it walked, so a patch whose second field was rejected had already
+// committed its first — the operator saw an error, concluded "nothing changed",
+// and kept a threshold of 0. The store has no general rollback (an abstraction
+// cannot be assumed to have an inverse for every write), so "decide everything,
+// then write everything" is the only order that can promise an untouched store
+// on failure.
 export function applyParams({ store, config, group = null, patch = {}, log = () => {} }) {
   const scoped = group === null || group === undefined ? null : String(group);
   const keyFor = field => (field.group && scoped !== null ? field.group(scoped) : field.global);
-  const write = (field, value) => {
+  // Validate one field and describe the write it implies. Throws
+  // SOCIAL_PARAM_INVALID without touching the store.
+  const plan = (field, value) => {
+    const key = keyFor(field);
     if (value === null) {
       if (!store.remove) throw new Error('SOCIAL_PARAM_INVALID');
-      store.remove(keyFor(field));
-      return;
+      return { key, value: null };
     }
     if (field.bool) {
       if (typeof value !== 'boolean') throw new Error('SOCIAL_PARAM_INVALID');
-      store.set(keyFor(field), value ? '1' : '0');
-      return;
+      return { key, value: value ? '1' : '0' };
     }
     if (field.hours) {
       if (!validHours(value)) throw new Error('SOCIAL_PARAM_INVALID');
-      store.set(keyFor(field), String(value).trim());
-      return;
+      return { key, value: String(value).trim() };
     }
     const parsed = withinRange(value, field.range);
     if (parsed === null) throw new Error('SOCIAL_PARAM_INVALID');
-    store.set(keyFor(field), String(field.round ? Math.round(parsed) : parsed));
+    return { key, value: String(field.round ? Math.round(parsed) : parsed) };
   };
-  let touched = false;
+
+  const writes = [];
   for (const [name, field] of Object.entries(FIELDS)) {
     if (!(name in patch)) continue;
     // Idle fields have no per-group row: skip them when editing one group.
     if (scoped !== null && !field.group) continue;
-    write(field, patch[name]);
-    touched = true;
+    writes.push(plan(field, patch[name]));
   }
-  if (touched) log('social_params_changed');
-  return touched;
+
+  if (writes.length === 0) {
+    log('social_params_noop');
+    // A group-scoped patch that planned nothing asked for an edit this scope
+    // cannot make (the idle fields are whole-bot switches). Claiming success
+    // would be a lie nothing can ever disprove, so it fails instead. An *empty*
+    // patch is different: engine.setParams sends `{}` for a `{group, muted}`
+    // call, which is a genuine no-op rather than a request.
+    if (scoped !== null && Object.keys(patch).length > 0) throw new Error('SOCIAL_PARAM_NOT_GROUP_SCOPED');
+    return false;
+  }
+  for (const { key, value } of writes) {
+    if (value === null) store.remove(key);
+    else store.set(key, value);
+  }
+  log('social_params_changed');
+  return true;
 }

@@ -114,6 +114,12 @@ const PERSONA_MSG = {
   STICKER_UPLOAD_INVALID: '上传失败：仅支持 PNG/JPG/GIF/WebP，每张最多 5MB。',
   // 运行时设置（V2）
   CONFIG_PARAM_INVALID: '参数不合法或超出范围。',
+  // 仿真与按群特异化（I-01）：以前只有 CONFIG_PARAM_INVALID，写入失败时页面会把原始错误码当文案显示。
+  SOCIAL_UNAVAILABLE: '仿真模块不可用，本次没有保存任何改动；请查看启动日志里的 Social 初始化报错。',
+  SOCIAL_PARAM_INVALID: '参数不合法或超出范围：阈值 0~100、冷却 5~3600 秒、每群日上限 1~500、静默时长 5~720 分钟，且都不能留空。本次没有保存任何改动。',
+  SOCIAL_PARAM_NOT_GROUP_SCOPED: '空闲类参数（冷场冒泡 / 静默时长 / 静默时段）是全局开关，不能按群单独设置。本次没有保存任何改动：请到「仿真」页改这三项，或只提交本群能覆盖的阈值 / 冷却 / 日上限。',
+  GROUP_NOT_FOUND: '该群号不在已配置的群列表里，本次没有保存任何改动；请先在 .env 的 GROUP_QQS 里加上它并重启。',
+  GROUP_PARAM_INVALID: '群号缺失或请求参数不合法，本次没有保存任何改动。',
 };
 const explain = code => PERSONA_MSG[code] || code || '操作失败';
 
@@ -203,14 +209,19 @@ window.socialSet = async patch => {
   render();
 };
 window.socialToggle = () => socialSet({ enabled: !($('#sim-switch').dataset.on === '1') });
-window.socialSave = () => socialSet({
-  threshold: Number($('#sim-threshold').value),
-  cooldownSeconds: Number($('#sim-cooldown').value),
-  dailyLimit: Number($('#sim-daily').value),
-  idleEnabled: $('#sim-idle').checked,
-  idleMinutes: Number($('#sim-idle-minutes').value),
-  idleHours: $('#sim-idle-hours').value.trim(),
-});
+window.socialSave = () => {
+  const { patch, missing } = readNumberFields([
+    ['threshold', '阈值', '#sim-threshold'],
+    ['cooldownSeconds', '冷却', '#sim-cooldown'],
+    ['dailyLimit', '每群日上限', '#sim-daily'],
+    ['idleMinutes', '静默时长', '#sim-idle-minutes'],
+  ]);
+  const hours = $('#sim-idle-hours');
+  if (hours.value.trim() === '') { missing.push('静默时段不能为空（形如 9-22）'); hours.style.borderColor = 'var(--bad)'; }
+  else hours.style.borderColor = '';
+  if (missing.length) return blankNotice(socialNotice, missing, '本次没有保存任何改动。');
+  return socialSet({ ...patch, idleEnabled: $('#sim-idle').checked, idleHours: hours.value.trim() });
+};
 
 // --- 黑话词库（Phase 4）---
 // 「抽取候选」和「联网查义」都会真的花钱，所以两者都只由按钮触发，不会自动发生。
@@ -331,19 +342,21 @@ window.groupSocialToggle = async (group, enabled) => {
   catch (error) { groupSet(reason(error), true); }
   render();
 };
+// 本群三项数字参数。字段名即接口键，选择器也由它拼出来（g-<键>-<群号>），
+// 避免出现「界面上的名字」和「接口认识的名字」两套。
+const GROUP_NUMBER_FIELDS = [['threshold', '阈值'], ['cooldownSeconds', '冷却（秒）'], ['dailyLimit', '日上限']];
 window.groupSocialSave = async group => {
+  const { patch, missing } = readNumberFields(GROUP_NUMBER_FIELDS.map(([n, l]) => [n, l, `#g-${n}-${group}`]));
+  if (missing.length) return blankNotice(groupState, missing, '想改回继承全局，请点该字段右侧的「清除」。本次没有保存任何改动。');
   try {
-    await post('/api/groups/config', { group, subsystem: 'social',
-      threshold: Number($('#g-threshold-' + group).value),
-      cooldownSeconds: Number($('#g-cooldown-' + group).value),
-      dailyLimit: Number($('#g-daily-' + group).value),
-    });
+    await post('/api/groups/config', { group, subsystem: 'social', ...patch });
     groupSet('已保存仿真参数。');
   } catch (error) { groupSet(reason(error), true); }
   render();
 };
-window.groupSocialInherit = async (group, field) => {
-  try { await post('/api/groups/config', { group, subsystem: 'social', [field]: null }); groupSet('已恢复继承全局。'); }
+// `name` 必须是接口认识的字段名（threshold / cooldownSeconds / dailyLimit）；用中文标签会被服务端当未知键跳过（E-04）。
+window.groupSocialInherit = async (group, name) => {
+  try { await post('/api/groups/config', { group, subsystem: 'social', [name]: null }); groupSet('已恢复继承全局。'); }
   catch (error) { groupSet(reason(error), true); }
   render();
 };
