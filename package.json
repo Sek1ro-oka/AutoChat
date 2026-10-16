@@ -14,6 +14,7 @@
     "check:vision": "node --env-file-if-exists=.env scripts/vision-check.js",
     "check:search": "node --env-file-if-exists=.env scripts/search-check.js",
     "check:connection": "node --env-file-if-exists=.env scripts/connection-check.js",
+    "check:docs": "node scripts/check-doc-links.js docs README.md",
     "status": "node --env-file-if-exists=.env scripts/status.js",
     "bot:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-autochat.ps1",
     "bot:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-autochat.ps1",

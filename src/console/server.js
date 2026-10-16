@@ -124,14 +124,40 @@ function send(res, status, body, type = 'application/json; charset=utf-8') {
   res.end(payload);
 }
 
+// A request whose body was never read to the end leaves the connection unusable
+// for a second request, and the client is usually still sending. Drain those
+// bytes and only then drop the socket: closing a socket that still has unread
+// data in its receive buffer makes the stack reply with RST, which throws away
+// the response we just flushed — the client would see the very ECONNRESET this
+// fix exists to remove (I-07 / D-26). Nothing is buffered while draining: the
+// `data` handler in `readBody` drops every chunk after the overflow.
+function closeAfterOverflow(req) {
+  const drop = () => req.destroy();
+  req.on('error', drop);
+  req.on('end', drop);
+  req.resume();
+}
+
 // Cap the body so a stuck or hostile client cannot grow the process heap.
 function readBody(req, max = MAX_BODY_BYTES) {
   return new Promise((resolveBody, reject) => {
     const chunks = [];
     let size = 0;
+    let overflowed = false;
     req.on('data', chunk => {
+      if (overflowed) return;
       size += chunk.length;
-      if (size > max) { reject(new Error('BODY_TOO_LARGE')); req.destroy(); return; }
+      if (size > max) {
+        // Stop consuming instead of `req.destroy()`: the socket has to stay
+        // alive long enough for the 413 to be written and flushed, otherwise
+        // the client only ever sees ECONNRESET and `BODY_TOO_LARGE` is
+        // unreachable in `ERROR_STATUS` (I-07 / D-26). The overflowing chunk
+        // is never pushed, so the heap stays bounded by `max` plus one chunk.
+        overflowed = true;
+        req.pause();
+        reject(new Error('BODY_TOO_LARGE'));
+        return;
+      }
       chunks.push(chunk);
     });
     req.on('end', () => resolveBody(Buffer.concat(chunks).toString('utf8')));
@@ -288,6 +314,14 @@ export function createConsole({
       send(res, 200, await route(url, body));
     } catch (error) {
       const code = String(error?.message ?? 'internal');
+      if (code === 'BODY_TOO_LARGE') {
+        // The request body was never read to the end, so this connection
+        // cannot carry a second request: announce the close, and drop the
+        // socket only after the response has been flushed. Destroying it any
+        // earlier is what made the 413 unreachable (I-07 / D-26).
+        res.setHeader('Connection', 'close');
+        res.once('finish', () => closeAfterOverflow(req));
+      }
       send(res, ERROR_STATUS.get(code) ?? 500, { error: ERROR_STATUS.has(code) ? code : 'internal' });
     }
   }

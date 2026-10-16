@@ -1,0 +1,15 @@
+# Line-ending policy (I-07 / E-12).
+#
+# Without this file a Windows checkout with `core.autocrlf=true` writes CRLF into
+# the working tree and Git prints "LF will be replaced by CRLF" on every `git add`
+# — a per-machine setting leaking into every contributor's diffs. `text=auto`
+# normalizes line endings to LF in the repository (the single canonical form) and
+# `eol=lf` keeps them LF in the working tree on every platform, so the files in
+# the repository, in the working tree and in `git diff` are byte-identical.
+* text=auto eol=lf
+
+# Machine-written runtime artifacts (tailing logs, model caches, downloaded media)
+# are never edited by hand and must never be re-encoded on their way in or out.
+data/** -text
+runtime/** -text
+logs/** -text
