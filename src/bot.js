@@ -8,9 +8,17 @@ import { conversationText } from './emoji.js';
 import { AntiSpam } from './anti-spam.js';
 import { activeProfile, profileSessionKey } from './model-profiles.js';
 import { withSlang } from './social/prompt.js';
+import { errorDetail } from './logger.js';
 
 const HELP = '私聊直接发送文本；群聊请@机器人。/帮助 /状态 /清空；群内@机器人 /搜索 完整问题 可联网查询，私聊同样可用。启用自动搜索后，天气、新闻、最新动态等问题会自动联网。普通对话与上下文会发送给模型服务商；联网搜索只发送本条问题，不发送已有历史。';
 const fmt = micro => (micro / 1e6).toFixed(4);
+// Why the reply switch is off, in words the admin can act on (D-19). The reason
+// is written down at the moment it is decided, because the in-memory failure
+// count that caused a meltdown is gone after a restart — and a guess would be
+// worse than an honest 「未知」. See docs/configuration.md (停止原因).
+const STOP_REASONS = { send_failures: '连续发送失败已自动熔断', admin_stop: '管理员停止' };
+const enabledLabel = store => (store.setting('enabled', '1') === '1' ? '启用'
+  : `停止（${STOP_REASONS[store.setting('enabled_reason', '')] ?? '原因未知（可能是旧版本遗留）'}）`);
 
 export function parseEvent(event, config, now = Date.now()) {
   if (!event || event.post_type !== 'message' || String(event.self_id) !== config.botId
@@ -100,7 +108,7 @@ export class Bot {
       this.maintenance();
       await this.handle(message, send, alive);
       return true;
-    }).catch(() => { this.log('turn_failed'); return false; }).finally(() => { this.queued--; });
+    }).catch(error => { this.log('turn_failed', errorDetail(error)); return false; }).finally(() => { this.queued--; });
     this.tail = job;
     return job;
   }
@@ -132,7 +140,7 @@ export class Bot {
     let base = this.config.systemPrompt;
     if (this.personas) {
       try { base = this.personas.resolve(message?.groupId ?? null); }
-      catch { this.log('persona_failed'); }
+      catch (error) { this.log('persona_failed', errorDetail(error)); }
     }
     base = withSlang(base, this.slang, { grouped: Boolean(message?.group), group: message?.groupId ?? null });
     // The sticker library (Phase 6) rides along for group turns only: a private
@@ -153,8 +161,8 @@ export class Bot {
       return true;
     } catch {
       this.sendFailures++;
-      if (this.sendFailures >= 3) this.store.set('enabled', '0');
-      this.log('send_failed');
+      if (this.sendFailures >= 3) { this.store.set('enabled', '0'); this.store.set('enabled_reason', 'send_failures'); }
+      this.log('send_failed', { failures: this.sendFailures });
       return false;
     }
   }
@@ -182,17 +190,19 @@ export class Bot {
     // keep one with a `【偷图】` marker in its own reply, handled further down.
     if (message.group && this.stickers?.enabled() && message.images.length) {
       try { await this.stickers.observe(message.images[0], { call: send }); }
-      catch { this.log('sticker_ingest_failed'); }
+      catch (error) { this.log('sticker_ingest_failed', errorDetail(error)); }
     }
     const admin = !message.group && message.user === config.adminId;
     const adminCommands = new Map([
-      ['/停止', ['enabled', '0', '已停止模型回复。']], ['/启动', ['enabled', '1', '已启用模型回复。']],
-      ['/群关闭', ['groupEnabled', '0', '已关闭群回复。']], ['/群开启', ['groupEnabled', '1', '已启用群回复。']],
+      ['/停止', ['enabled', '0', '已停止模型回复。', 'admin_stop']], ['/启动', ['enabled', '1', '已启用模型回复。', '']],
+      ['/群关闭', ['groupEnabled', '0', '已关闭群回复。', 'admin_stop']], ['/群开启', ['groupEnabled', '1', '已启用群回复。', '']],
     ]);
     if (adminCommands.has(text)) {
       if (!admin) return reply('此命令仅限管理员私聊使用。');
-      const [key, value, notice] = adminCommands.get(text);
-      store.set(key, value); this.sendFailures = 0;
+      const [key, value, notice, reason] = adminCommands.get(text);
+      // The reason is written on every command, empty included: a stale reason
+      // left behind by an earlier stop would otherwise be read as this one's.
+      store.set(key, value); store.set(`${key}_reason`, reason); this.sendFailures = 0;
       return reply(notice);
     }
     if (this.limited(message)) {
@@ -231,7 +241,7 @@ export class Bot {
         dateStyle: 'short', timeStyle: 'medium' });
       const due = (config.groupIds ?? [config.groupId]).map(id =>
         `${id}：${formatter.format(store.groupDue(id))}`).join('\n');
-      return reply(`模型：${config.model}\n回复：${store.setting('enabled', '1') === '1' ? '启用' : '停止'}\n群回复：${store.setting('groupEnabled', '1') === '1' ? '启用' : '关闭'}\n联网搜索：${config.webSearchEnabled ? '启用' : '关闭'}\n今日搜索 ${store.setting(`search_count:${budgetDay(this.now())}`, '0')}／${config.searchDailyLimit ?? 50} 次\n今日保守计费 ¥${fmt(balance.used)}／预留 ¥${fmt(balance.held)}／剩余 ¥${fmt(balance.remaining)}\n下次群清理：${due}（香港时间）`);
+      return reply(`模型：${config.model}\n回复：${enabledLabel(store)}\n群回复：${store.setting('groupEnabled', '1') === '1' ? '启用' : '关闭'}\n联网搜索：${config.webSearchEnabled ? '启用' : '关闭'}\n今日搜索 ${store.setting(`search_count:${budgetDay(this.now())}`, '0')}／${config.searchDailyLimit ?? 50} 次\n今日保守计费 ¥${fmt(balance.used)}／预留 ¥${fmt(balance.held)}／剩余 ¥${fmt(balance.remaining)}\n下次群清理：${due}（香港时间）`);
     }
     if (text === '/清空') { store.clear(sessionKey); return reply('已清空当前模型的当前会话。'); }
     if (store.setting('enabled', '1') !== '1' || (message.group && store.setting('groupEnabled', '1') !== '1')) return;

@@ -18,9 +18,9 @@ import { buildSocialRequest, withSlang } from './prompt.js';
 import { render } from './renderer.js';
 import { ENERGY_BY_STATE, SIM_STATES, energyFor, requiredScore, transition } from './state.js';
 import { IdleSpeech } from './idle.js';
+import { errorDetail } from '../logger.js';
 
-// The state machine lives in state.js and the group memory in memory.js;
-// re-exported so callers that only care about "the simulation" have one entry.
+// state.js's state machine is re-exported so "the simulation" has one entry.
 export { ENERGY_BY_STATE, SIM_STATES, energyFor, requiredScore, transition };
 
 const ACTIVITY_WINDOW_MS = 120000;
@@ -136,7 +136,7 @@ export class Social extends IdleSpeech {
   // most visible way to look like a machine.
   serialise(group, task) {
     const previous = this.tails.get(group) ?? Promise.resolve();
-    const job = previous.then(task).catch(error => { this.log('social_failed'); return false; });
+    const job = previous.then(task).catch(error => { this.log('social_failed', errorDetail(error)); return false; });
     const tracked = job.finally(() => { if (this.tails.get(group) === tracked) this.tails.delete(group); });
     this.tails.set(group, tracked);
     return tracked;

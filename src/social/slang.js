@@ -26,11 +26,12 @@
 export { MAX_CANDIDATES_PER_RUN, extractJsonArray, sanitiseCandidates, sanitiseText } from './slang-parse.js';
 
 import { mkdirSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { budgetDay } from '../store.js';
 import { costMicro, estimateInput, usageCost } from '../model.js';
 import { escapeForPrompt } from './quote.js';
 import { harden } from '../permissions.js';
+import { errorDetail } from '../logger.js';
 import { GROUP_KEYS, boolOverride } from '../group-settings.js';
 import { MAX_CANDIDATES_PER_RUN, sanitiseText } from './slang-parse.js';
 // Extraction — the paid half — lives in slang-extract.js and is mixed in by
@@ -292,7 +293,11 @@ export class Slang extends SlangExtraction {
     catch {
       const error = new Error('SLANG_IMPORT_INVALID');
       error.stash = this.stashCorrupt(raw);
-      this.log('slang_import_corrupt');
+      // How much was rejected, and whether a copy survived it. Formerly nothing.
+      this.log('slang_import_corrupt', {
+        bytes: Buffer.byteLength(raw, 'utf8'), stashed: Boolean(error.stash),
+        file: error.stash ? basename(error.stash) : null,
+      });
       throw error;
     }
     const rows = Array.isArray(parsed) ? parsed : parsed?.entries;
@@ -318,12 +323,12 @@ export class Slang extends SlangExtraction {
   pruneCorruptStashes() {
     let names;
     try { names = readdirSync(this.corruptDirectory).filter(name => /^slang-corrupt-.*\.json$/.test(name)).sort(); }
-    catch { return 0; } // nothing readable yet; a write must never fail over this
+    catch (error) { this.log('slang_stash_prune_failed', { phase: 'read', ...errorDetail(error) }); return 0; } // a write must never fail over this
     const excess = names.slice(0, Math.max(0, names.length - MAX_CORRUPT_STASHES));
     let removed = 0;
     for (const name of excess) {
       try { unlinkSync(join(this.corruptDirectory, name)); removed += 1; }
-      catch { /* best-effort: a stash that cannot be removed must not fail the import */ }
+      catch (error) { this.log('slang_stash_prune_failed', { phase: 'unlink', ...errorDetail(error) }); }
     }
     return removed;
   }
@@ -344,7 +349,7 @@ export class Slang extends SlangExtraction {
       // stash that now exists, never a way for the failure path to do extra work.
       this.pruneCorruptStashes();
       return file;
-    } catch { return null; }
+    } catch (error) { this.log('slang_stash_failed', errorDetail(error)); return null; }
   }
 
   // --- console view ---------------------------------------------------------

@@ -17,6 +17,7 @@ import { dirname, join } from 'node:path';
 import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { MAX_IMAGE_BYTES } from './vision.js';
+import { errorDetail } from './logger.js';
 import {
   MAX_STICKERS, STICKER_BLOCK_MAX, STICKER_PER_TURN,
   buildStickerBlock, STICKER_HINT, normalizeSticker, parseStickerMarkers,
@@ -250,7 +251,7 @@ export class StickerLib {
       const ext = file.split('.').pop()?.toLowerCase();
       const type = { png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' }[ext] ?? 'application/octet-stream';
       return { bytes, type };
-    } catch { return null; }
+    } catch (error) { this.log('sticker_read_failed', { ...errorDetail(error), id: String(id) }); return null; }
   }
 }
 

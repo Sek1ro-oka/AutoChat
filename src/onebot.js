@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { randomUUID } from 'node:crypto';
+import { errorDetail } from './logger.js';
 
 export class OneBot {
   constructor(config, { onEvent = () => {}, log = () => {} } = {}) {
@@ -31,11 +32,11 @@ export class OneBot {
           this.log('account_mismatch'); this.stop(); return;
         }
         this.ready = true; this.retry = 0; this.log('onebot_connected');
-      } catch { socket.close(); }
+      } catch (error) { this.log('onebot_login_failed', errorDetail(error)); socket.close(); }
     });
     socket.on('message', raw => {
       let body;
-      try { body = JSON.parse(raw.toString()); } catch { this.log('invalid_onebot_json'); return; }
+      try { body = JSON.parse(raw.toString()); } catch (error) { this.log('invalid_onebot_json', errorDetail(error)); return; }
       if (!body || typeof body !== 'object') return;
       if (typeof body.echo === 'string' && this.pending.has(body.echo)) {
         const pending = this.pending.get(body.echo);
@@ -46,11 +47,11 @@ export class OneBot {
         const alive = () => this.ready && generation === this.generation && socket.readyState === WebSocket.OPEN;
         try {
           Promise.resolve(this.onEvent(body, (action, params) => this.call(action, params, generation), alive))
-            .catch(() => this.log('event_failed'));
-        } catch { this.log('event_failed'); }
+            .catch(error => this.log('event_failed', errorDetail(error)));
+        } catch (error) { this.log('event_failed', errorDetail(error)); }
       }
     });
-    socket.on('error', () => this.log('onebot_connection_error'));
+    socket.on('error', error => this.log('onebot_connection_error', errorDetail(error)));
     socket.on('close', () => {
       clearInterval(heartbeat);
       this.ready = false;
