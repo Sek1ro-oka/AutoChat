@@ -67,6 +67,18 @@ export class Store extends StickerStore {
   set(key, value) {
     this.db.prepare('INSERT OR REPLACE INTO settings VALUES (?,?)').run(key, String(value));
   }
+  // Read-modify-write of one counter in a single transaction. Two instances
+  // sharing a database file (and two code paths in one instance) used to race
+  // between `setting()` and `set()`, which silently lost increments. Must not be
+  // called from inside another transaction: BEGIN IMMEDIATE does not nest.
+  bump(key, delta = 1) {
+    if (!Number.isInteger(delta)) throw new Error('BUMP_INVALID');
+    return this.transaction(() => {
+      const next = (Number(this.setting(key, '0')) || 0) + delta;
+      this.set(key, next);
+      return next;
+    });
+  }
   // Deleting is what "no per-group override" means: the reader then inherits the
   // global value. Returns the number of rows removed so a reset can report truth.
   remove(key) { return this.db.prepare('DELETE FROM settings WHERE key=?').run(key).changes; }

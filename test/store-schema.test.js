@@ -55,6 +55,41 @@ test('a pre-V2 database is upgraded in place without losing data', () => {
   rmdirSync(dir);
 });
 
+test('a counter increment is one transaction, so two writers cannot lose one', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'autochat-bump-'));
+  const path = join(dir, 'counter.sqlite');
+  const key = 'social_count:2027-01-15:20000';
+  const store = new Store(path);
+  assert.equal(store.setting(key), null, 'nothing stored yet');
+  for (let index = 0; index < 5; index += 1) assert.equal(store.bump(key), index + 1);
+  assert.equal(store.setting(key), '5');
+
+  // Same file, second store, second counter: the two writers share one counter,
+  // they do not each start from their own stale read.
+  const shared = 'social_count:2027-01-16:20000';
+  const second = new Store(path);
+  const seen = [];
+  for (let index = 0; index < 5; index += 1) {
+    seen.push(store.bump(shared));
+    seen.push(second.bump(shared));
+  }
+  assert.deepEqual(seen, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 'interleaved writers lose no increment');
+  assert.equal(store.setting(shared), '10');
+  assert.equal(second.setting(shared), '10');
+
+  // A hand-edited value keeps the reader's `Number(x) || 0` contract.
+  store.set(key, 'abc');
+  assert.equal(store.bump(key), 1);
+  assert.throws(() => store.bump(key, 1.5), /BUMP_INVALID/);
+  assert.throws(() => store.bump(key, '2'), /BUMP_INVALID/);
+  assert.equal(store.setting(key), '1', 'a refused delta wrote nothing');
+
+  second.close();
+  store.close();
+  for (const file of readdirSync(dir)) unlinkSync(join(dir, file));
+  rmdirSync(dir);
+});
+
 test('session listing reports size and timestamp without loading history', () => {
   const store = new Store();
   store.save('private:10000002', 'private', [{ role: 'user', content: 'a' },

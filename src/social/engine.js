@@ -336,7 +336,7 @@ export class Social extends IdleSpeech {
     }
     if (!sent) return false;
 
-    this.store.set(`social_count:${day}:${group}`, this.spokeToday(group, day) + 1);
+    this.store.bump(`social_count:${day}:${group}`, 1);
     const next = transition(state.state, 'spoke');
     this.store.saveSimState({
       groupId: group, state: next, lastSpokeAt: this.now(),

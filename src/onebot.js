@@ -59,6 +59,8 @@ export class OneBot {
       }
       this.pending.clear();
       if (!this.stopped) {
+        // Exponential backoff capped at 30s — far below Node's 2147483647ms
+        // timer ceiling, so the delay is never silently clamped to 1ms.
         const delay = Math.min(30000, 1000 * 2 ** Math.min(this.retry++, 5));
         this.log('onebot_disconnected');
         this.timer = setTimeout(() => this.connect(), delay);

@@ -47,6 +47,35 @@ test('the built-in holiday table covers the current year and extra days can be a
   assert.equal(bucketAt(bj(11, 11, 10, 0)), 'peak'); // no override -> ordinary workday
 });
 
+test('the no-extra holiday set is built once, shared, and cannot be polluted', () => {
+  const cached = holidaySet();
+  assert.equal(holidaySet(), cached, 'the same object comes back: no Set per sample');
+  assert.equal(holidaySet([]), cached);
+  assert.equal(cached.size, BUILTIN_HOLIDAYS.size);
+  for (const day of BUILTIN_HOLIDAYS) assert.equal(cached.has(day), true);
+
+  const extra = holidaySet(['2026-11-11']);
+  assert.notEqual(extra, cached, 'a caller-supplied day gets its own set');
+  assert.equal(extra.has('2026-11-11'), true);
+  assert.equal(extra.has('2026-01-01'), true, 'extras are additive');
+  assert.equal(cached.has('2026-11-11'), false, 'the shared set was not polluted');
+
+  // The old implementation, rebuilt here verbatim: same reads, same buckets.
+  const rebuild = extras => {
+    const set = new Set(BUILTIN_HOLIDAYS);
+    for (const day of extras) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(day) && !Number.isNaN(Date.parse(day))) set.add(day);
+    }
+    return set;
+  };
+  const days = [bj(11, 11, 10, 0), bj(10, 8, 10, 0), bj(10, 11, 10, 0), bj(2, 23, 10, 0), bj(2, 24, 10, 0), bj(1, 1, 10, 0)];
+  for (const extras of [[], ['2026-11-11', 'not-a-date'], ['2026-01-02']]) {
+    for (const at of days) {
+      assert.equal(bucketAt(at, holidaySet(extras)), bucketAt(at, rebuild(extras)), `${at} with ${JSON.stringify(extras)}`);
+    }
+  }
+});
+
 test('usage splits into three disjoint buckets that always sum to the reported total', () => {
   const cases = [
     [{ prompt_tokens: 100, completion_tokens: 20, prompt_cache_hit_tokens: 60, prompt_cache_miss_tokens: 40 }, { miss: 40, hit: 60, out: 20 }],

@@ -41,12 +41,19 @@ function expand(table) {
 }
 
 export const BUILTIN_HOLIDAYS = expand(TABLE);
+// Built once: the built-in days never change, so the whole set is materialised a
+// single time and shared with callers that pass no extras (see below).
+const BUILTIN_SET = new Set(BUILTIN_HOLIDAYS);
 export const HOLIDAY_YEARS = Object.keys(TABLE).map(Number).sort();
 
 // Built-in days plus user-supplied extras. Invalid entries are dropped loudly
-// rather than silently shifting prices.
+// rather than silently shifting prices. The returned Set is read-only by
+// contract: with no extras it *is* the shared built-in set, so `add`/`delete`/
+// `clear` on it would corrupt every later reader — copy it first if you must
+// mutate.
 export function holidaySet(extra = []) {
-  const set = new Set(BUILTIN_HOLIDAYS);
+  if (!extra.length) return BUILTIN_SET;
+  const set = new Set(BUILTIN_SET);
   for (const day of extra) {
     if (/^\d{4}-\d{2}-\d{2}$/.test(day) && !Number.isNaN(Date.parse(day))) set.add(day);
   }

@@ -135,6 +135,48 @@ test('a scored message is reserved, sampled, answered in bubbles and remembered'
   store.close();
 });
 
+test('the daily counter is incremented through the store transaction, not a stale read', async () => {
+  // Two different lines, so neither answer is dropped as a repeat of the last one.
+  let answers = 0;
+  const { store, social, send, sent, event, clock } = harness({
+    model: {
+      calls: [],
+      complete: async () => {
+        answers += 1;
+        return { text: `第 ${answers} 句回复，措辞不同。`, usage: { prompt_tokens: 500, completion_tokens: 30 } };
+      },
+    },
+  });
+  social.setParams({ threshold: 0, cooldownSeconds: 5, dailyLimit: 20 });
+  const day = budgetDay(CLOCK);
+  const key = `social_count:${day}:20000`;
+
+  const bumped = [];
+  const originalBump = store.bump.bind(store);
+  store.bump = (name, delta = 1) => { bumped.push([name, delta]); return originalBump(name, delta); };
+
+  assert.equal(await social.observe(event({ message_id: 1 }), send, () => true), true);
+  assert.deepEqual(bumped, [[key, 1]], 'the answer costs one bump of today key');
+  assert.equal(store.setting(key), '1');
+  assert.equal(social.spokeToday('20000', day), 1);
+
+  clock.value += 60000;
+  assert.equal(await social.observe(event({ message_id: 2 }), send, () => true), true);
+  assert.equal(sent.length, 2, 'the second answer really went out');
+  assert.deepEqual(bumped, [[key, 1], [key, 1]], 'every answer goes through Store#bump');
+  assert.equal(store.setting(key), '2', 'the count is monotonic: +1 per answer, never reset');
+  assert.equal(social.spokeToday('20000', day), 2);
+
+  // With `bump` turned into a read that writes nothing, a third answer must
+  // leave the stored count where it was: no other path writes this counter.
+  store.bump = name => Number(store.setting(name, '0'));
+  clock.value += 60000;
+  assert.equal(await social.observe(event({ message_id: 3 }), send, () => true), true);
+  assert.equal(sent.length, 3);
+  assert.equal(store.setting(key), '2', 'bump is the only writer of the daily counter');
+  store.close();
+});
+
 test('the cooldown, the daily cap and the switches each stop a scored message', async () => {
   const { store, social, send, event, calls, clock } = harness();
   social.setParams({ threshold: 0, dailyLimit: 20, cooldownSeconds: 45 });

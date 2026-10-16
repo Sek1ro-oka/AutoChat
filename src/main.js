@@ -14,6 +14,7 @@ import { DEFAULT_PERSONA } from './persona.js';
 import { createLogger } from './logger.js';
 import { createConsole } from './console/server.js';
 import { hardenAll, secretTargets } from './permissions.js';
+import { acquireLock, lockPathFor, withTimeout } from './lifecycle.js';
 
 let config;
 try { config = loadConfig(); }
@@ -23,12 +24,32 @@ if (process.argv.includes('--check')) {
   process.exit(0);
 }
 const startedAt = Date.now();
+const log = createLogger();
+// Single instance. A second process on the same database file would double-count
+// the budget and interleave writes, so it is refused *before* the database is
+// opened (fail closed: no lock, no start). The logger moves up with the check so
+// a refusal leaves the same kind of trace as any other startup failure.
+const lockPath = lockPathFor(config.databasePath);
+const lock = acquireLock(lockPath);
+if (!lock.ok) {
+  if (lock.reason === 'already_running') {
+    console.error(`AutoChat 已在运行：${lockPath} 由 pid ${lock.holder.pid}（启动于 ${lock.holder.startedAt ?? '未知'}）持有；`
+      + '确认该进程已退出后删除锁文件再启动。');
+    log('already_running', { pid: lock.holder.pid, startedAt: lock.holder.startedAt });
+  } else {
+    console.error(`无法创建单实例锁 ${lockPath}：${lock.error?.code ?? '未知错误'}；请检查该目录的写权限后重试。`);
+    log('lock_unwritable', { code: lock.error?.code });
+  }
+  process.exit(1);
+}
+// `unlinkSync` is legal in an exit hook, and `release()` is idempotent, so the
+// normal shutdown path below can call it a second time.
+process.on('exit', () => lock.release());
 const store = new Store(config.databasePath);
 // Runtime-overridable settings (V2). From here on every component reads
 // `config.xxx` through a proxy that resolves the settings table first and the
 // `.env` default second, so the console can change knobs without a restart.
 config = createRuntimeConfig(config, store);
-const log = createLogger();
 // Secrets on disk (see docs/security.md). Windows ignores the POSIX mode passed
 // at creation, so these are tightened explicitly rather than relying on
 // `{ mode: 0o600 }`. Best-effort — a failure is logged, never fatal. The list
@@ -71,6 +92,8 @@ const transport = new OneBot(config, { onEvent: (...args) => runtime.dispatch(..
 // extract. Off unless SLANG_AUTO_EXTRACT is set; the promise is kept so shutdown
 // can wait for a paid call that is already in flight.
 let slangTick = Promise.resolve();
+// 30s is a deliberate construction bound, chosen far below Node's timer ceiling
+// of 2147483647ms (a larger delay would silently be clamped to 1ms).
 const timer = setInterval(() => {
   bot.tick();
   social.maintain();
@@ -89,18 +112,36 @@ if (config.consoleEnabled) {
     .catch(error => { console.error(`控制台启动失败：${error.message}`); consoleServer = null; });
 }
 
+// Shutdown must be bounded: one stuck component used to make the whole process
+// unkillable from a terminal. Every step gets its own budget (~14s worst case,
+// unchanged sub-second normal path) and reports itself once when it overruns.
+const SHUTDOWN_CONSOLE_TIMEOUT_MS = 2000;
+const SHUTDOWN_STEP_TIMEOUT_MS = 3000;
 let stopping = false;
-async function stop() {
-  if (stopping) return;
+async function stop(signal) {
+  if (stopping) {
+    // Second Ctrl+C: the operator has waited long enough, stop waiting too.
+    log('shutdown_forced', { signal });
+    process.exit(1);
+  }
   stopping = true; clearInterval(timer); transport.stop();
-  if (consoleServer) await consoleServer.stop().catch(() => {});
-  // Wait for in-flight model usage settlement before closing SQLite.
-  await runtime.drain();
-  await bot.tail;
-  await bot.antiSpam.tail;
-  await social.drain();
-  await slangTick;
-  store.close(); log('service_stopped');
+  const step = async (promise, ms, name) => {
+    const result = await withTimeout(promise, ms, name);
+    // Each step runs at most once per shutdown, so this fires at most once.
+    if (!result.ok) log('shutdown_step_slow', { step: name, ms });
+  };
+  try {
+    await step(consoleServer ? consoleServer.stop() : Promise.resolve(), SHUTDOWN_CONSOLE_TIMEOUT_MS, 'console');
+    // Wait for in-flight model usage settlement before closing SQLite.
+    await step(runtime.drain(), SHUTDOWN_STEP_TIMEOUT_MS, 'runtime');
+    await step(Promise.all([bot.tail, bot.antiSpam.tail]), SHUTDOWN_STEP_TIMEOUT_MS, 'tails');
+    await step(social.drain(), SHUTDOWN_STEP_TIMEOUT_MS, 'social');
+    await step(slangTick, SHUTDOWN_STEP_TIMEOUT_MS, 'slang');
+  } finally {
+    // Unconditional, even after a step overran or threw.
+    try { store.close(); } finally { lock.release(); }
+    log('service_stopped');
+  }
 }
-process.on('SIGINT', stop);
-process.on('SIGTERM', stop);
+process.on('SIGINT', () => stop('SIGINT'));
+process.on('SIGTERM', () => stop('SIGTERM'));
