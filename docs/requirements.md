@@ -98,6 +98,19 @@
 
 图片理解、语音、文件处理、联网搜索、自动执行工具、跨用户共享记忆、无需 @ 的群回复、营销群发及自建可视化管理后台。若采用现成框架，可使用其已有后台。后续可单独增加范围。
 
+### 8.1 相对第一版的变更
+
+上面那段是第一版当时的范围声明，**原文保留**。实际交付里已经实现了其中若干项，逐条列出可核对的落点；没有落点的条目一律不在下表，即仍然不包含。
+
+| 已实现的能力 | 代码落点 | 文档落点 |
+| --- | --- | --- |
+| 图片理解 | `src/vision.js`（`loadImages`、`MAX_IMAGES`、`IMAGE_TOKEN_RESERVE`），由 `src/bot.js:6` 接入 | `docs/configuration.md:186-196`、`README.md:3` |
+| 联网搜索 | `src/search.js`（`searchQuery`、`autoSearchQuery`），由 `src/bot.js:5`、`src/model.js:1` 接入 | `docs/configuration.md:87-107`、`docs/console.md:39`、`README.md:27` |
+| 无需 @ 的群回复 | `src/bot.js:39`（`config.groupKeywordWithoutAt && matchesInputRule(text, config)`）、`src/config.js:111`（`GROUP_KEYWORD_WITHOUT_AT`）、`src/runtime-config.js:71`（控制台字段「免 @ 关键词触发」）；仿真侧的主动发言见 `src/main.js:78` → `src/social/idle.js:46` | `docs/simulation.md`、`docs/console.md:39` |
+| 自建可视化管理后台 | `src/console/server.js` 与 `src/console/public/**`（只绑 `127.0.0.1`、令牌鉴权、写接口额外要求请求头令牌 + 回环 Origin） | `docs/console.md`、`README.md:36` |
+
+仍然不包含（原文里剩下的部分）：语音、文件处理、自动执行工具、跨用户共享记忆、营销群发。其中"自动执行工具"是**硬约束**而不是待办：`docs/security.md` §3.8 写明当前"没有任何工具面"，将来要做必须带工具白名单（只读优先）并与问答共用同一个预算账本。
+
 ## 9. 验收条件
 
 | 项目 | 验收方式 |

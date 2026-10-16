@@ -85,7 +85,7 @@
 - **结构标记先写**：`src/social/prompt.js` 先铺 `[群聊记录开始] … [群聊记录结束]`，再把用户文本插进去，最后才是"当前这条消息"。模型看到的结构边界由我们固定，不由输入决定。
 - **行为约束**：仿真与问答的系统提示词都明确"只输出要发送的内容"，并给出"不回"这个明确的沉默出口（`SILENCE_MARK`）。规则层已经决定了该不该说话，模型只负责说什么——**沉默不花钱**。
 - **模型回复也是不可信的**：黑话抽取返回的内容走 `slang-parse.js` 的括号配平扫描，只接受 JSON 数组，且候选**必须能在记录原文里找到**才算数；字段做长度上限与去重。解析不出来就报 `SLANG_EXTRACT_UNPARSABLE`，绝不静默当作"没找到"。
-- **日志不含自由文本**：`src/logger.js` 第一行就做 `/^[a-z_]+$/` 的事件名校验，不合格的直接 `return`。聊天正文含中文、空格、标点，**结构上不可能**被写进 `logs/*.jsonl`。这条比"我们记得不要 log 正文"可靠得多。
+- **日志不含自由文本**：`src/logger.js` 第一行就做 `/^[a-z_]+$/` 的事件名校验，不合格的直接 `return`。聊天正文含中文、空格、标点，**结构上不可能**被写进 `logs/*.jsonl`。这条比"我们记得不要 log 正文"可靠得多。可选的第二个参数 `detail` 只接受**普通对象**，字符串／数字／数组／`null` 一律丢弃——那正是"想把群友原话记下来"时会顺手传进来的形状；对象里的字段也约定只放标签、路径与原因（`{ label, reason }`），不放正文。
 - **删掉的能力**：没有"把消息原样拼进 system prompt"的快捷路径，也没有把 `messages` 表暴露给控制台的 API。
 
 ### 3.4 出站网络
@@ -139,7 +139,7 @@ icacls <path> /grant:r <当前用户SID>:F *S-1-5-18:F *S-1-5-32-544:F
 几个必须知道的事实（都是在本机实测出来的，不是推测）：
 
 - **不需要提权。** 对象的所有者隐含持有 `WRITE_DAC`。实测 `icacls` 退出码 0。
-- **不需要 `/t`。** 在目录上设了可继承 ACE 之后，**已存在的子文件会被一起更新**。实测：加固目录后，先前存在的 `existing.txt` 变为 `(I)(F)`，之后新建的文件也自动继承。所以 `data/` 一次调用即可。
+- **不需要递归开关（`icacls` 的整树选项），而且禁止加。** 在目录上设了可继承 ACE 之后，**已存在的子文件会被一起更新**。实测：加固目录后，先前存在的 `existing.txt` 变为 `(I)(F)`，之后新建的文件也自动继承。所以 `data/` 一次调用即可。反过来，加了整树选项会把 `/inheritance:r` 施加到每个子文件：子文件若没有自己的显式 ACE，DACL 就变成**空的**——空 DACL 不是"没有策略"，而是"所有人被拒"，包括所有者本人。上游正是这样让 `state/` 下的 50 个子文件对自己的所有者都不可读。这条由 `test/permissions.test.js` 直接从源码文本上断言（禁止出现带引号的递归开关字面量）。
 - **`/remove:g` 是必需的。** `/grant:r` **只替换它点名的主体的授权**；`/inheritance:r` 也不动**显式** ACE。也就是说，一个显式授给 `Authenticated Users` 的 ACE 能同时躲过这两步，加固后依然是 4 条。实测确认，用 `/remove:g` 加一份宽主体 SID 清单先清后立才收敛到 3 条。
 - **用 SID 而不是名字。** `Administrators` 在中文/德文系统上名字不同；`whoami /user /fo csv /nh` 取当前账号 SID，另两个用微软固定的 `S-1-5-18`（SYSTEM）与 `S-1-5-32-544`（Administrators）。
 - **系统工具的路径写绝对。** `whoami` 在 Git Bash / MSYS / Cygwin 下会被 coreutils 的同名程序抢走，而那个版本不认 `/user`。所以模块里用 `%SystemRoot%\System32\whoami.exe`。
@@ -149,16 +149,20 @@ icacls <path> /grant:r <当前用户SID>:F *S-1-5-18:F *S-1-5-32-544:F
 
 | 路径 | 位置 | 时机 |
 |---|---|---|
-| `data/`（聊天记录 + 账本） | `src/main.js` 启动时 `hardenAll`，目录级 | 每次启动 |
+| `data/`（聊天记录 + 账本） | `src/permissions.js` `secretTargets()`，由 `src/main.js` 启动时交给 `hardenAll`，目录级 | 每次启动 |
+| `logs/*.jsonl`（运行日志，含权限失败的原因） | 同上，目录级 | 每次启动 |
 | `.env`（API key） | 同上，文件级，仅在文件存在时 | 每次启动 |
+| `personas/`（人格卡与行为层） | 同上，目录级，仅在目录已存在时 | 每次启动 |
 | `runtime/console-token.txt` | `src/console/server.js` `resolveToken()` | **读到旧文件时也收紧**（升级修复），新建时同样 |
-| `runtime/slang-corrupt-*.json` | `src/social/slang.js` `stashCorrupt()` | 写入时（内含导入失败原文，可能是群聊原句） |
+| `<data>/slang-corrupt/*.json`（导入失败的原文，可能是群聊原句） | `src/social/slang.js` `stashCorrupt()` | 写入时，文件级；所在目录已随 `data/` 一起加固 |
+
+这张表**就是** `src/permissions.js` 的 `secretTargets()`，顺序即启动时的执行顺序（`data` → `logs` → `env` → `personas`），由 `test/permissions.test.js` 断言。`runtime/` 不在表里，也没有任何一条目标是 `runtime/` 下的路径。
 
 **显式不对 `runtime/` 整个目录下手**：那里面有便携 Node、NapCat 安装和 >120 MB 的下载缓存，`icacls` 会遍历传播，把一个 50 ms 的启动步骤变成几秒的整树重写，换不到任何安全性。
 
 **失败策略：best-effort。** 任何一步失败只记 `permissions_failed` 事件，**绝不阻断启动**。因为"因为设不上 ACL 而拒绝启动"，会把操作者推向把整个机制关掉。
 
-**`slang` 词库的备份恢复**走的是同一套"损坏 ≠ 空"的规矩：导入解析失败时把原文另存为 `runtime/slang-corrupt-<ts>.json` 并报 `SLANG_IMPORT_INVALID`，**绝不**当成"空词库"把已有的收成清掉。
+**`slang` 词库的备份恢复**走的是同一套"损坏 ≠ 空"的规矩：导入解析失败时把原文另存为 `<data>/slang-corrupt/slang-corrupt-<ts>.json` 并报 `SLANG_IMPORT_INVALID`，**绝不**当成"空词库"把已有的收成清掉。落点选在数据库旁边而不是 `runtime/`，是因为 `data/` 既吃上文那张表的目录级加固，又已经进了 `.gitignore`；`runtime/` 两样都没有。另存的原文里可能含群聊原句，所以文件本身在写入时仍单独收紧一次。这类文件**最多保留 20 份**（`MAX_CORRUPT_STASHES`）：写入成功后按文件名的 ISO 时间戳升序删掉最旧的，只认 `slang-corrupt-*.json` 这个模式，目录里别的东西不碰——留着不删的后果是实测到的 30 余份（实施复核时 31 份，其中 28 份是基线统计）从未被任何代码读过的原文长期躺在磁盘上。
 
 ### 3.8 工具面（Phase 6，未实现）
 
