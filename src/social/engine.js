@@ -9,14 +9,15 @@
 
 import { budgetDay } from '../store.js';
 import { costMicro, estimateInput, usageCost } from '../model.js';
-import { containsTerm } from '../terms.js';
 import { isRepeat, score } from './attention.js';
+import { blockedFor, gateFor, minReserveFor, spokeTodayFor } from './gates.js';
 import { GroupMemory } from './memory.js';
 import { applyParams, resolveParams } from './params.js';
 import { parseSegments } from './quote.js';
-import { buildSocialRequest, withSlang } from './prompt.js';
 import { render } from './renderer.js';
+import { sampleUsage, socialRequestFor, speakFor, systemPromptFor } from './speech.js';
 import { ENERGY_BY_STATE, SIM_STATES, energyFor, requiredScore, transition } from './state.js';
+import { describeFor } from './view.js';
 import { IdleSpeech } from './idle.js';
 import { errorDetail } from '../logger.js';
 
@@ -159,31 +160,16 @@ export class Social extends IdleSpeech {
     return { state, lastSpokeAt, energy: energyFor(state, idle) };
   }
 
-  gate(message, state, params, now) {
-    if (this.store.setting('enabled', '1') !== '1') return 'disabled';
-    if (this.store.setting('groupEnabled', '1') !== '1') return 'group_off';
-    if (this.store.setting(`social_mute:${message.group}`, '0') === '1') return 'muted';
-    if (message.hasImage) return 'image';
-    if (!message.text) return 'empty';
-    if (this.blocked(message.text)) return 'blocked';
-    if (this.spokeToday(message.group, budgetDay(now)) >= params.dailyLimit) return 'daily_limit';
-    if (state.lastSpokeAt && now - state.lastSpokeAt < params.cooldownMs) return 'cooldown';
-    const remaining = this.store.balance(budgetDay(now), this.config.budgetMicro).remaining;
-    if (remaining < this.minReserve()) return 'budget';
-    return null;
-  }
+  // --- "may we speak?" ------------------------------------------------------
+  // The gates and their lower-bound helpers live in gates.js; they read the
+  // store and config through these, and the model is never called if one fails.
+  gate(message, state, params, now) { return gateFor(this.store, this.config, message, state, params, now); }
 
-  // Cheap lower bound used only to avoid a pointless model attempt; `reserve`
-  // below is the authority and can still refuse.
-  minReserve() {
-    return costMicro(1024, Math.min(this.config.maxOutput, 256), this.config);
-  }
+  minReserve() { return minReserveFor(this.config); }
 
-  spokeToday(group, day) {
-    return Number(this.store.setting(`social_count:${day}:${group}`, '0')) || 0;
-  }
+  spokeToday(group, day) { return spokeTodayFor(this.store, group, day); }
 
-  blocked(text) { return containsTerm(text, this.config.blockTerms); }
+  blocked(text) { return blockedFor(this.config, text); }
 
   record(group, decision) { this.decisions.set(group, decision); }
 
@@ -227,53 +213,33 @@ export class Social extends IdleSpeech {
   }
 
   // --- speech ---------------------------------------------------------------
-  // The group's confirmed slang table (Phase 4) rides along with the persona
-  // here; `slang` is optional, and without it the prompt is unchanged. Both the
-  // persona and the slang table are resolved for *this* group, so a group that
-  // pinned its own card or narrowed its vocabulary gets exactly that.
-  systemPrompt(group = null) {
-    let base = this.config.systemPrompt;
-    if (this.personas) {
-      try { base = this.personas.resolve(group); }
-      catch { this.log('social_persona_failed'); }
-    }
-    base = withSlang(base, this.slang, { group });
-    // The sticker library rides along here too: an unprompted member may drop a
-    // sticker when it fits. Same block and hint as the answering path.
-    if (this.stickers?.enabled()) {
-      const block = this.stickers.block();
-      if (block) base = `${base}\n\n${block}`;
-      base = `${base}\n\n${this.stickers.hint()}`;
-    }
-    return base;
+  // Prompt assembly and the model call live in speech.js (every one of them
+  // still a method here). They take one explicit record, built below, so nothing
+  // in that module reaches back into this instance.
+  speech() {
+    return {
+      config: this.config, ledger: this.ledger, personas: this.personas, slang: this.slang,
+      stickers: this.stickers, log: this.log, memory: this.memory, now: this.now,
+      params: group => this.params(group),
+      deliver: (messages, group, send, alive, state, params) => this.deliver(messages, group, send, alive, state, params),
+    };
   }
 
-  // Building the prompt (history, quoting, escaping) lives in prompt.js — it is
-  // about rendering untrusted group text, a different failure mode from the
-  // "should we speak at all" decisions this file makes.
+  systemPrompt(group = null) { return systemPromptFor(this.speech(), group); }
+
   request(message, params) {
-    return buildSocialRequest({
-      memory: this.memory, config: this.config, message, params, system: this.systemPrompt(message.group),
-    });
+    const deps = this.speech();
+    return socialRequestFor(deps.memory, deps.config, message, params, systemPromptFor(deps, message.group));
   }
 
-  sample(sessionKey, usage) {
-    if (!this.ledger) return null;
-    const trace = this.ledger.begin(sessionKey);
-    return this.ledger.sample(trace, usage, this.config, this.now());
-  }
+  sample(sessionKey, usage) { return sampleUsage(this.speech(), sessionKey, usage); }
 
-  async speak(message, send, alive, state) {
-    const params = this.params(message.group);
-    let messages;
-    try { messages = this.request(message, params); }
-    catch { this.log('social_context_failed'); return false; }
-    return this.deliver(messages, message.group, send, alive, state, params);
-  }
+  async speak(message, send, alive, state) { return speakFor(this.speech(), message, send, alive, state); }
 
   // Everything after the prompt — budget, model call, marker stripping, render,
   // send, record — is identical whether speech was provoked by a message or by
   // silence, so both paths share it. `group` (not a message) is the target.
+  // It stays here: it is the only writer of the daily speech counter.
   async deliver(messages, group, send, alive, state, params) {
     const sessionKey = `social:group:${group}`;
     const day = budgetDay(this.now());
@@ -348,50 +314,13 @@ export class Social extends IdleSpeech {
 
   // --- console view ---------------------------------------------------------
   // Never includes chat text: the console shows counts, states and reasons only
-  // (see docs/console.md, rule 6).
+  // (see docs/console.md, rule 6). The rows themselves are assembled in view.js.
   describe({ now = this.now() } = {}) {
-    const params = this.params();
-    const day = budgetDay(now);
-    const states = new Map(this.store.listSimStates().map(row => [row.group_id, row]));
-    const groups = this.grouped().map(id => {
-      const row = states.get(id);
-      const state = SIM_STATES.includes(row?.state) ? row.state : 'observing';
-      const lastSpokeAt = row?.last_spoke_at ?? null;
-      const idle = lastSpokeAt ? Math.max(0, now - lastSpokeAt) : null;
-      const decision = this.decisions.get(id) ?? null;
-      // Each row reports *its own* effective numbers, not the global ones: that
-      // is the whole point of the per-group layer, and the console renders it.
-      const own = this.params(id);
-      return {
-        id, state, energy: energyFor(state, idle ?? 0), lastSpokeAt, idleMs: idle,
-        enabled: own.enabled, overridden: own.overridden,
-        threshold: own.threshold, cooldownSeconds: Math.round(own.cooldownMs / 1000),
-        spokeToday: this.spokeToday(id, day), dailyLimit: own.dailyLimit,
-        muted: this.store.setting(`social_mute:${id}`, '0') === '1',
-        activity: this.memory.ring(id).filter(entry => now - entry.at <= ACTIVITY_WINDOW_MS).length,
-        required: requiredScore({ threshold: own.threshold, state, energy: energyFor(state, idle ?? 0) }),
-        decision,
-      };
-    });
-    return {
-      enabled: params.enabled,
-      gate: { core: this.store.setting('enabled', '1') === '1', group: this.store.setting('groupEnabled', '1') === '1' },
-      params: {
-        threshold: params.threshold, cooldownSeconds: Math.round(params.cooldownMs / 1000),
-        dailyLimit: params.dailyLimit,
-        idleEnabled: params.idleEnabled, idleMinutes: params.idleMinutes, idleHours: params.idleHours,
-      },
-      defaults: {
-        enabled: Boolean(this.config.socialEnabled), threshold: this.config.socialThreshold,
-        cooldownSeconds: this.config.socialCooldownSeconds, dailyLimit: this.config.socialDailyLimit,
-        contextMessages: this.config.socialContextMessages, maxChunks: this.config.socialMaxChunks,
-        minDelayMs: this.config.socialMinDelayMs, maxDelayMs: this.config.socialMaxDelayMs,
-        messageTtlHours: Math.round(this.config.socialMessageTtlMs / 3600000),
-        idleEnabled: Boolean(this.config.socialIdleEnabled), idleMinutes: this.config.socialIdleMinutes, idleHours: this.config.socialIdleHours,
-      },
-      today: { day, spoke: groups.reduce((total, group) => total + group.spokeToday, 0) },
-      groups,
-    };
+    return describeFor({
+      store: this.store, memory: this.memory, config: this.config, decisions: this.decisions,
+      params: group => this.params(group), grouped: () => this.grouped(),
+      spokeToday: (group, day) => this.spokeToday(group, day), activityWindowMs: ACTIVITY_WINDOW_MS,
+    }, { now });
   }
 
   maintain() {
