@@ -19,7 +19,7 @@ import {
   buildSummary, buildSessions, buildCharges, buildConfig, buildCost, buildCostTurns,
   buildPersonas, buildPersonaFile, buildSocial, buildSlang, buildSlangEntry,
   buildGroups, applyGroupPatch, buildStickers, buildStickerEntry,
-  buildSettings, applySetting, buildQzonePosts, deleteQzonePost,
+  buildSettings, applySetting, buildQzonePosts, deleteQzonePost, createServiceApi,
 } from './api.js';
 import { readLogs } from './logs.js';
 import { harden } from '../permissions.js';
@@ -33,20 +33,13 @@ const INDEX_PATH = join(HERE, 'public', 'index.html');
 // click/change listener that renders whatever page is open.
 const JS = 'text/javascript; charset=utf-8';
 const ASSETS = new Map([
-  ['/console.css', ['public/console.css', 'text/css; charset=utf-8']],
-  ['/core.js', ['public/core.js', JS]],
-  ['/pages-overview.js', ['public/pages-overview.js', JS]],
-  ['/pages-model.js', ['public/pages-model.js', JS]],
-  ['/pages-personas.js', ['public/pages-personas.js', JS]],
-  ['/pages-groups.js', ['public/pages-groups.js', JS]],
-  ['/pages-activity.js', ['public/pages-activity.js', JS]],
-  ['/pages-qzone.js', ['public/pages-qzone.js', JS]],
-  ['/pages-assets.js', ['public/pages-assets.js', JS]],
-  ['/assets-stickers.js', ['public/assets-stickers.js', JS]],
-  ['/assets-slang.js', ['public/assets-slang.js', JS]],
-  ['/pages-cost.js', ['public/pages-cost.js', JS]],
-  ['/pages-logs.js', ['public/pages-logs.js', JS]],
-  ['/pages-settings.js', ['public/pages-settings.js', JS]],
+  ['/console.css', ['public/console.css', 'text/css; charset=utf-8']], ['/core.js', ['public/core.js', JS]],
+  ['/pages-overview.js', ['public/pages-overview.js', JS]], ['/pages-model.js', ['public/pages-model.js', JS]],
+  ['/pages-personas.js', ['public/pages-personas.js', JS]], ['/pages-groups.js', ['public/pages-groups.js', JS]],
+  ['/pages-activity.js', ['public/pages-activity.js', JS]], ['/pages-qzone.js', ['public/pages-qzone.js', JS]],
+  ['/pages-assets.js', ['public/pages-assets.js', JS]], ['/assets-stickers.js', ['public/assets-stickers.js', JS]],
+  ['/assets-slang.js', ['public/assets-slang.js', JS]], ['/pages-cost.js', ['public/pages-cost.js', JS]],
+  ['/pages-logs.js', ['public/pages-logs.js', JS]], ['/pages-settings.js', ['public/pages-settings.js', JS]],
   ['/app.js', ['public/app.js', JS]],
 ]);
 const TOKEN_HEADER = 'x-console-token';
@@ -85,6 +78,9 @@ const ERROR_STATUS = new Map([
   // QQ Zone (I-09): 4xx for fixable input, 502/503/504 for the protocol side.
   ['QZONE_POST_NOT_FOUND', 404], ['QZONE_POST_ALREADY_DELETED', 409], ['QZONE_POST_NO_TID', 409],
   ['QZONE_DELETE_UNAVAILABLE', 503], ['QZONE_DELETE_TIMEOUT', 504], ['QZONE_DELETE_REJECTED', 502], ['QZONE_DELETE_FAILED', 502],
+  // Service control (T-019): 409 when nobody would bring the bot back, so a click
+  // can never turn into a silent shutdown.
+  ['SERVICE_NOT_MANAGED', 409], ['SERVICE_ACTION_INVALID', 400],
 ]);
 
 const equal = (a, b) => {
@@ -187,6 +183,9 @@ export function createConsole({
   config, store, bot, transport, runtime, personas = null, social = null, slang = null, stickers = null, webui = null,
   log = () => {},
   startedAt = Date.now(), host = '127.0.0.1', port = null, logDirectory = 'logs',
+  // The console may ask this process to exit (T-019); both hooks are injectable so
+  // a test never has to kill the test process.
+  exit = code => process.exit(code), schedule = setTimeout,
 } = {}) {
   const token = resolveToken(config, log);
   const listenPort = port ?? config.consolePort ?? 3200;
@@ -194,23 +193,18 @@ export function createConsole({
   // The console proxies the NapCat WebUI so the browser never learns the WebUI
   // token and never has to reach the WebUI port itself (I-10).
   const login = webui ?? createNapCatWebui();
+  // Start/stop from the console: answer first, exit afterwards, and only when the
+  // injected supervisor flag says somebody would bring the bot back (see api.js).
+  const service = createServiceApi({ startedAt, exit, schedule });
 
-  const requirePersonas = () => {
-    if (!personas) throw new Error('PERSONA_UNAVAILABLE');
-    return personas;
+  const requireOf = (value, code) => () => {
+    if (!value) throw new Error(code);
+    return value;
   };
-  const requireSocial = () => {
-    if (!social) throw new Error('SOCIAL_UNAVAILABLE');
-    return social;
-  };
-  const requireSlang = () => {
-    if (!slang) throw new Error('SLANG_UNAVAILABLE');
-    return slang;
-  };
-  const requireStickers = () => {
-    if (!stickers) throw new Error('STICKER_UNAVAILABLE');
-    return stickers;
-  };
+  const requirePersonas = requireOf(personas, 'PERSONA_UNAVAILABLE');
+  const requireSocial = requireOf(social, 'SOCIAL_UNAVAILABLE');
+  const requireSlang = requireOf(slang, 'SLANG_UNAVAILABLE');
+  const requireStickers = requireOf(stickers, 'STICKER_UNAVAILABLE');
 
   const reads = {
     '/api/summary': () => buildSummary({ config, store, bot, transport, runtime, now: now(), startedAt }),
@@ -241,6 +235,8 @@ export function createConsole({
     // Console login: status only, and never anything that came out of the
     // WebUI token or the Credential (see src/napcat-webui.js).
     '/api/login/status': () => login.status(),
+    // Read-only view of what this process knows about its own supervision (T-019).
+    '/api/service': () => service.read(),
   };
 
   // Every write returns the freshly described persona state so the page can
@@ -289,6 +285,10 @@ export function createConsole({
     // A new QR code for the bot account. Writes go through the usual header
     // token + loopback-origin gate, like every other action that changes state.
     '/api/login/qr': () => login.refresh(),
+    // Restart/stop: the reply is written before the delayed exit, so the browser
+    // gets a receipt instead of a dropped connection (T-019).
+    '/api/service/restart': () => service.restart(),
+    '/api/service/stop': () => service.stop(),
   };
 
   async function handle(req, res) {

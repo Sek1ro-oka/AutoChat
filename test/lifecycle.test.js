@@ -8,7 +8,9 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { acquireLock, defaultIsAlive, lockPathFor, withTimeout } from '../src/lifecycle.js';
+import {
+  acquireLock, defaultIsAlive, lockPathFor, readLockHolder, supervisorLockPathFor, withTimeout,
+} from '../src/lifecycle.js';
 
 const SRC = fileURLToPath(new URL('../src', import.meta.url));
 const MAIN = fileURLToPath(new URL('../src/main.js', import.meta.url));
@@ -30,6 +32,22 @@ const payloadOf = path => JSON.parse(readFileSync(path, 'utf8'));
 test('the lock lives next to the database file, never inside it', () => {
   assert.equal(lockPathFor(join('data', 'autochat.sqlite')), join('data', 'autochat.lock'));
   assert.equal(lockPathFor('E:\\tmp\\nested\\db.sqlite'), join('E:\\tmp\\nested', 'autochat.lock'));
+});
+
+test('the supervisor lock sits beside the bot lock and is a different file', () => {
+  assert.equal(supervisorLockPathFor(join('data', 'autochat.sqlite')), join('data', 'autochat-supervisor.lock'));
+  assert.notEqual(supervisorLockPathFor(join('data', 'autochat.sqlite')), lockPathFor(join('data', 'autochat.sqlite')));
+});
+
+test('readLockHolder trusts only an object with an integer pid', () => {
+  const path = join(makeDir(), 'autochat.lock');
+  assert.equal(readLockHolder(path), null, 'a missing file has no holder');
+  writeFileSync(path, '');
+  assert.equal(readLockHolder(path), null, 'an empty file has no holder');
+  writeFileSync(path, '{"pid":"123"}');
+  assert.equal(readLockHolder(path), null, 'a string pid is not a pid');
+  writeFileSync(path, `${JSON.stringify({ pid: 123, startedAt: 5 })}\n`);
+  assert.deepEqual(readLockHolder(path), { pid: 123, startedAt: 5 });
 });
 
 test('liveness asks the OS about a real pid', () => {

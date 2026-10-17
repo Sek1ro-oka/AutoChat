@@ -13,6 +13,13 @@ export function lockPathFor(databasePath) {
   return join(dirname(databasePath), 'autochat.lock');
 }
 
+// The supervisor's mutex, next to the bot lock so both speak for one database.
+// It answers "one supervisor per database", never "is the bot running" — that
+// question belongs to the bot lock above, which the bot itself holds and releases.
+export function supervisorLockPathFor(databasePath) {
+  return join(dirname(databasePath), 'autochat-supervisor.lock');
+}
+
 // `kill(pid, 0)` only asks the OS whether the pid exists.
 export function defaultIsAlive(pid) {
   try {
@@ -29,7 +36,7 @@ export function defaultIsAlive(pid) {
 // A holder is trusted only when the file parses to an object with an integer pid.
 // Empty, truncated or hand-mangled content counts as no holder at all and is
 // reclaimed exactly like a dead pid.
-function readHolder(lockPath) {
+export function readLockHolder(lockPath) {
   let holder;
   try {
     holder = JSON.parse(readFileSync(lockPath, 'utf8'));
@@ -46,7 +53,7 @@ export function acquireLock(lockPath, { pid = process.pid, now = Date.now(), isA
     create();
   } catch (error) {
     if (error.code !== 'EEXIST') return { ok: false, reason: 'lock_unwritable', error };
-    const holder = readHolder(lockPath);
+    const holder = readLockHolder(lockPath);
     if (holder && isAlive(holder.pid)) {
       return { ok: false, reason: 'already_running', holder: { pid: holder.pid, startedAt: holder.startedAt ?? null } };
     }
@@ -70,7 +77,7 @@ export function acquireLock(lockPath, { pid = process.pid, now = Date.now(), isA
   const release = () => {
     if (!held) return false;
     held = false;
-    if (readHolder(lockPath)?.pid !== process.pid) return false;
+    if (readLockHolder(lockPath)?.pid !== process.pid) return false;
     try {
       unlinkSync(lockPath);
       return true;
