@@ -51,9 +51,12 @@ const costChart = d => {
       + `<div class="bar-track"><div class="bar-fill${isNow ? ' is-today' : ''}" data-bar="${percent}"></div></div>`
       + `<div class="bar-label">${label}</div></div>`;
   }).join('');
+  // 图例的小方块和柱子共用 --chart-1（普通桶）/ --chart-4（当前桶）：颜色只在这里说一次。
+  const legend = `<div class="legend"><span class="swatch"></span>每${unit}花费`
+    + `<span class="swatch swatch-today"></span>${d.unit === 'hour' ? '当前小时' : '今天'}</div>`;
   return card(`花费走势（每${unit}）`,
-    `${d.range} · ${num(series.length)} 桶 · 纵轴按区间峰值自适应；条形悬停看峰谷明细，橙色是当前${unit}`,
-    `<div class="bars${dense ? ' dense' : ''}" role="img" aria-label="花费走势">${bars}</div>`);
+    `${d.range} · ${num(series.length)} 桶 · 纵轴按区间峰值自适应；悬停柱子看峰谷明细。`,
+    `<div class="bars${dense ? ' dense' : ''}" role="img" aria-label="花费走势">${bars}</div>` + legend);
 };
 
 // app.js 的 paintWidths 只处理 [data-width]，而 CSP 不许内联 style，所以柱高挂载后由这里补；

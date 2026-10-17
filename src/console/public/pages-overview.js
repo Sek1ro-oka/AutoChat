@@ -24,7 +24,7 @@ const switchCard = settings => {
     return switchRow(label, control, `${esc(why)}默认值：${esc(String(field.defaultValue))}。
       <span class="muted">${on ? '现在是开着的。' : '现在是关着的。'}</span>`);
   });
-  return card('总开关', '改完立刻生效，不用重启', rows.join(''));
+  return catCard('info', '总开关', '改完立刻生效，不用重启', rows.join(''));
 };
 
 const readonlySwitches = summary => {
@@ -42,7 +42,7 @@ const readonlySwitches = summary => {
         + esc(stopRow(switches.groupEnabledReason, '在 QQ 里发 /群开启 恢复。')) + '</span>'],
   ];
   const note = alertBox('info', '这两项控制台改不了', '它们是 QQ 命令写的运行时状态，不是配置文件项：只能在群里发 /启动 或 /停止。做成开关就是点了没反应的开关。');
-  return card('模型回复与群聊参与', '只读', kv(rows) + note);
+  return catCard('info', '模型回复与群聊参与', '只读', kv(rows) + note);
 };
 
 const budgetCard = summary => {
@@ -63,7 +63,7 @@ const budgetCard = summary => {
   // 宽度走 data-width：CSP 是 style-src 'self'，HTML 里的 style="" 会被浏览器丢弃，
   // 所以由 app.js 在写入 innerHTML 之后用 CSSOM（el.style.width）补上。
   const bar = `<div class="progress${level ? ' ' + level : ''}"><i data-width="${percent}"></i></div>`;
-  return card('预算与队列', '今日账期', bar + kv(rows));
+  return catCard('money', '预算与队列', '今日账期', bar + kv(rows));
 };
 
 const healthCard = summary => {
@@ -88,14 +88,14 @@ const healthCard = summary => {
   if (!alerts.length) alerts.push(alertBox('ok', '没有发现异常', '连接、预算、发送三个方向都正常。'));
   alerts.push(alertBox('info', '日志级告警在「日志与健康」页',
     '写盘失败、权限失败、黑话导入损坏这类事件只在事件日志里，概览页不去重复统计。'));
-  return card('健康与告警', '只看 /api/summary 能拿到的信号', alerts.join(''));
+  return catCard('money', '健康与告警', '只看 /api/summary 能拿到的信号', alerts.join(''));
 };
 
 const eventsCard = entries => {
   const rows = (entries || []).slice(0, 8).map(entry => [
     `<span class="nowrap">${esc(stampOf(entry.time))}</span>`, `<code>${esc(entry.event)}</code>`,
   ]);
-  return card('最近事件', '来自 /api/logs', rows.length
+  return catCard('data', '最近事件', '来自 /api/logs', rows.length
     ? table(['时间', '事件'], rows)
     : '<div class="empty">日志目录里还没有事件。</div>');
 };
@@ -112,7 +112,7 @@ const sessionsCard = sessions => {
     `<code>${esc(item.key)}</code>`, esc(item.scope || DASH), num(item.items),
     `<span class="nowrap">${esc(time(item.updated))}</span>`,
   ]);
-  return card('会话', '来自 /api/sessions（最近 20 条）', rows.length
+  return catCard('data', '会话', '来自 /api/sessions（最近 20 条）', rows.length
     ? table(['会话键', '作用域', { label: '条数', num: true }, '更新时间'], rows)
     : '<div class="empty">还没有会话记录。</div>');
 };
@@ -131,7 +131,7 @@ const groupsDueCard = summary => {
   const rows = (summary.groups || []).map(item => [
     `<code>${esc(item.id)}</code>`, `<span class="nowrap">${esc(time(item.due))}</span>`,
   ]);
-  return card('群与下次清理', '来自 /api/summary', rows.length ? table(['群号', '下次清理'], rows) : '<div class="empty">还没有群。</div>');
+  return catCard('data', '群与下次清理', '来自 /api/summary', rows.length ? table(['群号', '下次清理'], rows) : '<div class="empty">还没有群。</div>');
 };
 
 /* --- 服务卡片（T-020）-------------------------------------------------------
@@ -220,7 +220,7 @@ const serviceCard = status => {
     `<div class="row svc-actions">${serviceButton('restart', locked)}${serviceButton('stop', locked)}` +
       `<span class="msg muted">${managed ? '点第一次只是确认，第二次才真的执行。' : '按钮禁用中，原因见上面那行。'}</span></div>`,
   ].join('');
-  return card('服务', '来自 /api/service', body);
+  return catCard('run', '服务', '来自 /api/service', body);
 };
 
 // 一次探测：重启等到「接口重新应答」，停止正好相反，等到「接口不再应答」才算停成了。
@@ -301,6 +301,12 @@ action('serviceAction', async element => {
   SERVICE.probeTimer = setTimeout(serviceProbe, SERVICE_PROBE_MS);
 });
 
+// 批次 B 的分类强调：色条与胶囊都只靠类名（CSP 不许 style=""）。
+// core.js 的 card() 把 <div class="card"> 写死了，本批不动 core.js，所以补类在页面这边做。
+const catCard = (kind, title, sub, body) =>
+  card(title, sub, body).replace('<div class="card">', `<div class="card cat-${kind}">`);
+const pill = (kind, value) => `<span class="pill pill-${kind}">${value}</span>`;
+
 const renderOverview = async () => {
   const [summary, settings, logs, sessions, service] = await Promise.all([
     api('/api/summary'),
@@ -314,19 +320,22 @@ const renderOverview = async () => {
   const switches = summary.switches || {};
   const model = summary.model || {};
   const connection = summary.connection || {};
+  // 连接状态本身就是语义色：就绪/重连中/断了各一档，不另立"连接"这个分类色。
+  const connectionState = connection.ready ? ['ok', '就绪']
+    : connection.reconnecting ? ['warn', '重连中'] : ['err', '未连接'];
   const stats = `<div class="grid g4">
-    ${stat('运行时长', esc(dur(summary.uptimeMs)), '进程启动至今')}
-    ${stat('当前模型', esc(model.name || DASH), model.active ? '生效层级：' + model.active : '没有可用模型')}
-    ${stat('OneBot 连接', connection.ready ? '就绪' : connection.reconnecting ? '重连中' : '未连接',
+    ${stat('运行时长', pill('run', esc(dur(summary.uptimeMs))), '进程启动至今')}
+    ${stat('当前模型', pill('info', esc(model.name || DASH)), model.active ? '生效层级：' + model.active : '没有可用模型')}
+    ${stat('OneBot 连接', pill(...connectionState),
     connection.reconnecting ? `第 ${num(connection.retry)} 次重试` : connection.ready ? '消息通道正常' : '消息发不出去')}
-    ${stat('今日花费', cny(summary.budget && summary.budget.used), '预算 ' + cny(summary.budget && summary.budget.limitMicro, 2))}
+    ${stat('今日花费', pill('money', cny(summary.budget && summary.budget.used)), '预算 ' + cny(summary.budget && summary.budget.limitMicro, 2))}
   </div>`;
   return `<div class="page active">
     ${pageHead('概览', '机器人现在在做什么、花了多少钱、有没有哪里不对。')}
     ${stats}
     <div class="grid g2">${switchCard(settings)}${readonlySwitches(summary)}</div>
     <div class="grid g2">${budgetCard(summary)}${healthCard(summary)}</div>
-    <div class="grid g2">${eventsCard(logs.logs)}${card('参与者与发送', '来自 /api/summary', participantsCard(summary))}</div>
+    <div class="grid g2">${eventsCard(logs.logs)}${catCard('data', '参与者与发送', '来自 /api/summary', participantsCard(summary))}</div>
     <div class="grid g2">${sessionsCard(sessions.sessions)}${groupsDueCard(summary)}</div>
     ${serviceCard(service)}
   </div>`;
