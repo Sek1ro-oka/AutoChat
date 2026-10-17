@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GroupMemory } from '../src/social/memory.js';
-import { SOCIAL_ADDENDUM, buildSocialRequest, withSlang } from '../src/social/prompt.js';
+import { SOCIAL_ADDENDUM, buildIdleRequest, buildSocialRequest, withSlang } from '../src/social/prompt.js';
 
 // 2027-01-15 16:00 北京时间，只用来给环形缓冲一个稳定的时钟。
 const CLOCK = 1800000000000;
@@ -114,4 +114,95 @@ test('the bot\'s own quote is attributed to "你", not to a member label', () =>
     params: { contextMessages: 12 }, system: 's',
   });
   assert.ok(user.content.includes('[引用 你：机器说过的话]'));
+});
+
+// --- A-02: the omission marker ------------------------------------------------
+// A prompt that silently drops 17 of 20 lines looks like a group where nobody
+// talked. The marker says the log is a window, and it has to stay out of the
+// rendered log itself — an agent that quotes its own prompt would post it.
+
+const MARKER = (kept, dropped) => `（更早的 ${dropped} 条群聊记录已省略，本轮只带上最近 ${kept} 条）`;
+
+function recorder() {
+  const calls = [];
+  const log = (event, detail) => calls.push({ event, detail });
+  log.calls = calls;
+  return log;
+}
+
+test('the omission marker lives in the system message, never in the user parts', () => {
+  const ring = memory();
+  seed(ring, Array.from({ length: 20 }, (_, index) => ({ text: `第${index}条` })));
+  const [system, user] = buildSocialRequest({
+    memory: ring, config: CONFIG, message: { id: 'x', group: '20000', user: '30001', text: '现在' },
+    params: { contextMessages: 3 }, system: '人设',
+  });
+
+  assert.ok(system.content.startsWith('人设\n\n'), 'the persona still comes first');
+  assert.ok(system.content.endsWith(MARKER(3, 17)), 'the marker is the last thing in the system message');
+  assert.ok(user.content.includes('第19条'), 'the kept lines are still there');
+  assert.ok(!user.content.includes('第14条'), 'the dropped ones are not');
+  assert.ok(!user.content.includes('已省略'), 'the marker is not something a member said');
+  assert.equal(user.content.split('[群聊记录开始]').length - 1, 1, 'the log stays structurally intact');
+});
+
+test('nothing is marked when the whole ring fits in the prompt', () => {
+  const ring = memory();
+  seed(ring, [{ text: '甲' }, { text: '乙' }]);
+  const log = recorder();
+  const [system] = buildSocialRequest({
+    memory: ring, config: CONFIG, message: { id: 'x', group: '20000', user: '30001', text: '现在' },
+    params: { contextMessages: 12 }, system: '人设', log,
+  });
+
+  assert.equal(system.content, `人设\n\n${SOCIAL_ADDENDUM}`, 'a complete log needs no explanation');
+  assert.equal(log.calls.length, 0, 'and no event: this is the normal case, it must stay quiet');
+});
+
+test('the truncation is logged once, and kept plus dropped is the ring length', () => {
+  const ring = memory();
+  seed(ring, Array.from({ length: 20 }, (_, index) => ({ text: `第${index}条` })));
+  const log = recorder();
+  const [system] = buildSocialRequest({
+    memory: ring, config: CONFIG, message: { id: 'x', group: '20000', user: '30001', text: '现在' },
+    params: { contextMessages: 3 }, system: '人设', log,
+  });
+
+  assert.equal(log.calls.length, 1, 'one record per prompt, not one per dropped line');
+  assert.equal(log.calls[0].event, 'social_context_truncated');
+  const { group, kept, dropped, contextMessages } = log.calls[0].detail;
+  assert.deepEqual({ group, kept, dropped, contextMessages }, { group: '20000', kept: 3, dropped: 17, contextMessages: 3 });
+  assert.equal(kept + dropped, ring.ring('20000').length, 'every ring entry is either sent or counted');
+  assert.ok(system.content.includes(MARKER(3, 17)), 'the log and the prompt agree');
+});
+
+test('the current message is not counted as a dropped line', () => {
+  const ring = memory();
+  seed(ring, Array.from({ length: 5 }, (_, index) => ({ text: `第${index}条` })));
+  const log = recorder();
+  const [system] = buildSocialRequest({
+    memory: ring, config: CONFIG, message: { id: '5', group: '20000', user: '30001', text: '第4条' },
+    params: { contextMessages: 2 }, system: 's', log,
+  });
+  // The ring holds five lines and the current one is rendered on its own line,
+  // so it was never withheld: the four remaining lines split two and two.
+  const { kept, dropped } = log.calls[0].detail;
+  assert.deepEqual([kept, dropped], [2, 2]);
+  assert.equal(kept + dropped, ring.ring('20000').length - 1);
+  assert.ok(system.content.endsWith(MARKER(2, 2)));
+});
+
+test('the idle prompt carries the same marker', () => {
+  const ring = memory();
+  seed(ring, Array.from({ length: 20 }, (_, index) => ({ text: `第${index}条` })));
+  const log = recorder();
+  const [system, user] = buildIdleRequest({
+    memory: ring, config: CONFIG, group: '20000', params: { contextMessages: 4 },
+    system: '人设', idleMinutes: 45, log,
+  });
+
+  assert.ok(system.content.endsWith(MARKER(4, 16)));
+  assert.ok(!user.content.includes('已省略'), 'the marker never enters the rendered log');
+  assert.equal(log.calls[0].detail.kept + log.calls[0].detail.dropped, 20);
+  assert.equal(log.calls.length, 1);
 });

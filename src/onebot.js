@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import { randomUUID } from 'node:crypto';
 import { errorDetail } from './logger.js';
+import { screenOutbound } from './outbound-screen.js';
 
 export class OneBot {
   constructor(config, { onEvent = () => {}, log = () => {} } = {}) {
@@ -69,6 +70,14 @@ export class OneBot {
     });
   }
   call(action, params, generation = this.generation) {
+    // Outbound shape gate (I-06 · A-06). Every action funnels through here, so
+    // this is the one place where the policy can be enforced without the callers
+    // knowing it exists. It rewrites `params` and never throws: screening must
+    // not be able to turn into a failed send.
+    const screened = screenOutbound(action, params);
+    if (screened.verdict === 'block') this.log('social_outbound_blocked', { action, rule: screened.reason });
+    else if (screened.verdict === 'mask') this.log('social_outbound_masked', { action, rule: screened.reason });
+    else if (screened.reason) this.log('social_outbound_generic_secret', { action, rule: screened.reason });
     if (generation !== this.generation || this.socket?.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error('ONEBOT_NOT_CONNECTED'));
     }
@@ -78,7 +87,7 @@ export class OneBot {
         this.pending.delete(echo); reject(new Error('ONEBOT_TIMEOUT'));
       }, this.config.actionTimeoutMs ?? 10000);
       this.pending.set(echo, { resolve, reject, timer });
-      this.socket.send(JSON.stringify({ action, params, echo }), error => {
+      this.socket.send(JSON.stringify({ action, params: screened.params, echo }), error => {
         if (!error) return;
         const pending = this.pending.get(echo);
         if (pending) { clearTimeout(timer); this.pending.delete(echo); reject(new Error('ONEBOT_SEND_FAILED')); }

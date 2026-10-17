@@ -32,8 +32,8 @@ export function systemPromptFor({ config, personas, slang, stickers, log }, grou
 // Building the prompt (history, quoting, escaping) lives in prompt.js — it is
 // about rendering untrusted group text, a different failure mode from the
 // "should we speak at all" decisions engine.js makes.
-export function socialRequestFor(memory, config, message, params, system) {
-  return buildSocialRequest({ memory, config, message, params, system });
+export function socialRequestFor(memory, config, message, params, system, log = () => {}) {
+  return buildSocialRequest({ memory, config, message, params, system, log });
 }
 
 export function sampleUsage({ ledger, config, now }, sessionKey, usage) {
@@ -45,7 +45,7 @@ export function sampleUsage({ ledger, config, now }, sessionKey, usage) {
 export async function speakFor(deps, message, send, alive, state) {
   const params = deps.params(message.group);
   let messages;
-  try { messages = socialRequestFor(deps.memory, deps.config, message, params, systemPromptFor(deps, message.group)); }
+  try { messages = socialRequestFor(deps.memory, deps.config, message, params, systemPromptFor(deps, message.group), deps.log); }
   catch { deps.log('social_context_failed'); return false; }
   return deps.deliver(messages, message.group, send, alive, state, params);
 }

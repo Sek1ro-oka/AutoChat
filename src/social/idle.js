@@ -37,7 +37,7 @@ export class IdleSpeech {
     try {
       messages = buildIdleRequest({
         memory: this.memory, config: this.config, group, params,
-        system: this.systemPrompt(group), idleMinutes: params.idleMinutes,
+        system: this.systemPrompt(group), idleMinutes: params.idleMinutes, log: this.log,
       });
     } catch { this.log('social_context_failed'); return false; }
     return this.deliver(messages, group, send, alive, state, params);

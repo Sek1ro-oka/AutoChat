@@ -114,6 +114,23 @@
 - **没有任何分析/上报 SDK**。仪表盘是本地 HTML + 原生 CSS/DOM，`index.html` 里**零外部资源**——14 个同源 `<script>` 加 1 个同源 `console.css`，全部经 `ASSETS` 白名单发放。断网时控制台照常工作。
 - **控制台的"不读正文"规则**与出站一样重要：能把聊天内容带出去的地方首先得能读到它。
 
+### 3.5.1 出站闸：打码、拦截、仅记录
+
+所有出站消息在 `src/onebot.js` 的 `call()` 里、`socket.send()` 之前过一遍 `src/outbound-screen.js` 的 `screenOutbound(action, params)`。它挂在唯一的出站收口上，所以问答、仿真、命令三条路径自动同策略，调用方不必知道它存在。只看 `send_group_msg` / `send_private_msg` / `send_msg` 的 `{type:'text'}` 段，图片、@、表情原样透传。
+
+| 处置 | 触发 | 动作 |
+| --- | --- | --- |
+| 打码（仅群聊） | Windows/UNC 路径、URL、≥16 位连续数字 | 保留首 4 与末 4 位，中间换成 `…`；记 `social_outbound_masked` |
+| 拦截 | 命中 gitleaks 的五条密钥前缀规则（AWS / GCP / GitHub PAT / fine-grained PAT / Slack） | 该文本段整段换成固定短句「这条消息包含疑似密钥，已拦截。」；记 `social_outbound_blocked`（warn） |
+| 仅记录 | 通用高熵值（关键字 + 分隔符 + 10–150 字符 + 熵 ≥ 3.5） | 原样发出；记 `social_outbound_generic_secret`（info） |
+
+四条约束：
+
+- **不留白**：拦截永远替换成固定短句，绝不静默丢弃——一条空消息和人格里的「不回」无法区分，用户只会以为它没听见。
+- **打码只在群里**：私聊是一次有明确收件人的对话，把 `C:\Users\me\x.txt` 打成 `C:\U….txt` 不解决任何问题。QQ 号（5–11 位）与毫秒时间戳（13 位）不打码，否则正常聊天就废了。
+- **拿不准只记录**：通用规则是形态判断而非证据，所以它只写日志、不改内容；它用 gitleaks 的 allowlist（纯字母值、`api_id` 这类字段名）与 stopword 表收窄，否则「token 过期了」这种日常句子会被当成密钥。
+- **不改写协议**：闸门不抛异常、只改写 `params` 的副本，出站错误码仍是既有的 `ONEBOT_NOT_CONNECTED` / `ONEBOT_TIMEOUT` / `ONEBOT_SEND_FAILED`，没有新增。日志只带 `{ action, rule }`，从不带消息正文。
+
 ### 3.6 预算就是安全控制
 
 花钱 = 出站调用 = 唯一可以被滥用的资源。所以预算器同时也是限流器。

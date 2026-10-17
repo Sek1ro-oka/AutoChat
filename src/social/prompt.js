@@ -34,11 +34,35 @@ export const SOCIAL_ADDENDUM = [
   '不要重复你刚才说过的话；不确定、无话可说、或插不上嘴时，只输出两个字：不回。',
 ].join('\n');
 
-export function buildSocialRequest({ memory, config, message, params, system }) {
-  // The current message is shown on its own line, so drop its ring copy.
-  const history = memory.ring(message.group)
-    .filter(entry => entry.id !== message.id)
-    .slice(-params.contextMessages);
+// Omission marker for the case where the ring holds more than one prompt can
+// carry. It is appended to the *system* message and never to the user `parts`:
+// the parts array is the rendered chat log, so a marker in there reads like
+// something a member said, and an agent that quotes it would post it verbatim
+// to the group (I-06 §7.1). The model only needs to know the log is a window.
+export const truncationNote = (kept, dropped) =>
+  `（更早的 ${dropped} 条群聊记录已省略，本轮只带上最近 ${kept} 条）`;
+
+// One record per prompt, and only when something actually fell off: a log line
+// on every message would be noise, and `kept + dropped` must equal the ring.
+function systemContent({ system, group, history, dropped, params, log }) {
+  const base = `${system}\n\n${SOCIAL_ADDENDUM}`;
+  if (dropped <= 0) return base;
+  log('social_context_truncated', {
+    group,
+    kept: history.length,
+    dropped,
+    contextMessages: params.contextMessages,
+  });
+  return `${base}\n\n${truncationNote(history.length, dropped)}`;
+}
+
+export function buildSocialRequest({ memory, config, message, params, system, log = () => {} }) {
+  // The current message is shown on its own line, so drop its ring copy *first*:
+  // a line that is rendered elsewhere was never withheld, and counting it as
+  // dropped would make every quiet prompt claim one omitted line.
+  const ring = memory.ring(message.group).filter(entry => entry.id !== message.id);
+  const history = ring.slice(-params.contextMessages);
+  const dropped = ring.length - history.length;
   const name = user => (user === config.botId ? '你' : memory.label(message.group, user));
   const parts = [
     '[群聊记录开始]',
@@ -54,7 +78,7 @@ export function buildSocialRequest({ memory, config, message, params, system }) 
   parts.push(`[当前这条消息] ${name(message.user)}：${escapeForPrompt(message.text, 200)}`);
   parts.push('请只输出你要发送的内容，或只输出「不回」。');
   return [
-    { role: 'system', content: `${system}\n\n${SOCIAL_ADDENDUM}` },
+    { role: 'system', content: systemContent({ system, group: message.group, history, dropped, params, log }) },
     { role: 'user', content: parts.join('\n') },
   ];
 }
@@ -62,8 +86,10 @@ export function buildSocialRequest({ memory, config, message, params, system }) 
 // The idle-initiated variant (Phase 6): nobody has spoken for a while, so there
 // is no "current message" to react to. The prompt asks the model to break the
 // silence instead. History and escaping rules are identical to buildSocialRequest.
-export function buildIdleRequest({ memory, config, group, params, system, idleMinutes }) {
-  const history = memory.ring(group).slice(-params.contextMessages);
+export function buildIdleRequest({ memory, config, group, params, system, idleMinutes, log = () => {} }) {
+  const ring = memory.ring(group);
+  const history = ring.slice(-params.contextMessages);
+  const dropped = ring.length - history.length;
   const name = user => (user === config.botId ? '你' : memory.label(group, user));
   const parts = [
     '[群聊记录开始]',
@@ -73,7 +99,7 @@ export function buildIdleRequest({ memory, config, group, params, system, idleMi
   parts.push(`群里已经安静了约 ${idleMinutes} 分钟。你想主动冒个泡说点什么，别让气氛冷下去。`);
   parts.push('请只输出你要发送的内容，或只输出「不回」。');
   return [
-    { role: 'system', content: `${system}\n\n${SOCIAL_ADDENDUM}` },
+    { role: 'system', content: systemContent({ system, group, history, dropped, params, log }) },
     { role: 'user', content: parts.join('\n') },
   ];
 }

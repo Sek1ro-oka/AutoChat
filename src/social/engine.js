@@ -17,6 +17,7 @@ import { parseSegments } from './quote.js';
 import { render } from './renderer.js';
 import { sampleUsage, socialRequestFor, speakFor, systemPromptFor } from './speech.js';
 import { ENERGY_BY_STATE, SIM_STATES, energyFor, requiredScore, transition } from './state.js';
+import { BURST_WINDOW_MS, PRIORITY, priorityOf, reasonOf, shouldUpgrade } from './priority.js';
 import { describeFor } from './view.js';
 import { IdleSpeech } from './idle.js';
 import { errorDetail } from '../logger.js';
@@ -51,6 +52,7 @@ export class Social extends IdleSpeech {
     this.memory = new GroupMemory({ store, ttlMs: config.socialMessageTtlMs, now: this.now });
     this.tails = new Map();          // group -> serialising promise
     this.decisions = new Map();      // group -> last decision (no message text)
+    this.burst = new Map();          // group -> { at, priority, reason } of the last utterance
     this.idleRunning = false;        // re-entrancy guard for the idle timer
   }
 
@@ -191,11 +193,13 @@ export class Social extends IdleSpeech {
 
     // An @ is an obligation, and the obligation is already being met by `Bot`.
     // Recording it as engagement keeps the state machine honest without a second
-    // answer.
+    // answer. It also takes the group's turn from now on, so the next couple of
+    // seconds belong to the answering path (A-04).
     if (scored.force) {
       const engaged = { state: 'active', lastSpokeAt: state.lastSpokeAt, energy: ENERGY_BY_STATE.active };
       this.store.saveSimState({ groupId: message.group, ...engaged, updated: now });
       this.record(message.group, { at: now, speak: false, reason: 'addressed_by_core', score: scored.score, need: null, reasons: scored.reasons });
+      this.burst.set(message.group, { at: now, priority: PRIORITY.addressed, reason: 'addressed' });
       return false;
     }
 
@@ -203,13 +207,43 @@ export class Social extends IdleSpeech {
     const need = requiredScore({ threshold: params.threshold, state: state.state, energy: state.energy });
     const passes = scored.score >= need;
     const reason = gate ?? (passes ? 'scored' : 'below_threshold');
-    this.record(message.group, { at: now, speak: !gate && passes, reason, score: scored.score, need, reasons: scored.reasons });
+    // A-04: the burst window gets a say only for a message that already clears
+    // the threshold and whose only obstacle is the cooldown — a strictly higher
+    // priority arriving inside the window preempts it. Every other gate (mute,
+    // switches, daily cap, budget) is an operator decision and is never
+    // overridden here; and a low score stays low however urgent it looks.
+    const eligible = passes && (!gate || gate === 'cooldown');
+    const verdict = this.arbitrate(message.group, scored.reasons, now, eligible);
+    this.record(message.group, { at: now, speak: verdict.speak, reason, score: scored.score, need, reasons: scored.reasons });
     this.store.saveSimState({
       groupId: message.group, state: state.state,
       lastSpokeAt: state.lastSpokeAt, energy: state.energy, updated: now,
     });
-    if (gate || !passes) { this.log('social_skipped'); return false; }
-    return this.speak(message, send, alive, state);
+    if (!verdict.speak) { this.log('social_skipped'); return false; }
+    const spoke = await this.speak(message, send, alive, state);
+    if (spoke) this.burst.set(message.group, { at: this.now(), priority: verdict.priority, reason: verdict.reason });
+    return spoke;
+  }
+
+  // --- arbitration (A-04) ---------------------------------------------------
+  // At most one utterance per group per BURST_WINDOW_MS, and inside that window
+  // only a strictly higher priority may take the slot: "你" "在吗" "？" a second
+  // apart is one thing to answer, not three. The window expires lazily by
+  // comparing timestamps instead of by a timer — there is no handle to clear,
+  // nothing fires after a test ends, and nothing survives a shutdown.
+  arbitrate(group, reasons, now, eligible) {
+    const priority = priorityOf(reasons, reason => this.log('social_priority_unknown', { reason: String(reason).slice(0, 32) }));
+    const reason = reasonOf(reasons, priority);
+    const last = this.burst.get(group);
+    if (last && now - last.at >= BURST_WINDOW_MS) this.burst.delete(group);
+    const kept = this.burst.get(group);
+    if (!eligible) return { speak: false, priority, reason };
+    if (!kept || shouldUpgrade(kept.priority, priority)) return { speak: true, priority, reason };
+    this.log('social_suppressed', {
+      group, keptReason: kept.reason, droppedReason: reason,
+      keptPriority: kept.priority, droppedPriority: priority,
+    });
+    return { speak: false, priority, reason };
   }
 
   // --- speech ---------------------------------------------------------------
@@ -229,7 +263,7 @@ export class Social extends IdleSpeech {
 
   request(message, params) {
     const deps = this.speech();
-    return socialRequestFor(deps.memory, deps.config, message, params, systemPromptFor(deps, message.group));
+    return socialRequestFor(deps.memory, deps.config, message, params, systemPromptFor(deps, message.group), deps.log);
   }
 
   sample(sessionKey, usage) { return sampleUsage(this.speech(), sessionKey, usage); }

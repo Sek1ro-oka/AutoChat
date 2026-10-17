@@ -63,6 +63,23 @@ BOT_NICKNAMES=                 # 逗号分隔的别名
 
 并且叠加「能量」（`energy`，0~1）：能量高于 0.5 会进一步降低门槛，且能量随空闲时间按 30 分钟半衰期衰减。
 
+### 突发窗口：同一波消息只回一次
+
+群里的「你」「在吗」「？」常常在一两秒内连着发，按条判分就会得到三次互相独立的结论。`src/social/priority.js` 给每条**已过门槛**的消息再算一个稳定的优先级，与分数分开——分数随风向和能量上下浮动，同一个分数在两天的含义并不一样，不能拿来排序：
+
+| 优先级 | 来源 |
+| --- | --- |
+| 4 `addressed` | 被 @ 或被点名 |
+| 3 `reply` | 回复了机器人的某条消息 |
+| 2 `name` / `question` | 文本里有机器人的名字，或是问句 |
+| 1 `others` / `base` | @ 了别人，或普通闲聊 |
+
+窗口 `BURST_WINDOW_MS = 2000` 是常量而非配置项：每群记一条「上一次开口的时刻」，2 秒内到达的新消息只有在**严格更高**优先级时才顶替上一条，否则丢弃并记一条 `social_suppressed`（带两侧的优先级与原因）。不排队、不做 aging：排队会让最坏情况变成「窗口 + 队列」的叠加等待，aging 则是把一条能一句话说清的规则调成没人能解释的参数。
+
+被 @ 的消息根本进不到这里（那是问答路径的活），但它会把窗口起点重置为此刻。窗口按时间戳惰性过期，不挂定时器：没有需要清理的句柄，测试也不必等真实的 2000 毫秒。
+
+它不覆盖任何别的闸门——静音、开关、每日上限、预算、以及没到门槛的消息照旧被拒。唯一被越过的是冷却：冷却最短 5 秒而窗口只有 2 秒，若不越过，这套机制在线上永远没有机会生效。
+
 ## 状态机
 
 每群一行 `sim_state`，四个状态：
@@ -122,6 +139,18 @@ BOT_NICKNAMES=                 # 逗号分隔的别名
 
 这套组装在 `src/social/prompt.js` 里，与「要不要说话」的判定逻辑（`engine.js`）分开：前者关心的是把一段不可信文本安全地渲染进提示词，后者关心规则、预算与时机，两者的失败模式不同。人格层与黑话表的拼接由 `withSlang()` 统一负责，问答路径与仿真路径共用同一份实现。
 
+### 截断留痕
+
+提示词只带最近 `contextMessages` 条群聊记录（默认 12），而环形缓冲记得更多。被裁掉的部分不再是无声无息：`dropped > 0` 时系统消息末尾会多一行
+
+```
+（更早的 8 条群聊记录已省略，本轮只带上最近 12 条）
+```
+
+这行只拼进 system 消息，**不进**给模型看的群聊记录本身——记录区是「谁说了什么」的渲染结果，标记混进去就成了某位群友的发言，模型完全可能照着学一遍再发到群里。同一时刻记一条 `social_context_truncated`（含群、`kept`、`dropped`、`contextMessages`），并且 `kept + dropped` 恒等于候选记录的总条数——当前这条消息单独占一行、不参与裁剪，也就不会被算成「省掉的」：没被带上的每一条都有着落。
+
+冷场冒泡走同一个函数，标记与日志一致；历史本来就没满时不加标记、也不记事件。
+
 ### 群聊黑话表（Phase 4）
 
 如果启用了黑话词库，**已确认**的词条会格式化成 `【群聊黑话表】` 追加在**人格提示词之后、行为附言之前**；私聊不带。这张表每次对话都重新读取，所以在控制台确认一个词之后，下一条群消息就会生效，无需重启。词条从哪来、谁批准、怎么转义，见 [群聊黑话词库](slang.md)。
@@ -163,7 +192,7 @@ BOT_NICKNAMES=                 # 逗号分隔的别名
 
 ## 日志事件
 
-`social_skipped`（判定为不发言）、`social_spoke`、`social_declined`（模型回「不回」）、`social_repeat`、`social_blocked`、`social_empty`、`social_budget_blocked`、`social_model_failed`、`social_send_failed`、`social_context_failed`、`social_persona_failed`、`social_params_changed`、`social_failed`（参与者内部异常，会被 runtime 隔离）。
+`social_skipped`（判定为不发言）、`social_suppressed`（突发窗口内被更高优先级顶替）、`social_context_truncated`（历史被裁掉，带 `kept` 与 `dropped`）、`social_priority_unknown`（打分给了一个未知原因，按最低档处理）、`social_spoke`、`social_declined`（模型回「不回」）、`social_repeat`、`social_blocked`、`social_empty`、`social_budget_blocked`、`social_model_failed`、`social_send_failed`、`social_context_failed`、`social_persona_failed`、`social_params_changed`、`social_failed`（参与者内部异常，会被 runtime 隔离）。
 
 日志里只有事件名，没有消息正文。
 
