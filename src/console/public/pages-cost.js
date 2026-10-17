@@ -153,7 +153,50 @@ const costCharges = (d) => {
   return table(['日期', '调用', '已花', '占用中的额度'], rows);
 };
 
-const pages_costBody = (d, charges) => {
+/* --- 多实例对照（T-035）---------------------------------------------------
+ * 这张卡只读：数据来自 /api/instances（hub 自己缓存 5 秒，core.js 再缓 5 秒）。
+ * 读不到的库一律 DASH —— 「没读到」不许写成 0，那会把缺库说成没花钱。
+ */
+const costInstanceRow = row => {
+  const [level, state] = instanceState(row);
+  return [
+    `<span class="mono">${esc(row.name)}</span>`,
+    dot(level) + esc(state),
+    instanceMoney(row, 'today'),
+    instanceMoney(row, 'week'),
+    instanceMoney(row, 'month'),
+    instanceNote(row) || DASH,
+  ];
+};
+
+// 合计行：全实例取 aggregate，单实例视角取那一行自己的三张卡（合计只累加 ok 行是 hub 的口径）。
+const costInstancesTotal = (data, rows) => {
+  const all = INSTANCE_SCOPE.name === 'all';
+  const cards = all ? (data && data.aggregate) || {} : (rows[0] && rows[0].cards) || {};
+  const money = key => instanceMoney({ ok: true, cards }, key);
+  return [
+    `<b>合计</b> ${badge(all ? '全实例' : '该实例', 'brand')}`,
+    DASH,
+    money('today'),
+    money('week'),
+    money('month'),
+    DASH,
+  ];
+};
+
+const costInstances = data => {
+  const rows = instanceRows(data);
+  const empty = INSTANCE_SCOPE.name === 'all' ? '这是唯一的一台' : '这个实例已经不在了';
+  const body = rows.length
+    ? table(['实例', '状态', '今日', '本周', '本月', '备注'], [...rows.map(costInstanceRow), costInstancesTotal(data, rows)])
+    : `<div class="empty">${empty}</div>`;
+  const head = INSTANCE_SCOPE.name === 'all'
+    ? ''
+    : alertBox('info', '现在只看一个实例', '切换器只筛这张表与「实例管理」卡；其它页面仍是本实例的数据。');
+  return card('多实例对照', '合计只累加能读到的库；切换器只筛本表与「实例管理」卡', head + body);
+};
+
+const pages_costBody = (d, charges, instances = '') => {
   const totals = d.totals || {};
   const pricing = d.pricing || {};
   const sessions = Array.isArray(d.sessions) ? d.sessions : [];
@@ -196,7 +239,8 @@ const pages_costBody = (d, charges) => {
       ['缓存命中', pricing.cacheHitPrice === undefined ? DASH : `${cny(pricing.cacheHitPrice)} / 百万 token`],
       ['谷时折扣', pricing.offPeakRatio === undefined ? DASH : `${(Number(pricing.offPeakRatio) * 10).toFixed(1)} 折`],
       ['统计区间', d.range ? `${esc(String(d.range))}（${time(d.since)} 起）` : DASH],
-    ]));
+    ]))
+    + instances;
 };
 
 pages.cost = async () => {
@@ -216,7 +260,14 @@ pages.cost = async () => {
   } catch (error) {
     charges = { days: [] };
   }
-  const html = head + pages_costBody(d, charges);
+  // 实例列表读不到不该把整页拖垮：退一条横幅，本实例的账照常画。
+  let instances = '';
+  try {
+    instances = costInstances(await loadInstances());
+  } catch (error) {
+    instances = alertBox('warn', '读不到实例列表', reason(error));
+  }
+  const html = head + pages_costBody(d, charges, instances);
   setTimeout(costPaint, 0);
   return html;
 };

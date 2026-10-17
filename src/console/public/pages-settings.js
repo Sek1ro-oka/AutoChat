@@ -105,6 +105,36 @@ const settingSections = d => {
     + (orphans.length ? card('其他', `${num(orphans.length)} 项`, orphans.map(settingRow).join('')) : '');
 };
 
+/* --- 实例管理（T-035）-----------------------------------------------------
+ * 这一版的增删仍走命令行：控制台只读，不建、不删，也不替用户启动别的实例。
+ * 「端口未开」与「缺库」都如实说 —— 端口只显示真的在监听的那个数字。
+ */
+const settingInstanceRow = row => {
+  const [level, state] = instanceState(row);
+  return [
+    `<span class="mono">${esc(row.name)}</span>`,
+    dot(level) + esc(state),
+    row.pid ? esc(String(row.pid)) : DASH,
+    row.consoleEnabled && row.consolePort ? esc(String(row.consolePort)) : '端口未开',
+    row.database ? badge('就绪', 'ok') : badge('缺库', 'warn'),
+    instanceMoney(row, 'today'),
+    row.error === 'DATABASE_MISSING' ? '这个实例还没启动过，没有库文件' : instanceNote(row) || DASH,
+  ];
+};
+
+const SETTING_INSTANCE_HINT = '新增、检查与渲染实例仍走命令行：<code>node scripts/instances.js add|list|check|render</code>；控制台只读不动这些文件。';
+
+const settingInstances = data => {
+  const rows = instanceRows(data);
+  if (!rows.length) {
+    return card('实例管理', '本机只跑着这一台', '<div class="empty">这是唯一的一台</div>' +
+      `<div class="fhint">声明 <code>instances/&lt;名字&gt;.env</code> 就能多开一台，见 <code>docs/console.md</code>。</div>`);
+  }
+  return card('实例管理', `全部 ${num(instanceTotal(data))} 台；只读，增删走命令行`,
+    table(['实例', '状态', 'PID', '控制台端口', '数据库', '今日花费', '备注'], rows.map(settingInstanceRow)) +
+    `<div class="fhint">${SETTING_INSTANCE_HINT}</div>`);
+};
+
 pages.settings = async () => {
   let body;
   try {
@@ -112,13 +142,21 @@ pages.settings = async () => {
   } catch (error) {
     body = alertBox('err', '读不到设置', reason(error));
   }
+  // 实例列表读不到只影响这一张卡，设置表单照常给。
+  let instances;
+  try {
+    instances = settingInstances(await loadInstances());
+  } catch (error) {
+    instances = card('实例管理', '', alertBox('warn', '读不到实例列表', reason(error)));
+  }
   // 页面 HTML 是 app.js 在 Promise 结算之后才写进 #main 的，所以登录面板的轮询要等
   // 一拍再启动：早一步的话 #login-text 还不存在，第一轮会被当成「面板已经关了」。
   setTimeout(loginStart, 0);
   return pageHead('设置', '运行时可改的参数都存在本地库里：覆盖只影响这一份配置，随时可以恢复成 .env 的默认值。')
     + settingNotice()
     + loginCard()
-    + body;
+    + body
+    + instances;
 };
 
 action('settingSave', async (button) => {

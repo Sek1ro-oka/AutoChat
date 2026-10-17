@@ -67,6 +67,18 @@ code { font-size:12.5px; color:var(--brand-dark); background:var(--brand-soft); 
 /* 顶栏胶囊：状态色也只落在 tint 上，深色字压 tint 仍 ≥4.5:1（琥珀 4.68 / 翠绿 4.92） */
 .chip-ok { background:var(--ok-tint); border-color:var(--ok-line); color:var(--ok); }
 .chip-warn { background:var(--warn-tint); border-color:var(--warn-line); color:var(--warn); }
+/* ---------- 多实例切换器（T-035）---------- */
+.instsw { position:relative; flex:none; }
+.instsw-btn { display:inline-flex; align-items:center; gap:8px; padding:5px 11px 5px 10px; border:1px solid var(--line-ctl); border-radius:999px; background:var(--panel); color:var(--fg); font:inherit; font-size:12.8px; font-weight:600; cursor:pointer; }
+.instsw-btn:hover { background:var(--panel-2); color:var(--brand-ink); }
+.instsw-btn:focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
+.instsw-menu { position:absolute; top:calc(100% + 8px); left:0; z-index:60; min-width:272px; max-width:min(92vw,360px); max-height:min(70vh,420px); overflow:auto; padding:6px; border:1px solid var(--line-ctl); border-radius:var(--r-sm); background:var(--panel); box-shadow:var(--shadow); }
+.instsw-item { display:flex; align-items:center; gap:9px; width:100%; min-height:34px; padding:8px 9px; border:0; border-radius:8px; background:transparent; color:var(--fg); font:inherit; font-size:13px; text-align:left; cursor:pointer; }
+.instsw-item:hover { background:var(--panel-2); }
+.instsw-item.on { background:var(--info-tint); color:var(--info); font-weight:600; }
+.instsw-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.instsw-meta { color:var(--muted); font-size:11.5px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.instsw-hint { display:block; margin-top:4px; padding:7px 9px 3px; border-top:1px dashed var(--line); color:var(--muted); font-size:11.5px; line-height:1.45; }
 
 /* ---------- 布局 ---------- */
 .layout { display:grid; grid-template-columns:220px minmax(0,1fr); gap:20px; padding:18px 20px 8px; align-items:start; }

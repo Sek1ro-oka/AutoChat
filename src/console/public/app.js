@@ -67,6 +67,60 @@ const paintWidths = root => {
   return root;
 };
 
+/* --- 顶栏实例切换器（T-035）-----------------------------------------------
+ * 它只改「计费看板」与「系统设置」两张卡的筛选条件，别处不生效（理由写在
+ * core.js 的 INSTANCE_SCOPE_NOTE，菜单底部原样印给用户）。展开状态放模块作用域：
+ * 每次重绘都会重建按钮，DOM 上的 class 存不住。
+ */
+const CARET = '<svg class="caret" viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" focusable="false"><path d="M2.5 4.5 6 8l3.5-3.5"/></svg>';
+
+let instswOpen = false;
+
+const instswItem = (value, name, meta, level, on) =>
+  `<button type="button" class="instsw-item${on ? ' on' : ''}" role="option" aria-selected="${on}" data-act="instance" data-value="${esc(value)}">` +
+  `${dot(level)}<span class="instsw-name">${esc(name)}</span><span class="instsw-meta">${esc(meta)}</span></button>`;
+
+const instswMenu = data => {
+  const rows = Array.isArray(data && data.instances) ? data.instances : [];
+  const running = rows.filter(row => row && row.running).length;
+  const items = [instswItem('all', instanceLabel(data), '聚合', running ? 'ok' : 'off', INSTANCE_SCOPE.name === 'all')];
+  for (const row of rows) {
+    const [level, state] = instanceState(row);
+    items.push(instswItem(row.name, row.name, row.running && row.pid ? `PID ${num(row.pid)}` : state,
+      level, INSTANCE_SCOPE.name === row.name));
+  }
+  return items.join('') + `<div class="instsw-hint">${esc(INSTANCE_SCOPE_NOTE)}</div>`;
+};
+
+// 按钮标题跟着视角走：全实例时是「全部实例（N）」，选中某个实例时就是它的名字。
+const instswTitle = (data, failure) => {
+  if (failure) return DASH;
+  return INSTANCE_SCOPE.name === 'all' ? instanceLabel(data) : INSTANCE_SCOPE.name;
+};
+
+// 读不到列表时按钮显示 DASH，点开只有一行原因 —— 不许静默失败，也不许编一台出来。
+const instswHtml = (data, failure) => {
+  const body = failure ? `<div class="instsw-hint">读不到实例列表：${esc(failure)}</div>` : instswMenu(data);
+  return `<button type="button" class="instsw-btn" aria-haspopup="true" aria-expanded="${instswOpen}" aria-controls="instsw-menu" data-act="instanceMenu">` +
+    `${dot(failure ? 'off' : 'ok')}<span id="instsw-label">${esc(instswTitle(data, failure))}</span>${CARET}</button>` +
+    `<div class="instsw-menu${instswOpen ? '' : ' hide'}" id="instsw-menu" role="listbox" aria-label="切换实例视角">${body}</div>`;
+};
+
+const renderInstances = async () => {
+  const box = $('#instsw');
+  if (!box) return;
+  try {
+    box.innerHTML = instswHtml(await loadInstances(), '');
+  } catch (error) {
+    box.innerHTML = instswHtml(null, reason(error));
+  }
+};
+
+const closeInstances = () => {
+  instswOpen = false;
+  renderInstances();
+};
+
 const render = async () => {
   const main = $('#main');
   if (!main) return;
@@ -78,6 +132,8 @@ const render = async () => {
       `${alertBox('err', '这个页面没能加载出来', reason(error))}</div>`;
   }
   paintWidths(main);
+  // 切换器跟着页面一起刷新：读的是同一份 5 秒缓存，不会多打接口。
+  renderInstances();
 };
 
 const show = async name => {
@@ -120,6 +176,18 @@ REPAINT.now = render;
 action('theme', toggleTheme);
 action('refresh', () => render());
 action('page', element => show(element.dataset.page));
+action('instanceMenu', () => {
+  instswOpen = !instswOpen;
+  return renderInstances();
+});
+action('instance', element => {
+  const value = String(element.dataset.value || 'all');
+  INSTANCE_SCOPE.name = value === 'all' ? 'all' : value;
+  instswOpen = false;
+  renderInstances();
+  // 换视角要立刻重画当前页：两张受影响的卡片跟着换筛选，其它页面重画出来是原样。
+  return render();
+});
 
 const closestAct = target => {
   let node = target;
@@ -146,6 +214,8 @@ const dispatch = (target, kind) => {
 if (typeof document.addEventListener === 'function') {
   document.addEventListener('click', event => {
     const target = event.target;
+    // 点空白收起切换器：事件从最外层这一个监听器走，菜单里的项不算「外面」。
+    if (instswOpen && !(target && target.closest && target.closest('#instsw'))) closeInstances();
     const nav = target && target.closest ? target.closest('[data-page]') : null;
     if (nav) {
       event.preventDefault();
@@ -162,6 +232,7 @@ if (typeof document.addEventListener === 'function') {
 const boot = async () => {
   const main = $('#main');
   if (!token) {
+    setHtml('#instsw', instswHtml(null, '缺少访问令牌'));
     if (main) {
       main.innerHTML = `<div class="page active">${pageHead('缺少访问令牌', '控制台的所有数据接口都要求令牌。')}` +
         `${alertBox('warn', '怎么拿到带令牌的地址',

@@ -112,6 +112,13 @@ const CODE_TEXT = {
   STICKER_PARAM_INVALID: '表情包参数不合法',
   STICKER_UNAVAILABLE: '表情包功能不可用',
   STICKER_UPLOAD_INVALID: '上传内容不是可用的图片',
+  // 多实例聚合（T-035）：这些码是 hub 去读别的实例的配置文件与数据库时回来的。
+  DATABASE_MISSING: '这个实例还没有数据库（没启动过）',
+  INSTANCE_MISSING: 'instances/ 下找不到这个配置文件',
+  INSTANCE_UNREADABLE: '配置文件读不出来（权限或编码）',
+  INSTANCE_INVALID: '配置文件解析不了',
+  INVALID_INSTANCE_NAME: '实例名不合规：只能小写字母、数字、-、_',
+  HUB_UNAVAILABLE: '这个控制台没有装多实例聚合',
 };
 
 const explain = code => CODE_TEXT[String(code)] || String(code);
@@ -276,3 +283,61 @@ const readNumbers = entries => {
 
 // 校验失败的标准回复：给一条「没保存任何改动」的横幅，并说清是哪几项。
 const refuse = (anchor, missing) => flash(anchor, `${missing.join('；')}。本次没有保存任何改动。`, 'warn');
+
+/* --- 多实例（T-035）-------------------------------------------------------
+ * `/api/instances` 是本机唯一一个要看**别的**实例的接口：hub 那边已经缓存 5 秒
+ * （src/console/hub.js 的 TTL_MS），页面这边再缓一层，否则计费看板每 3 秒轮询一次
+ * 就会把 N 个库读穿。缓存也缓存失败：接口坏掉时同样 5 秒只试一次，不跟着轮询放大。
+ *
+ * 视角只筛「计费看板」与「系统设置」两张卡。别的实例各有自己的 CONSOLE_TOKEN，
+ * 本版没有跨实例代理，所以其它页面画的仍然是本实例的数据 —— 这句话必须写在
+ * 切换器旁边，不然「切了实例却什么都没变」看起来像坏了。
+ */
+const INSTANCE_TTL_MS = 5000;
+const INSTANCES = { at: 0, value: null, error: '', pending: null };
+const INSTANCE_SCOPE = { name: 'all' };
+const INSTANCE_SCOPE_NOTE = '只筛「计费看板」与「系统设置」两张卡；其它页面仍是本实例的数据（别的实例各有自己的令牌，本版不代持）。';
+
+const loadInstances = async () => {
+  if (INSTANCES.at && Date.now() - INSTANCES.at < INSTANCE_TTL_MS) {
+    if (INSTANCES.error) throw new Error(INSTANCES.error);
+    return INSTANCES.value;
+  }
+  if (!INSTANCES.pending) {
+    INSTANCES.pending = api('/api/instances').then(data => {
+      INSTANCES.at = Date.now();
+      INSTANCES.value = data;
+      INSTANCES.error = '';
+      return data;
+    }, error => {
+      INSTANCES.at = Date.now();
+      INSTANCES.value = null;
+      INSTANCES.error = reason(error);
+      throw error;
+    }).finally(() => { INSTANCES.pending = null; });
+  }
+  return INSTANCES.pending;
+};
+
+// 一台都没有时仍然说「1」：这台控制台自己就算一台，界面上不画 0 台。
+const instanceTotal = data => Math.max(1, Number(data && data.counts && data.counts.total) || 0);
+const instanceLabel = data => `全部实例（${instanceTotal(data)}）`;
+const instanceRows = data => {
+  const rows = Array.isArray(data && data.instances) ? data.instances : [];
+  return INSTANCE_SCOPE.name === 'all' ? rows : rows.filter(row => row && row.name === INSTANCE_SCOPE.name);
+};
+const instanceState = row => (row && row.running ? ['ok', '运行中'] : ['off', '未启动']);
+
+// 金额：读不到就一律 DASH。0 和「读不到」是两件事，写成 0 会把缺库说成没花钱。
+const instanceMoney = (row, key) => {
+  const card = row && row.ok ? (row.cards && row.cards[key]) || {} : null;
+  return card ? `${cny(card.totalMicro)}（${num(card.calls)} 次）` : DASH;
+};
+
+const INSTANCE_FALLBACK_PRICE = '价格按本机配置估算';
+const instanceNote = row => {
+  const notes = [];
+  if (row && row.error) notes.push(explain(row.error));
+  if (row && Array.isArray(row.warnings) && row.warnings.includes(INSTANCE_FALLBACK_PRICE)) notes.push(INSTANCE_FALLBACK_PRICE);
+  return notes.filter(Boolean).join('；');
+};
