@@ -38,9 +38,9 @@ AI 回复可能不准确或包含不恰当表达；默认角色带调侃和毒�
 
 ## 一键部署（Windows x64）
 
-下载 [AutoChat v0.1.13 Windows 部署包](downloads/AutoChat-v0.1.13-windows.zip)，完整解压后双击 **deploy.cmd**。联网下载并校验 Node.js／NapCat，首次引导填写账号和密钥，然后后台启动。先安装 [QQ NT](https://im.qq.com/)，首次用机器人账号扫码登录；详细步骤见 [部署手册](docs/local-setup.md)。这是联网部署包，不含个人密钥、账号会话或聊天数据。
+从 [Releases](https://github.com/Sek1ro-oka/AutoChat/releases) 下载 `AutoChat-v0.1.13-windows.zip`（若该版本尚未发布，按本文末尾的 `scripts/package.ps1` 自行生成），完整解压后双击 **deploy.cmd**。联网下载并校验 Node.js／NapCat，首次引导填写账号和密钥，然后后台启动。先安装 [QQ NT](https://im.qq.com/)，首次用机器人账号扫码登录；详细步骤见 [部署手册](docs/local-setup.md)。这是联网部署包，不含个人密钥、账号会话或聊天数据。
 
-修改 `.env` 或人设后双击 **restart.cmd**，停止机器人双击 **stop.cmd**。每天 1 元为所有用户共用预算。压缩包校验值见 [SHA-256](downloads/AutoChat-v0.1.13-windows.zip.sha256)。
+修改 `.env` 或人设后双击 **restart.cmd**，停止机器人双击 **stop.cmd**。每天 1 元为所有用户共用预算。压缩包校验值随包提供（`AutoChat-v0.1.13-windows.zip.sha256`）；构建产物不进仓库，所以这里不再放仓库内链接。
 
 电脑重启后双击 **start.cmd**，同时启动NapCat与AutoChat并检查QQ登录；需要扫码时打开二维码，确认后自动重连。已有进程不会重复启动，首次安装仍使用 **deploy.cmd**。
 

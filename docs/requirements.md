@@ -107,7 +107,7 @@
 | 图片理解 | `src/vision.js`（`loadImages`、`MAX_IMAGES`、`IMAGE_TOKEN_RESERVE`），由 `src/bot.js` 的 `vision` 导入接入 | [配置项总表](configuration.md) 的「图片识别」一节、根 `README.md` 的功能列表 |
 | 联网搜索 | `src/search.js`（`searchQuery`、`autoSearchQuery`），由 `src/bot.js` 与 `src/model.js` 的搜索分支接入 | [配置项总表](configuration.md) 的「其他常用配置」一节、[Web 控制台](console.md)、根 `README.md` 的功能列表 |
 | 无需 @ 的群回复 | `src/bot.js` 里 `config.groupKeywordWithoutAt && matchesInputRule(text, config)`、`src/config.js` 的 `GROUP_KEYWORD_WITHOUT_AT` 校验、`src/runtime-config.js` 的字段 `groupKeywordWithoutAt`（控制台「免 @ 关键词触发」）；仿真侧的主动发言见 `src/main.js` 的 `social.idleTick` → `src/social/idle.js` 的 `IdleSpeech` | [拟人化群友](simulation.md)、[Web 控制台](console.md) |
-| 自建可视化管理后台 | `src/console/server.js` 与 `src/console/public/**`（只绑 `127.0.0.1`、令牌鉴权、写接口额外要求请求头令牌 + 回环 Origin；前端九个页签与 `ASSETS` 白名单见控制台文档） | [Web 控制台](console.md)、根 `README.md` 的控制台一节 |
+| 自建可视化管理后台 | `src/console/server.js` 与 `src/console/public/**`（只绑 `127.0.0.1`、令牌鉴权、写接口额外要求请求头令牌 + 回环 Origin；前端十个页签与 `ASSETS` 白名单见控制台文档） | [Web 控制台](console.md)、根 `README.md` 的控制台一节 |
 
 上表的符号名按 **2026-10-17** 的代码核对。`docs/` 里的正文不再写源码行号（见 [文档索引](README.md) 的硬规矩第 3 条）；根 `README.md` 不在本目录的版式规矩内，故只写「功能列表」这类位置名，也不写行号。
 
