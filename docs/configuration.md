@@ -68,7 +68,7 @@ MODEL_ALT_SUPPORTS_SEARCH=false
 MODEL_ALT_SEND_THINKING=false
 ```
 
-以上是字段说明，示例中文占位值必须换成有效配置。接口需兼容 `/chat/completions`，`BASE_URL` 填接口根地址（通常带 `/v1`），不填写完整 `/chat/completions` 地址。仅支持无凭据、无查询参数的HTTPS地址；不同服务商API Key分别保存，不能在私聊命令里填写密钥、URL或任意模型名。额外配置需要独立核验人民币计价，原币价格需自行换算并保守填写；不要沿用DeepSeek价格猜测其他模型费用。字段不完整时配置校验失败，不会停掉原有服务。
+以上是字段说明，示例中文占位值必须换成有效配置。接口需兼容 `/chat/completions`，`BASE_URL` 填接口根地址（通常带 `/v1`），不填写完整 `/chat/completions` 地址。仅支持无凭据、无查询参数的HTTPS地址；`MODEL_BASE_URL` 与各 `MODEL_*_BASE_URL` 额外接受 `http`，但只限本机回环主机名 `127.0.0.1`、`localhost`、`[::1]`（端口任意，用于指向本机反向代理网关），其它 `http` 地址仍按配置错误拒绝；不同服务商API Key分别保存，不能在私聊命令里填写密钥、URL或任意模型名。额外配置需要独立核验人民币计价，原币价格需自行换算并保守填写；不要沿用DeepSeek价格猜测其他模型费用。字段不完整时配置校验失败，不会停掉原有服务。
 
 改好 `.env` 后双击 `restart.cmd`，由 `ADMIN_QQ` 私聊：
 

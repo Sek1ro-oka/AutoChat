@@ -35,8 +35,10 @@ export function loadConfig(env = process.env) {
     throw new Error('ONEBOT_WS_URL 必须为无凭据、无查询参数的本机回环 ws 地址');
   }
   const baseUrl = new URL(env.MODEL_BASE_URL || 'https://api.deepseek.com');
-  if (baseUrl.protocol !== 'https:' || baseUrl.username || baseUrl.password || baseUrl.search || baseUrl.hash) {
-    throw new Error('MODEL_BASE_URL 必须为无凭据的 HTTPS 地址');
+  const loopbackHost = ['127.0.0.1', 'localhost', '[::1]'].includes(baseUrl.hostname);
+  if (baseUrl.username || baseUrl.password || baseUrl.search || baseUrl.hash
+      || (baseUrl.protocol !== 'https:' && !(baseUrl.protocol === 'http:' && loopbackHost))) {
+    throw new Error('MODEL_BASE_URL 必须为无凭据的 HTTPS 地址（本机回环 127.0.0.1/localhost/[::1] 可用 http）');
   }
   const priceDate = required('PRICE_VERIFIED_DATE');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(priceDate) || Number.isNaN(Date.parse(priceDate))) {

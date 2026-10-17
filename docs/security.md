@@ -99,7 +99,7 @@
 | 目标 | 约束 |
 |---|---|
 | 本机 NapCat（WebSocket） | §3.1：`ws:` + 主机名白名单，配置层拦截。 |
-| 模型 API（HTTPS） | 地址来自 `MODEL_BASE_URL` 等配置项；带 `Authorization` 请求头；超时受控。 |
+| 模型 API（HTTPS） | 地址来自 `MODEL_BASE_URL` 等配置项；带 `Authorization` 请求头；超时受控。`http` 仅放行本机回环主机名 `127.0.0.1`、`localhost`、`[::1]`（端口任意），供本机反向代理网关使用；凭据、查询参数、片段仍一律拒绝，其它明文地址在配置层拦截。 |
 | 图片（读图） | `src/vision.js` 的 `imageUrl()`：必须 `https:`、端口为 443 或缺省、不带用户名密码，主机名必须是 `qpic.cn`、`*.qpic.cn` 或 `multimedia.nt.qq.com.cn`。**不做本地路径、不做任意 URL、不做文件上传、不落地持久化。** |
 | 图片重定向 | `redirect: 'manual'`，然后在 `src/vision.js` 的 `loadImages()` 里把 `Location` 解析出来后**重新过一遍同一套校验**，再决定要不要跟。跟到一半才出白名单的情况不存在。 |
 | 搜索 | 只解析返回结果里 `http:`/`https:` 的 URL 作为**来源展示**；URL 长度上限 500，去重，标题截断到 80 字符并去掉换行。抓取回来的页面文本按不可信输入处理（§3.3）。 |

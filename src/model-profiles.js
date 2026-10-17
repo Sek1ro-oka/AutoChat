@@ -29,7 +29,9 @@ export function loadModelProfiles(env, legacy) {
     };
     let url;
     try { url = new URL(required('BASE_URL')); } catch { throw new Error(`${prefix}BASE_URL 必须是有效HTTPS地址`); }
-    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) throw new Error(`${prefix}BASE_URL 必须是无凭据的HTTPS地址`);
+    const loopbackHost = ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+    if (url.username || url.password || url.search || url.hash
+      || (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopbackHost))) throw new Error(`${prefix}BASE_URL 必须是无凭据的 HTTPS 地址（本机回环 127.0.0.1/localhost/[::1] 可用 http）`);
     const model = required('NAME');
     if (!/^[a-zA-Z0-9][\w./:@+-]{0,119}$/.test(model)) throw new Error(`${prefix}NAME 格式不正确`);
     const priceDate = required('PRICE_VERIFIED_DATE');
