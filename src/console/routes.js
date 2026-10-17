@@ -5,7 +5,7 @@ import {
   buildSummary, buildSessions, buildCharges, buildConfig, buildSettings, buildInstances,
   buildQzonePosts, buildCost, buildCostTurns,
   buildPersonas, buildPersonaFile, buildSocial, buildGroups, buildSlang, buildSlangEntry,
-  buildStickers, buildStickerEntry, applySetting, deleteQzonePost, applyGroupPatch,
+  buildStickers, buildStickerEntry, applySetting, deleteQzonePost, applyGroupPatch, resetAll,
 } from './api.js';
 import { readLogs } from './logs.js';
 
@@ -66,6 +66,9 @@ export function createRoutes({
       return { active: target.setActive(body?.name ?? ''), ...buildPersonas({ personas }) };
     },
     '/api/settings': (url, body) => applySetting({ config, store, name: body?.name, value: body?.value }),
+    // The danger zone: configuration, run state and learned data back to first run.
+    // Persona cards (`active_persona` / `group_persona:*`) and `.env` are untouched.
+    '/api/config/reset': () => resetAll({ store }),
     // Deleting a post is a protocol action: `delete_qzone_msg` first, row second.
     '/api/qzone/delete': (url, body) => deleteQzonePost({ config, store, transport, id: body?.id }),
     '/api/social/config': (url, body) => requireSocial().setParams(body ?? {}),

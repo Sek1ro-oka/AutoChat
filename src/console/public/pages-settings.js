@@ -156,7 +156,9 @@ pages.settings = async () => {
     + settingNotice()
     + loginCard()
     + body
-    + instances;
+    + instances
+    // 危险区（pages-settings-reset.js）挂在页尾；typeof 兜底给只加载了本文件的测试桩，真实页面由 index.html 先加载那个脚本。
+    + (typeof resetCard === 'function' ? resetCard() : '');
 };
 
 action('settingSave', async (button) => {

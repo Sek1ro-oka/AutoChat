@@ -360,6 +360,7 @@ input[type=checkbox] { width:16px; height:16px; accent-color:var(--brand-ink); }
 .btn.is-armed { font-weight:700; box-shadow:0 0 0 3px var(--focus-halo), 0 0 0 1px var(--focus); }
 .btn[disabled]:hover { border-color:var(--line-ctl); background:var(--panel); }
 .btn-danger[disabled]:hover { border-color:var(--err); background:var(--err-tint); }
+/* 危险操作的确认框（一键重置）：原生 <dialog>，UA 已经居中并带 backdrop，这里只补卡片外观；两栏复用 .grid，窄屏自动堆成一列 */ dialog.dlg { max-width:560px; width:calc(100% - 40px); padding:16px 20px; border:1px solid var(--line); border-radius:var(--r); background:var(--panel); color:var(--fg); } dialog.dlg::backdrop { background:rgba(27,34,51,.42); } dialog.dlg .grid { grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); }
 
 /* ---------- 分类强调（T-022 批次 B）----------
    概览只用四档分类：蓝=配置与控制、紫=运行与服务、琥珀=钱与风险、青=数据明细。

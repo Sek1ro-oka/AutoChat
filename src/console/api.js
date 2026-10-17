@@ -22,3 +22,5 @@ export { buildQzonePosts, deleteQzonePost } from './api-qzone.js';
 export {
   EXIT_RESTART, EXIT_STOP, buildService, requestServiceAction, createServiceApi,
 } from './api-service.js';
+
+export { resetAll } from './reset.js';

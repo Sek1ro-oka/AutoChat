@@ -74,7 +74,7 @@ AutoChat 控制台：http://127.0.0.1:3200/?token=xxxxxxxx
 | 素材库（`assets`） | 原「黑话」与「表情包」两页合并，页内用子页切换。表情包：开关、自动收藏与阈值、上传、图片列表（含缩略图）、逐张确认／拒绝／编辑／删除、注入预览；黑话：开关、已确认与待确认统计、按群抽取、导出／恢复备份、逐条详情（含记录原句）与生效群、注入预览 | 上述全部：黑话与表情包的开关、审核、文本与生效群、上传 |
 | 计费看板（`cost`） | 区间合计、平均每轮、缓存命中、谷时花费四个指标；区间切换（24h／3d／7d／30d）；多实例对照表（实例、状态、今日／本周／本月、备注，末行合计只累加读得到的库）；每日预算占用；按会话表；逐轮下钻；最近的调用（含峰时／谷时标记）；计价规则 | 无（只读账本） |
 | 日志与健康（`logs`） | 最近事件（120／300／1000 三档，可按事件名筛选）；每行只有时间与事件名 | 无 |
-| 系统设置（`settings`） | 运行时字段按分组排列：布尔开关、枚举、数字／整数，带当前值、`.env` 默认值与「已覆盖」标记；另有「扫码登录」卡片：二维码图片、状态一行、刷新按钮，NapCat 的 WebUI 读不到时只显示原因；页尾「实例管理」卡：每台实例的状态、PID、控制台端口、数据库与今日花费（只读，底部一行给命令行指路） | 全部非启动期字段；空值＝恢复 `.env` 默认，改动立即生效；扫码登录的「刷新二维码」（`POST /api/login/qr`）。密钥、令牌、端口、WS 地址等启动期参数不在这里；实例的增删也不在这里（走命令行） |
+| 系统设置（`settings`） | 运行时字段按分组排列：布尔开关、枚举、数字／整数，带当前值、`.env` 默认值与「已覆盖」标记；另有「扫码登录」卡片：二维码图片、状态一行、刷新按钮，NapCat 的 WebUI 读不到时只显示原因；页尾「实例管理」卡：每台实例的状态、PID、控制台端口、数据库与今日花费（只读，底部一行给命令行指路）；最后一张是「危险区」卡：一键重置配置（见下） | 全部非启动期字段；空值＝恢复 `.env` 默认，改动立即生效；扫码登录的「刷新二维码」（`POST /api/login/qr`）；危险区的「一键重置配置」（`POST /api/config/reset`，二次确认，不可撤销）。密钥、令牌、端口、WS 地址等启动期参数不在这里；实例的增删也不在这里（走命令行） |
 
 **轮询规则**（`src/console/public/app.js` 的 `POLLED`）：
 
@@ -83,6 +83,16 @@ AutoChat 控制台：http://127.0.0.1:3200/?token=xxxxxxxx
 - **唯一的例外是系统设置页的「扫码登录」卡片**：它自己每 3 秒拉一次 `GET /api/login/status`（`src/console/public/pages-settings.js` 的 `LOGIN_POLL_MS`），只在卡片存在且页面没被隐藏（`document.hidden`）时跑。它刻意不借 `POLLED`——那一页有表单，整体重绘会冲掉输入，卡片只更新自己那一块。二维码 `<img>` 指向同源的 `/api/login/qr.png?token=…`（`<img>` 带不了请求头），同一张码不重复下载。
 - 轮询只看当前页；**没有**「切到后台标签页就暂停」的逻辑，后台标签页同样每 3 秒请求一次。
 - 主题选择存在 localStorage（键 `autochat.console.theme`），切换的是 `<html data-theme>`，刷新后保持。
+
+### 设置页底部的一键重置
+
+设置页最后一张卡是危险区：一个「一键重置配置」按钮，点了先弹原生 `<dialog>` 确认框（左栏「会被清空」、右栏「会保留」），确认之后才 `POST /api/config/reset`（服务端在 `src/console/reset.js`）。
+
+- **清什么**：`settings` 表里所有 `cfg:` 行，`social_`／`group_social_`／`slang_`／`group_slang_`／`sticker_`／`qzone:`／`search_count:`／`overrun:`／`social_count:`／`social_mute:`／`poke_count:`／`anti_spam_cooldown:` 这些前缀的行，加上 `enabled`、`enabled_reason`、`groupEnabled`、`groupEnabled_reason`、`active_model` 五个精确键；`slang`、`slang_groups`、`stickers` 三张表清空。落到人话就是：预算、模型档位、白名单、防刷屏、戳一戳、空间说说的参数，`/停止` 写下的熔断原因，黑话抽取进度，以及今日的搜索／仿真／戳一戳计数。
+- **留什么**：`active_persona`、`group_persona:<群>` 与 `personas` 表（人格卡），以及 `.env` 里的任何东西（API Key、端口、令牌、WebUI 配置）。`sessions`／`messages`／`charges`／`qzone_posts`／`token_samples`／`counters`／`events`／`groups` 也一律不动——那些是历史与账本，不是配置。所以重置后不需要重新登录，也不需要重新挑人格。
+- **不可撤销**：没有备份、没有撤销按钮，也不写「重置前快照」。改过的值要重新在设置页填一遍。
+- **表情的图片文件不删**：重置只清 `stickers` 表里的行，`data/stickers/` 下的图片留在磁盘上（`POST /api/stickers/delete` 才会删文件）。接口返回的 `stickers` 是「清掉的行数」，不是「删掉的图片数」。
+- **一个事务**：所有删除都在 `store.transaction()` 里，中途失败整体回滚，不会留下「参数清了、词库还在」的半截状态；`store.bump()` 自己开事务，所以这里不调用它。
 
 ## 多实例（实例切换器）
 
@@ -95,7 +105,7 @@ AutoChat 控制台：http://127.0.0.1:3200/?token=xxxxxxxx
 
 ## 静态资源
 
-外壳（`src/console/public/index.html`）只有顶栏、侧边导航、`<main>` 与提示条；样式全在 `console.css`；脚本拆成 `core.js`（令牌、请求、格式化、错误码文案、页面注册表、事件派发）+ 每页一个脚本 + 素材库的两个子页脚本 + `app.js`（导航与轮询）。当前共 14 个同源 `<script>` 与 1 个样式表。
+外壳（`src/console/public/index.html`）只有顶栏、侧边导航、`<main>` 与提示条；样式全在 `console.css`；脚本拆成 `core.js`（令牌、请求、格式化、错误码文案、页面注册表、事件派发）+ 每页一个脚本 + 素材库的两个子页脚本 + 设置页危险区的 `pages-settings-reset.js` + `app.js`（导航与轮询）。当前共 15 个同源 `<script>` 与 1 个样式表。
 
 - **每个文件都必须在 `src/console/server.js` 的 `ASSETS` 里登记**。`ASSETS` 是 `Map`：按请求路径查表，不拼文件系统路径，所以路径穿越在结构上不可能；代价是**新增或改名页面脚本必须同时改 `ASSETS` 与 `index.html`**——漏登记就是 404，登记了但磁盘上没有就是 500 `console_assets_missing`。
 - **旧脚本已经删掉了**：`pages.js`、`pages-extra.js`、`pages-stickers.js` 在 `6860d0e`（chore: drop the retired front-end scripts）里从磁盘删除，也不在 `ASSETS` 里——`GET /pages.js` 返回 `404 {"error":"not_found"}`。按旧的三文件结构改前端不会生效，照着改只会得到 404。
@@ -158,6 +168,7 @@ default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect
 | GET | `/api/config` | 生效配置（凭据打码） |
 | GET | `/api/settings` | 运行时设置：分组、字段（当前值／`.env` 默认值／范围／枚举选项）。字段表由 `src/runtime-config.js` 统一下发 |
 | POST | `/api/settings` | `{name,value}` 保存单个运行时设置；`value` 为空串即删除该行、恢复 `.env` 默认；越界或未知字段返回 `400` |
+| POST | `/api/config/reset` | 危险区：把本实例恢复成初始状态——清 `settings` 里的 `cfg:` 行、上面那串计数／学习前缀与五个精确键，清空 `slang`／`slang_groups`／`stickers` 三张表。**人格卡（`active_persona`／`group_persona:*`／`personas` 表）与 `.env` 不动，历史表也不动**；表情的图片文件留在磁盘上。返回 `{settings,slang,slangGroups,stickers}` 四个被删行数，整批在一个事务里，不可撤销 |
 | GET | `/api/personas` | 两层提示词状态：生效来源、行为层、人格卡列表、合成提示词预览 |
 | GET | `/api/personas/file?kind=card\|behavior&name=<卡名>` | 读取人格卡或行为层正文（供编辑器） |
 | POST | `/api/personas/file` | 保存。`{kind:'behavior',content}` 保存行为层（需重启）；`{kind:'card',name,content}` 保存人格卡（即时生效）；改名即另存为 |

@@ -36,6 +36,7 @@ const ASSETS = new Map([
   ['/pages-assets.js', ['public/pages-assets.js', JS]], ['/assets-stickers.js', ['public/assets-stickers.js', JS]],
   ['/assets-slang.js', ['public/assets-slang.js', JS]], ['/pages-cost.js', ['public/pages-cost.js', JS]],
   ['/pages-logs.js', ['public/pages-logs.js', JS]], ['/pages-settings.js', ['public/pages-settings.js', JS]],
+  ['/pages-settings-reset.js', ['public/pages-settings-reset.js', JS]],
   ['/app.js', ['public/app.js', JS]],
 ]);
 const TOKEN_HEADER = 'x-console-token';
