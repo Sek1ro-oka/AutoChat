@@ -172,6 +172,32 @@ GROUP_KEYWORD_WITHOUT_AT=false
 
 `DEEPSEEK_API_KEY`、`ONEBOT_ACCESS_TOKEN` 是密钥，不要发给别人或写入可提交的范例。修改 OneBot Token／端口后，还需要运行 `node --env-file=.env scripts/configure-napcat.js` 同步 NapCat 配置并重启 NapCat；单纯更换人设、名单和预算只需重启 AutoChat。
 
+### 戳一戳（自动回戳）
+
+编辑 `.env`，先把总开关打开，再选回应档位。例如（文案仅为格式示例，请替换为自己的话）：
+
+```dotenv
+POKE_ENABLED=true
+POKE_MODE=reply
+POKE_COOLDOWN_SECONDS=30
+POKE_DAILY_LIMIT=20
+POKE_REPLY_TEXT=在的，有事说事
+```
+
+只回应戳向本机器人自己的戳一戳：群里只认戳的目标就是本号，群友之间互相戳不会回应；私聊里对方戳过来即回应。`POKE_MODE` 决定打开之后怎么回应——`off` 不回应，`reply` 只回一条文字（默认），`active` 回一条文字**并反戳回去**；总开关关着时改档位不会发生任何事。回应文案为空且档位不是 `active` 时不回应，也不占每日额度。
+
+冷却按**人**算：同一个人 `POKE_COOLDOWN_SECONDS` 内不重复回应。每日上限按**作用域**算：群聊按群计数、私聊按人计数，按 **+08:00 零点**重置。额度**先占再发送**：发送失败也算用掉一次，不会重试。机器人自己戳出去的回显（10 秒内）不会被当成别人戳它，不会触发回应。
+
+| 字段 | 默认 | 取值与约束 | 启动时报错原文 |
+| --- | --- | --- | --- |
+| `POKE_ENABLED` | `false` | `true` / `false`；总开关 | `POKE_ENABLED 必须是 true 或 false` |
+| `POKE_MODE` | `reply` | `off` / `reply` / `active` | `POKE_MODE 必须是 off / reply / active` |
+| `POKE_COOLDOWN_SECONDS` | `30` | 整数，5–3600 | —（整数校验） |
+| `POKE_DAILY_LIMIT` | `20` | 整数，1–200 | —（整数校验） |
+| `POKE_REPLY_TEXT` | 空（不回应） | 最多 200 字 | `POKE_REPLY_TEXT 最多200字` |
+
+这五项都是运行时可变配置，在控制台「系统设置」页里改是**保存后立即生效（无需重启）**，对下一条戳一戳就生效；只改 `.env` 时仍要双击 `restart.cmd`。
+
 ## 启动、停止、重启
 
 ```powershell
