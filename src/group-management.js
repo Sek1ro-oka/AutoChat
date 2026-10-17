@@ -11,7 +11,7 @@ const validMember = (info, group, user) => info && String(info.group_id) === gro
 export const isGroupAdminCommand = text => /^\/?(?:禁言|解除禁言)(?:\s|$)/u.test(text);
 export async function manageGroupAdmin(message, config, call, alive, log = () => {}) {
   if (!message.group || !message.mentionedBot) return '群内禁言命令必须明确@机器人。';
-  if (!config.groupAdminCommandsEnabled) return '群内管理员命令已关闭；设置 GROUP_ADMIN_COMMANDS_ENABLED=true 后重启。';
+  if (!config.groupAdminCommandsEnabled) return '群内管理员命令已关闭；管理员在控制台「系统设置」页打开「群管理命令」即可，保存后立即生效（无需重启）。';
   const parts = (message.groupCommandText ?? message.text).split(/\s+/u);
   const user = parts[1], minutes = parts[2]?.replace(/分钟$/u, '');
   const explicitUnban = parts[0].replace(/^\//u, '') === '解除禁言';
@@ -27,7 +27,7 @@ export async function manageGroupAdmin(message, config, call, alive, log = () =>
 
 export async function manageGroup(message, config, call, alive, log = () => {}) {
   if (message.group || message.user !== config.groupManagerId) return '群管理命令仅限配置的 PRIVATE_USER_QQ 私聊使用。';
-  if (!config.groupManagementEnabled) return '群管理功能已关闭；在 .env 设置 GROUP_MANAGEMENT_ENABLED=true 后重启。';
+  if (!config.groupManagementEnabled) return '群管理功能已关闭；管理员在控制台「系统设置」页打开「群管理」即可，保存后立即生效（无需重启）。';
   const parts = message.text.split(/\s+/u);
   if (parts[0] === '/群管理帮助') return GROUP_MANAGEMENT_HELP;
   const unban = parts[0] === '/解除禁言';

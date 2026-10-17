@@ -248,14 +248,16 @@ export class Bot {
     if (this.blocked(text) || this.blocked(message.modelText)) return reply(RULE_REPLY);
     if (text === '/帮助' || (!message.modelText && !message.images.length)) return reply(HELP + ' 支持Unicode emoji与QQ原生表情对话。白名单私聊可发图片；群聊请@并附图。图片只发送给模型用于本次识别，不保存原图。');
     const seeing = message.images.length > 0;
-    if (seeing && !config.visionEnabled) return reply('图片识别未启用；设置 VISION_ENABLED=true 后重启。');
+    // D-23：VISION_ENABLED 已在运行时字段表里（runtime-config 的 visionEnabled），
+    // 所以这里指控制台的开关页，不叫用户去改 .env 再重启。
+    if (seeing && !config.visionEnabled) return reply('图片识别未启用；管理员在控制台「系统设置」页打开「图片识别」即可，保存后立即生效（无需重启）。');
     if (seeing && profile && !profile.supportsVision) return reply('当前模型配置未声明图片支持，请切换支持图片的模型。');
     if (seeing && message.images.length > MAX_IMAGES) return reply('每条消息最多识别3张图片。');
     const query = searchQuery(text) ?? (config.webSearchEnabled && config.webSearchAutoEnabled && (!profile || profile.supportsSearch) && !seeing
       ? autoSearchQuery(text) : null);
     const searching = query !== null;
     if (seeing && searching) return reply('请将图片识别与联网搜索分开发送。');
-    if (searching && !config.webSearchEnabled) return reply('联网搜索未启用；在 .env 设置 WEB_SEARCH_ENABLED=true 后重启。');
+    if (searching && !config.webSearchEnabled) return reply('联网搜索未启用；管理员在控制台「系统设置」页打开「联网搜索」即可，保存后立即生效（无需重启）。');
     if (searching && profile && !profile.supportsSearch) return reply('当前模型配置不支持本程序的联网搜索接口，请切换支持搜索的模型。');
     if (searching && (!query || Array.from(query).length > 500)) return reply('用法：/搜索 查询内容（1～500字，请写完整问题）');
     if (text.startsWith('/') && !searching) return reply('未知命令。发送 /帮助 查看用法。');

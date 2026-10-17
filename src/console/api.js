@@ -42,7 +42,12 @@ export function buildSummary({ config, store, bot, transport, runtime, now = Dat
     model: { active: store.setting('active_model', 'default'), name: config.model },
     switches: {
       enabled: store.setting('enabled', '1') === '1',
+      // Why it is off, not only that it is off (D-19/E-10): `/停止` and the
+      // automatic meltdown flip the same switch, and the two need opposite
+      // reactions. Additive fields — the booleans above keep their meaning.
+      enabledReason: store.setting('enabled_reason', ''),
       groupEnabled: store.setting('groupEnabled', '1') === '1',
+      groupEnabledReason: store.setting('groupEnabled_reason', ''),
       webSearch: Boolean(config.webSearchEnabled),
       vision: Boolean(config.visionEnabled),
       antiSpam: Boolean(config.antiSpamEnabled),

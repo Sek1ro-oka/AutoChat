@@ -77,4 +77,13 @@ export const SCHEMA = `
   -- Monotonic counters (Phase 5 uses 'turn'). Kept in SQLite, not in memory, so
   -- the value survives a restart: reused turn ids would overwrite old samples.
   CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+  -- QQ Zone posts (I-09): one row per evaluation outcome — dry-run drafts,
+  -- published posts, blocked and failed attempts — so the console page can show
+  -- what the bot wanted to say without reading the log. Trimmed to the newest 50.
+  CREATE TABLE IF NOT EXISTS qzone_posts (
+    id TEXT PRIMARY KEY, at INTEGER NOT NULL, text TEXT NOT NULL,
+    ugc_right INTEGER NOT NULL, status TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+    tid TEXT NOT NULL DEFAULT ''
+  );
+  CREATE INDEX IF NOT EXISTS qzone_posts_at ON qzone_posts(at);
 `;

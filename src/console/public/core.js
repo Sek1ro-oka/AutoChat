@@ -79,7 +79,9 @@ const CODE_TEXT = {
   not_found: '没有这个接口',
   CONFIG_PARAM_INVALID: '这个参数名或参数值不被接受',
   CONFIG_READ_ONLY: '这一项是只读的，控制台改不了',
-  GROUP_NOT_FOUND: '这个群不在机器人当前的群列表里：先让它看到这个群的消息，再回来设置',
+  // N-01：群白名单是运行时字段（runtime-config 的 groupIds），改它不用重启、更不用改
+  // .env，所以提示指向控制台的设置页，而不是让用户去动启动期配置。
+  GROUP_NOT_FOUND: '这个群还没登记：在「系统设置」页把群号加进「群白名单」（保存后立即生效），再让机器人在群里跑一次',
   GROUP_PARAM_INVALID: '群参数不合法',
   GROUP_UNAVAILABLE: '群管理功能不可用',
   PERSONA_CONTENT_EMPTY: '人格内容不能为空',
@@ -118,6 +120,40 @@ const explain = code => CODE_TEXT[String(code)] || String(code);
 const reason = error => {
   const raw = String((error && error.message) || error || '');
   return CODE_TEXT[raw.replace(/^HTTP \d+\s*/, '')] || raw || DASH;
+};
+
+/* --- 为什么停了（D-19 / E-10）---------------------------------------------
+ * `/停止` 与「连续发送失败自动熔断」翻的是同一个开关，但对运维的意思正好相反：
+ * 前者是人按了按钮，后者通常意味着 OneBot 掉线或账号被限制。后端在翻开关的那一刻
+ * 把原因一起写进 enabled_reason / groupEnabled_reason，这里据实分开说，
+ * 不再把两种情况糊成一句「模型回复已停止」。没见过的原因只给通用文案 ——
+ * 旧版本留下的状态没有原因，不能替它编一个。
+ */
+const STOP_REASONS = {
+  admin_stop: {
+    tag: '手动停止',
+    row: '这是管理员在 QQ 里手动关掉的。',
+    alert: ['你手动停止了模型回复', '这是你在 QQ 里发 /停止 的结果，不是故障。要继续就让管理员发 /启动。'],
+  },
+  send_failures: {
+    tag: '自动熔断',
+    row: '连续 3 次发送失败后自动熔断。',
+    alert: ['连续发送失败，已自动熔断', '连续 3 次发送失败后自动停止：多半是 OneBot 掉线或账号被限制。先检查消息通道，再发 /启动 恢复。'],
+  },
+};
+
+const stopInfo = value => STOP_REASONS[String(value === null || value === undefined ? '' : value)] || null;
+
+// 顶栏那一格只放得下一个短标签，所以原因压缩成括号里的两个字。
+const stopLabel = value => {
+  const info = stopInfo(value);
+  return info ? `模型回复已停止（${info.tag}）` : '模型回复已停止';
+};
+
+// 表格里的一行：原因 + 恢复命令。模型与群回复的恢复命令不是一个，所以由调用方给。
+const stopRow = (value, recover) => {
+  const info = stopInfo(value);
+  return String(info ? info.row : '原因没有记录（可能是旧版本留下的状态）。') + String(recover || '');
 };
 
 // 页面脚本往这里登记自己的渲染函数：app.js 按 data-page 的 id 取用，键名就是页签名。

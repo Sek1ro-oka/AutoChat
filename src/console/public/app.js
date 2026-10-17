@@ -45,7 +45,10 @@ const applyChips = data => {
     connection.ready ? 'OneBot 已连接' : connection.reconnecting ? `重连中（第 ${num(connection.retry)} 次）` : 'OneBot 未连接');
   const switches = data.switches || {};
   const model = data.model || {};
-  chip('#modelchip', switches.enabled ? 'ok' : 'err', switches.enabled ? `${model.name || DASH} 回复中` : '模型回复已停止');
+  // 顶栏这一格也要分得清「我自己停的」和「它自己熔断的」：原因由 /api/summary 带出来，
+  // 没记录就只说停，不猜（E-10）。
+  chip('#modelchip', switches.enabled ? 'ok' : 'err',
+    switches.enabled ? `${model.name || DASH} 回复中` : stopLabel(switches.enabledReason));
   const budget = data.budget || {};
   chip('#spendchip', 'warn', `今日 ${cny(budget.used)} / ${cny(budget.limitMicro, 2)}`);
   const stamp = $('#stamp');

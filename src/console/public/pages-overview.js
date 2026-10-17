@@ -29,12 +29,17 @@ const switchCard = settings => {
 
 const readonlySwitches = summary => {
   const switches = summary.switches || {};
-  const reason = switches.enabled ? '在 QQ 里发 /停止 可以让它停下来。' : '在 QQ 里发 /启动 可以让它继续。';
+  // 停着的时候要把「为什么停的」与「怎么恢复」分开说：自动熔断和手动停止的处理办法
+  // 不一样，一句「发 /启动 可以让它继续」会把两者糊成同一件事（E-10）。
   const rows = [
     ['模型回复', switches.enabled
+      ? badge('已开启', 'ok') + ' <span class="muted">在 QQ 里发 /停止 可以让它停下来。</span>'
+      : badge('已停止', 'err') + ' <span class="muted">'
+        + esc(stopRow(switches.enabledReason, '在 QQ 里发 /启动 恢复。')) + '</span>'],
+    ['群聊参与', switches.groupEnabled
       ? badge('已开启', 'ok')
-      : badge('已停止', 'err') + ' <span class="muted">' + esc(reason) + '</span>'],
-    ['群聊参与', switches.groupEnabled ? badge('已开启', 'ok') : badge('已关闭', 'muted')],
+      : badge('已关闭', 'muted') + ' <span class="muted">'
+        + esc(stopRow(switches.groupEnabledReason, '在 QQ 里发 /群开启 恢复。')) + '</span>'],
   ];
   const note = alertBox('info', '这两项控制台改不了', '它们是 QQ 命令写的运行时状态，不是配置文件项：只能在群里发 /启动 或 /停止。做成开关就是点了没反应的开关。');
   return card('模型回复与群聊参与', '只读', kv(rows) + note);
@@ -67,7 +72,12 @@ const healthCard = summary => {
   const budget = summary.budget || {};
   const alerts = [];
   if (!switches.enabled) {
-    alerts.push(alertBox('err', '模型回复已停止', 'QQ 里的 /停止 或连续发送失败都会让它停下。发 /启动 恢复。'));
+    // E-10：这里以前只有一句「/停止 或连续发送失败都会让它停下」，等于把两种
+    // 完全不同的故障糊在一起。原因由后端在翻开关时写下，这里照实分开说。
+    const info = stopInfo(switches.enabledReason);
+    alerts.push(info
+      ? alertBox('err', info.alert[0], info.alert[1])
+      : alertBox('err', '模型回复已停止', '原因没有记录（可能是旧版本留下的状态）。要恢复，让管理员在 QQ 私聊里发 /启动。'));
   }
   if (Number(queue.sendFailures) > 0) {
     alerts.push(alertBox('warn', `发送失败 ${num(queue.sendFailures)} 次`, '连续 3 次失败会自动停止模型回复。检查 OneBot 连接。'));

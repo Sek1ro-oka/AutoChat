@@ -259,6 +259,44 @@ export class Store extends StickerStore {
     return this.db.prepare(`SELECT turn_key, session, turn, seq, at, miss, hit, out, bucket
       FROM token_samples ORDER BY at DESC LIMIT ?`).all(Math.max(1, Math.min(500, Number(limit) || 40)));
   }
+  // --- QQ Zone posts (I-09) ------------------------------------------------
+  // One row per evaluation outcome: dry-run drafts, published posts, blocked and
+  // failed attempts — the console page shows exactly this list. Trimmed to the
+  // newest `cap` rows so the table cannot grow without bound.
+  noteQzonePost({ id, at, text, ugcRight = 4, status, reason = '', tid = '' }, cap = 50) {
+    return this.transaction(() => {
+      this.db.prepare(`INSERT OR REPLACE INTO qzone_posts (id, at, text, ugc_right, status, reason, tid)
+        VALUES (?,?,?,?,?,?,?)`)
+        .run(String(id), Number(at), String(text), Number(ugcRight), String(status), String(reason), String(tid));
+      this.db.prepare(`DELETE FROM qzone_posts WHERE id NOT IN
+        (SELECT id FROM qzone_posts ORDER BY at DESC, rowid DESC LIMIT ?)`)
+        .run(Math.max(1, Math.min(500, Number(cap) || 50)));
+      return id;
+    });
+  }
+  listQzonePosts(limit = 50) {
+    return this.db.prepare(`SELECT id, at, text, ugc_right, status, reason, tid FROM qzone_posts
+      ORDER BY at DESC, rowid DESC LIMIT ?`)
+      .all(Math.max(1, Math.min(200, Number(limit) || 50)));
+  }
+  // Everything that counts against the daily cap and the minimum gap: a dry-run
+  // draft is an evaluation the bot paid for, so it counts too (see qzone.js).
+  qzonePostsSince(since) {
+    return this.db.prepare(`SELECT id, at, text, status, tid FROM qzone_posts
+      WHERE at >= ? AND status IN ('drafted','sent') ORDER BY at DESC, rowid DESC`)
+      .all(Number(since) || 0);
+  }
+  qzoneRecentTexts(limit = 3) {
+    return this.db.prepare(`SELECT text FROM qzone_posts WHERE status IN ('drafted','sent')
+      ORDER BY at DESC, rowid DESC LIMIT ?`)
+      .all(Math.max(1, Math.min(20, Number(limit) || 3))).map(row => row.text);
+  }
+  // The console's delete button turns a row into `deleted` only after
+  // `delete_qzone_msg` succeeded (that endpoint belongs to the console task).
+  setQzonePostStatus(id, status, reason = '') {
+    return this.db.prepare('UPDATE qzone_posts SET status=?, reason=? WHERE id=?')
+      .run(String(status), String(reason), String(id)).changes;
+  }
   // Bounded growth: keep the newest `cap` rows (the roadmap's 20000-row ceiling).
   pruneSamples(cap = 20000) {
     const total = this.db.prepare('SELECT COUNT(*) AS n FROM token_samples').get().n;

@@ -366,3 +366,30 @@ test('the group page marks an override, clears it by english key, and refuses a 
   }
   assert.match(activity, /全局参数/);
 });
+
+// E-10 / D-19 控制台半：熔断与手动停止翻的是同一个开关，但处理办法相反，
+// 所以概览页要按 /api/summary 带来的 enabledReason 分开说，不能一句「已停止」了事。
+test('the overview tells an automatic meltdown apart from a manual stop', async t => {
+  const { store, server } = fixture(t);
+  await server.start();
+  t.after(() => server.stop());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const { context } = loadConsoleScripts(base);
+  await new Promise(resolve => setTimeout(resolve, 150));
+
+  store.set('enabled', '0'); store.set('enabled_reason', 'send_failures');
+  const melted = await context.__pages.overview();
+  assert.match(melted, /连续发送失败，已自动熔断/, '熔断要说明是自动的');
+  assert.doesNotMatch(melted, /你手动停止了模型回复/, '熔断不能被说成用户自己停的');
+
+  store.set('enabled_reason', 'admin_stop');
+  const stopped = await context.__pages.overview();
+  assert.match(stopped, /你手动停止了模型回复/);
+  assert.doesNotMatch(stopped, /自动熔断/, '手动停止不能被说成故障');
+
+  store.set('enabled_reason', '');
+  assert.match(await context.__pages.overview(), /原因没有记录/, '没有原因就照实说，不能编一个');
+
+  store.set('enabled', '1');
+  assert.doesNotMatch(await context.__pages.overview(), /已停止/, '开着的时候不该出现停止文案');
+});

@@ -155,7 +155,7 @@ pages.groups = async () => {
   const body = list.length
     ? `<div class="g2">${list.map(row => groupCard(row, chars, globalActive, globalParams)).join('')}</div>`
     : card('还没有群', '群号由仿真与黑话在运行时自动登记', alertBox('info', '怎么出现群',
-      '在群里让机器人跑一次（被 @ 或触发关键词）后，这一页就会出现该群。控制台没有手动新增群号的入口。'));
+      '先在「系统设置」页把群号加进「群白名单」（保存后立即生效），再让机器人在群里跑一次（被 @ 或触发关键词）。这一页没有手动新增群号的入口。'));
   return pageHead('群管理', '按群覆盖人格卡、仿真参数与黑话开关，未覆盖的字段继承全局。')
     + `<div id="groups-notice">${banner}</div>` + stats + body;
 };

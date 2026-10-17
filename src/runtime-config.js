@@ -33,6 +33,7 @@ export const GROUPS = Object.freeze([
   ['antispam', '防刷屏'],
   ['terms', '触发与屏蔽词'],
   ['bot', '机器人身份'],
+  ['qzone', '空间说说'],
 ]);
 
 // One entry per configurable field. `name` is the `config` property, `key` the
@@ -82,6 +83,23 @@ const FIELDS = Object.freeze([
   // --- bot identity ---------------------------------------------------------
   { name: 'botName', key: 'cfg:bot_name', kind: 'string', group: 'bot', label: '机器人名', max: 24 },
   { name: 'botNicknames', key: 'cfg:bot_nicknames', kind: 'list', group: 'bot', label: '机器人别名（逗号分隔）', hint: '仿真据此判断是否被点名；每项最多 24 字。' },
+  // --- QQ Zone (I-09) -------------------------------------------------------
+  // `QZONE_MODEL_OUTPUT_TOKENS` is deliberately absent: it sizes the budget
+  // reservation, so changing it mid-day would make yesterday's estimate a lie.
+  { name: 'qzoneEnabled', key: 'cfg:qzone_enabled', kind: 'boolean', group: 'qzone', label: '空间说说', hint: '关闭时既不读素材也不调模型。' },
+  { name: 'qzoneDryRun', key: 'cfg:qzone_dry_run', kind: 'boolean', group: 'qzone', label: '只生成不发布', hint: '打开后生成的说说进「最近说说」，永不发送。' },
+  { name: 'qzoneUgcRight', key: 'cfg:qzone_ugc_right', kind: 'enum', group: 'qzone', label: '可见范围', options: ['1', '4', '16', '64', '128'],
+    hint: '1 公开 / 4 好友 / 16 仅自己 / 64 密码 / 128 指定人。', fromText: t => Number(t) },
+  { name: 'qzoneMaxPerDay', key: 'cfg:qzone_max_per_day', kind: 'integer', group: 'qzone', label: '每日上限（条）', min: 1, max: 10 },
+  { name: 'qzoneMinGapHours', key: 'cfg:qzone_min_gap_hours', kind: 'integer', group: 'qzone', label: '两条最小间隔（小时）', min: 1, max: 72 },
+  { name: 'qzoneHours', key: 'cfg:qzone_hours', kind: 'string', group: 'qzone', label: '允许发布时段', max: 5, hint: 'H-H 形式，如 9-23。',
+    validate: text => {
+      const match = /^(\d{1,2})-(\d{1,2})$/.exec(text);
+      if (!match) return '必须是 H-H 形式，如 9-23';
+      return Number(match[1]) <= Number(match[2]) && Number(match[2]) <= 23 ? null : '起点必须 ≤ 终点，且都不超过 23';
+    } },
+  { name: 'qzoneBatchMin', key: 'cfg:qzone_batch_min', kind: 'integer', group: 'qzone', label: '攒够多少条才评估', min: 3, max: 60 },
+  { name: 'qzoneMaterialTtlHours', key: 'cfg:qzone_material_ttl_hours', kind: 'integer', group: 'qzone', label: '素材有效期（小时）', min: 1, max: 24 },
 ]);
 
 const FIELDS_BY_NAME = new Map(FIELDS.map(field => [field.name, field]));

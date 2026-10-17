@@ -10,6 +10,7 @@ import { Personas } from './personas.js';
 import { Social } from './social/engine.js';
 import { Slang } from './social/slang.js';
 import { StickerLib } from './sticker-lib.js';
+import { QZone } from './qzone.js';
 import { DEFAULT_PERSONA } from './persona.js';
 import { createLogger } from './logger.js';
 import { HOLIDAY_YEARS, warnStaleHolidayTable } from './holidays.js';
@@ -87,16 +88,24 @@ const bot = new Bot(config, store, model, { log, ledger, personas, slang, sticke
 // console can turn it on at runtime; `observe` returns immediately while off and
 // writes nothing, so a stock `.env` keeps group messages out of the database.
 const social = new Social({ config, store, model, ledger, personas, slang, stickers, log });
+// Autonomous QQ Zone posting (I-09). Always constructed, like Social, so the
+// console can switch it on at runtime; every entry point returns immediately
+// while QZONE_ENABLED is off, so a stock `.env` costs nothing.
+const qzone = new QZone({ config, store, model, ledger, personas, log });
 // Every OneBot event fans out through the runtime. The answering bot handles what
 // addresses it; the simulation handles everything else in the same groups.
 const runtime = new Runtime({ log });
 runtime.use('core', (event, send, alive) => bot.ingest(event, send, alive));
 runtime.use('social', (event, send, alive) => social.observe(event, send, alive));
+// QZone keeps its own material pool: with SIM off nothing else would write the
+// `messages` rows it reads. It records whitelisted groups only, and only while on.
+runtime.use('qzone', event => qzone.observe(event));
 const transport = new OneBot(config, { onEvent: (...args) => runtime.dispatch(...args), log });
 // The maintenance tick also gives the slang library its periodic chance to
 // extract. Off unless SLANG_AUTO_EXTRACT is set; the promise is kept so shutdown
 // can wait for a paid call that is already in flight.
 let slangTick = Promise.resolve();
+let qzoneTick = Promise.resolve();
 // 30s is a deliberate construction bound, chosen far below Node's timer ceiling
 // of 2147483647ms (a larger delay would silently be clamped to 1ms).
 const timer = setInterval(() => {
@@ -105,6 +114,10 @@ const timer = setInterval(() => {
   // Idle-initiated speech rides the same 30s tick; off unless SOCIAL_IDLE_ENABLED.
   social.idleTick((action, params) => transport.call(action, params), () => transport.ready);
   slangTick = slangTick.then(() => slang.maybeExtract()).catch(() => log('slang_auto_extract_failed'));
+  // QZone posting rides the same tick: it decides for itself whether a batch has
+  // accumulated. Kept as a promise so shutdown can wait for a paid call already in flight.
+  qzoneTick = qzoneTick.then(() => qzone.tick((action, params) => transport.call(action, params), () => transport.ready))
+    .catch(() => log('qzone_tick_failed'));
 }, 30000);
 transport.start();
 log('service_started');
@@ -142,6 +155,7 @@ async function stop(signal) {
     await step(Promise.all([bot.tail, bot.antiSpam.tail]), SHUTDOWN_STEP_TIMEOUT_MS, 'tails');
     await step(social.drain(), SHUTDOWN_STEP_TIMEOUT_MS, 'social');
     await step(slangTick, SHUTDOWN_STEP_TIMEOUT_MS, 'slang');
+    await step(qzoneTick, SHUTDOWN_STEP_TIMEOUT_MS, 'qzone');
   } finally {
     // Unconditional, even after a step overran or threw.
     try { store.close(); } finally { lock.release(); }

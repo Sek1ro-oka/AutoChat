@@ -52,7 +52,7 @@ pages.model = async () => {
       ['控制台令牌', `<code>${esc(credentials.consoleToken || DASH)}</code>`],
       ['WebSocket', `<code>${esc(config.wsUrl || DASH)}</code>`],
     ])
-    + alertBox('info', '为什么这里改不了', '密钥、接口地址与价格属于启动期配置，改 .env 后重启才生效。运行期能改的项都在「系统设置」页。'));
+    + alertBox('info', '为什么这里改不了', '密钥、接口地址与模型档案属于启动期配置，改 .env 后重启才生效。价格、预算与生成限额是运行期字段，在「系统设置」页改，保存后立即生效。'));
 
   const tableRows = profiles.map(profileRow);
   const list = card('模型档案', `共 ${num(profiles.length)} 个；切换用 QQ 里的 /模型 命令`,
@@ -81,7 +81,7 @@ pages.model = async () => {
       ['谷时折扣比', config.offPeakRatio === undefined ? DASH : `${Number(config.offPeakRatio).toFixed(2)} ×`],
     ]));
 
-  return pageHead('模型与 API Key', '接口地址、密钥与价格来自启动期配置；这里只读，避免误改正在跑的连接。')
+  return pageHead('模型与 API Key', '接口地址、密钥与模型档案来自启动期配置；这里只读，避免误改正在跑的连接。价格与限额在「系统设置」页改。')
     + stats
     + `<div class="g2">${secrets}${limits}</div>`
     + list

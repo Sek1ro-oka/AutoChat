@@ -21,6 +21,33 @@ test('summary and config builders are pure and redact secrets', () => {
   store.close();
 });
 
+// D-19 / E-10：这两个字段是新增的。布尔项的意思不变，reason 只解释「为什么」——
+// 熔断（send_failures）与手动 /停止（admin_stop）在控制台上必须能分开。
+test('the summary carries why a switch is off, without changing what the boolean means', () => {
+  const store = new Store();
+  const config = { budgetMicro: 500000, model: 'deepseek-flash' };
+  const switches = () => buildSummary({ config, store, bot: { queued: 0, sendFailures: 0 },
+    transport: { ready: true, retry: 0 }, runtime: null, now: 1800000000000, startedAt: 1800000000000 }).switches;
+
+  assert.equal(switches().enabled, true);
+  assert.equal(switches().enabledReason, '', '没停过就没有原因');
+  assert.equal(switches().groupEnabledReason, '');
+
+  store.set('enabled', '0'); store.set('enabled_reason', 'send_failures');
+  assert.equal(switches().enabled, false, 'enabled 仍是布尔，语义没变');
+  assert.equal(switches().enabledReason, 'send_failures');
+
+  store.set('enabled_reason', 'admin_stop');
+  assert.equal(switches().enabledReason, 'admin_stop', '同一个开关，换原因就换文案');
+
+  store.set('groupEnabled', '0'); store.set('groupEnabled_reason', 'admin_stop');
+  const both = switches();
+  assert.equal(both.groupEnabled, false);
+  assert.equal(both.groupEnabledReason, 'admin_stop');
+  assert.equal(both.enabledReason, 'admin_stop', '两个原因各归各的，不串台');
+  store.close();
+});
+
 test('the cost dashboard zero-fills its range and prices samples supplied by the store', () => {
   const store = new Store();
   const config = { inputPrice: 2, outputPrice: 8, cacheHitPrice: 0.04, offPeakRatio: 0.5 };

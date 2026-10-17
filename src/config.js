@@ -158,6 +158,19 @@ export function loadConfig(env = process.env) {
     stickerEnabled: (env.STICKER_ENABLED || 'false').trim() === 'true',
     stickerAutoCollect: (env.STICKER_AUTO_COLLECT || 'true').trim() === 'true',
     stickerAutoThreshold: integer('STICKER_AUTO_THRESHOLD', 2, 1, 20),
+    // QQ Zone posting (I-09). Off, and dry-run, by default: with QZONE_ENABLED
+    // unset nothing is read, no model is called and no action is sent. Even on,
+    // QZONE_DRY_RUN=true stops one step before `send_qzone_msg` so the texts can
+    // be reviewed in the console first — publishing is not idempotent.
+    qzoneEnabled: (env.QZONE_ENABLED || 'false').trim() === 'true',
+    qzoneDryRun: (env.QZONE_DRY_RUN || 'true').trim() === 'true',
+    qzoneUgcRight: integer('QZONE_UGC_RIGHT', 4, 1, 128),
+    qzoneMaxPerDay: integer('QZONE_MAX_PER_DAY', 1, 1, 10),
+    qzoneMinGapHours: integer('QZONE_MIN_GAP_HOURS', 6, 1, 72),
+    qzoneHours: (env.QZONE_HOURS || '9-23').trim(),
+    qzoneBatchMin: integer('QZONE_BATCH_MIN', 8, 3, 60),
+    qzoneMaterialTtlHours: integer('QZONE_MATERIAL_TTL_HOURS', 6, 1, 24),
+    qzoneModelOutputTokens: integer('QZONE_MODEL_OUTPUT_TOKENS', 300, 64, 1024),
   };
   if (!['true', 'false'].includes((env.CONSOLE_ENABLED || 'false').trim())) {
     throw new Error('CONSOLE_ENABLED 必须是 true 或 false');
@@ -212,6 +225,21 @@ export function loadConfig(env = process.env) {
   }
   if (!['true', 'false'].includes((env.STICKER_AUTO_COLLECT || 'true').trim())) {
     throw new Error('STICKER_AUTO_COLLECT 必须是 true 或 false');
+  }
+  if (!['true', 'false'].includes((env.QZONE_ENABLED || 'false').trim())) {
+    throw new Error('QZONE_ENABLED 必须是 true 或 false');
+  }
+  if (!['true', 'false'].includes((env.QZONE_DRY_RUN || 'true').trim())) {
+    throw new Error('QZONE_DRY_RUN 必须是 true 或 false');
+  }
+  // 1/4/16/64/128 are the only values NapCat accepts (ugc_right: who may see it).
+  if (![1, 4, 16, 64, 128].includes(config.qzoneUgcRight)) {
+    throw new Error('QZONE_UGC_RIGHT 必须是 1/4/16/64/128 之一');
+  }
+  if (!/^\d{1,2}-\d{1,2}$/.test(config.qzoneHours)
+    || Number(config.qzoneHours.split('-')[0]) > Number(config.qzoneHours.split('-')[1])
+    || Number(config.qzoneHours.split('-')[0]) < 0 || Number(config.qzoneHours.split('-')[1]) > 23) {
+    throw new Error('QZONE_HOURS 必须是 H-H 形式（0-23，起点 ≤ 终点），如 9-23');
   }
   config.modelProfiles = loadModelProfiles(env, config);
   config.sendThinking = config.modelProfiles[0].sendThinking;
