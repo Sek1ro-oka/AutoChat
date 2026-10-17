@@ -23,6 +23,7 @@ import {
 } from './api.js';
 import { readLogs } from './logs.js';
 import { harden } from '../permissions.js';
+import { createNapCatWebui } from '../napcat-webui.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const INDEX_PATH = join(HERE, 'public', 'index.html');
@@ -79,6 +80,11 @@ const ERROR_STATUS = new Map([
   ['STICKER_UPLOAD_INVALID', 400],
   // Runtime settings: 4xx for what the operator can fix.
   ['CONFIG_PARAM_INVALID', 400],
+  // Console login (I-10): 503 while NapCat is unusable, 4xx/409 for fixable input, 502 refused.
+  ['WEBUI_DISABLED', 503], ['WEBUI_UNREACHABLE', 503], ['WEBUI_REQUEST_FAILED', 502],
+  ['WEBUI_AUTH_FAILED', 502], ['WEBUI_2FA_REQUIRED', 409], ['LOGIN_ALREADY_ONLINE', 409],
+  ['QR_REFRESH_FAILED', 502], ['QR_REFRESH_TIMEOUT', 504], ['QR_EXPIRED', 409],
+  ['QR_NOT_FOUND', 404],
 ]);
 
 const equal = (a, b) => {
@@ -183,12 +189,16 @@ function readBody(req, max = MAX_BODY_BYTES) {
 }
 
 export function createConsole({
-  config, store, bot, transport, runtime, personas = null, social = null, slang = null, stickers = null, log = () => {},
+  config, store, bot, transport, runtime, personas = null, social = null, slang = null, stickers = null, webui = null,
+  log = () => {},
   startedAt = Date.now(), host = '127.0.0.1', port = null, logDirectory = 'logs',
 } = {}) {
   const token = resolveToken(config, log);
   const listenPort = port ?? config.consolePort ?? 3200;
   const now = () => Date.now();
+  // The console proxies the NapCat WebUI so the browser never learns the WebUI
+  // token and never has to reach the WebUI port itself (I-10).
+  const login = webui ?? createNapCatWebui();
 
   const requirePersonas = () => {
     if (!personas) throw new Error('PERSONA_UNAVAILABLE');
@@ -233,6 +243,9 @@ export function createConsole({
     // The backup is served as a plain JSON document so the browser can save it
     // with one click; restoring goes through the write route below.
     '/api/slang/export': () => requireSlang().exportAll(),
+    // Console login: status only, and never anything that came out of the
+    // WebUI token or the Credential (see src/napcat-webui.js).
+    '/api/login/status': () => login.status(),
   };
 
   // Every write returns the freshly described persona state so the page can
@@ -276,6 +289,9 @@ export function createConsole({
     '/api/stickers/entry': (url, body) => requireStickers().edit(body?.id, body ?? {}),
     '/api/stickers/delete': (url, body) => requireStickers().remove(body?.id),
     '/api/stickers/upload': (url, body) => requireStickers().upload(body ?? {}),
+    // A new QR code for the bot account. Writes go through the usual header
+    // token + loopback-origin gate, like every other action that changes state.
+    '/api/login/qr': () => login.refresh(),
   };
 
   async function handle(req, res) {
@@ -319,6 +335,16 @@ export function createConsole({
       if (!img) { send(res, 404, { error: 'not_found' }); return; }
       res.writeHead(200, { 'Content-Type': img.type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       res.end(img.bytes);
+      return;
+    }
+    // The login QR is the other binary: an <img> cannot set a header either, so it
+    // sits behind the same ?token= read gate and is read from NapCat's workdir by
+    // the proxy — never from the static whitelist above.
+    if (pathname === '/api/login/qr.png' && !writing) {
+      const png = login.png();
+      if (!png) { send(res, 404, { error: 'QR_NOT_FOUND' }); return; }
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.end(png);
       return;
     }
     if (!route) { send(res, 404, { error: 'not_found' }); return; }
