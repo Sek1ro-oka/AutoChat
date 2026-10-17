@@ -104,10 +104,12 @@
 
 | 已实现的能力 | 代码落点 | 文档落点 |
 | --- | --- | --- |
-| 图片理解 | `src/vision.js`（`loadImages`、`MAX_IMAGES`、`IMAGE_TOKEN_RESERVE`），由 `src/bot.js:6` 接入 | `docs/configuration.md:186-196`、`README.md:3` |
-| 联网搜索 | `src/search.js`（`searchQuery`、`autoSearchQuery`），由 `src/bot.js:5`、`src/model.js:1` 接入 | `docs/configuration.md:87-107`、`docs/console.md:39`、`README.md:27` |
-| 无需 @ 的群回复 | `src/bot.js:39`（`config.groupKeywordWithoutAt && matchesInputRule(text, config)`）、`src/config.js:111`（`GROUP_KEYWORD_WITHOUT_AT`）、`src/runtime-config.js:71`（控制台字段「免 @ 关键词触发」）；仿真侧的主动发言见 `src/main.js:78` → `src/social/idle.js:46` | `docs/simulation.md`、`docs/console.md:39` |
-| 自建可视化管理后台 | `src/console/server.js` 与 `src/console/public/**`（只绑 `127.0.0.1`、令牌鉴权、写接口额外要求请求头令牌 + 回环 Origin） | `docs/console.md`、`README.md:36` |
+| 图片理解 | `src/vision.js`（`loadImages`、`MAX_IMAGES`、`IMAGE_TOKEN_RESERVE`），由 `src/bot.js` 的 `vision` 导入接入 | [配置项总表](configuration.md) 的「图片识别」一节、根 `README.md` 的功能列表 |
+| 联网搜索 | `src/search.js`（`searchQuery`、`autoSearchQuery`），由 `src/bot.js` 与 `src/model.js` 的搜索分支接入 | [配置项总表](configuration.md) 的「其他常用配置」一节、[Web 控制台](console.md)、根 `README.md` 的功能列表 |
+| 无需 @ 的群回复 | `src/bot.js` 里 `config.groupKeywordWithoutAt && matchesInputRule(text, config)`、`src/config.js` 的 `GROUP_KEYWORD_WITHOUT_AT` 校验、`src/runtime-config.js` 的字段 `groupKeywordWithoutAt`（控制台「免 @ 关键词触发」）；仿真侧的主动发言见 `src/main.js` 的 `social.idleTick` → `src/social/idle.js` 的 `IdleSpeech` | [拟人化群友](simulation.md)、[Web 控制台](console.md) |
+| 自建可视化管理后台 | `src/console/server.js` 与 `src/console/public/**`（只绑 `127.0.0.1`、令牌鉴权、写接口额外要求请求头令牌 + 回环 Origin；前端九个页签与 `ASSETS` 白名单见控制台文档） | [Web 控制台](console.md)、根 `README.md` 的控制台一节 |
+
+上表的符号名按 **2026-10-17** 的代码核对。`docs/` 里的正文不再写源码行号（见 [文档索引](README.md) 的硬规矩第 3 条）；根 `README.md` 不在本目录的版式规矩内，故只写「功能列表」这类位置名，也不写行号。
 
 仍然不包含（原文里剩下的部分）：语音、文件处理、自动执行工具、跨用户共享记忆、营销群发。其中"自动执行工具"是**硬约束**而不是待办：`docs/security.md` §3.8 写明当前"没有任何工具面"，将来要做必须带工具白名单（只读优先）并与问答共用同一个预算账本。
 

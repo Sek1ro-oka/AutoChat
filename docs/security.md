@@ -47,13 +47,15 @@
 
 ## 3. 已实现的边界
 
+本节引用的源码符号都按 **2026-10-17** 的代码核对；正文不再写源码行号（见 [文档索引](README.md) 的硬规矩第 3 条），符号改名或搬家时请同步改这里。
+
 ### 3.1 准入：谁来跟这个进程说话
 
 - **方向是反向的**：`src/onebot.js` 用 `ws` 客户端**主动连** NapCat 的 WebSocket（`config.wsUrl`），不是监听端口。`ws` 是本项目唯一的第三方依赖。
-- **地址在配置层就被限死**：`src/config.js:32` 要求 `ONEBOT_WS_URL` 必须是 `ws:` 协议、主机名**恰好**是 `127.0.0.1` 或 `[::1]`，且不允许 URL 里带用户名/密码/查询串/片段。不写 `localhost`——那是一个要过一次 DNS 的名字。
+- **地址在配置层就被限死**：`src/config.js` 里对 `ONEBOT_WS_URL` 的校验（局部变量 `wsUrl`）要求 `ONEBOT_WS_URL` 必须是 `ws:` 协议、主机名**恰好**是 `127.0.0.1` 或 `[::1]`，且不允许 URL 里带用户名/密码/查询串/片段。不写 `localhost`——那是一个要过一次 DNS 的名字。
   - 也就是说：即使有人在 `.env` 里填了公网地址，进程也会在启动时直接退出，而不是"连上去试试"。
-- **账号自检**：连上后立刻调 `get_login_info`，`src/onebot.js:30` 比对返回的 `user_id` 与 `BOT_ID`，不一致就 `account_mismatch` 并断开。防的是"NapCat 换了个号，机器人却在那个号里说话"。
-- **鉴权**：连接握手带 `Authorization: Bearer <ONEBOT_ACCESS_TOKEN>`（`src/onebot.js:16`）；`ONEBOT_ACCESS_TOKEN` 在 `src/config.js` 里是**必填**项。
+- **账号自检**：连上后立刻调 `get_login_info`（`src/onebot.js` 的 `connect()`），比对返回的 `user_id` 与 `BOT_QQ`（`src/config.js` 的 `botId`），不一致就 `account_mismatch` 并断开。防的是"NapCat 换了个号，机器人却在那个号里说话"。
+- **鉴权**：连接握手带 `Authorization: Bearer <ONEBOT_ACCESS_TOKEN>`（`src/onebot.js` 的握手请求头）；`ONEBOT_ACCESS_TOKEN` 在 `src/config.js` 里是**必填**项。
 - **载荷上限**：握手设置 `maxPayload: 1 MiB`、`handshakeTimeout: 10s`；每个 action 有超时（`actionTimeoutMs`，默认 10s），超时后 pending 项被清掉并 reject，不会无限积压。
 - **心跳**：30s ping，未收到 pong 就 `terminate()` 重连；重连退避上限 30s。
 
@@ -65,11 +67,11 @@
 |---|---|---|
 | 只绑回环 | `createConsole({ host = '127.0.0.1' })` | 默认值即为回环；测试 `the console binds loopback only` 断言了这一点。局域网不可达。 |
 | 全量鉴权 | `handle()` 里对 `/api/*` 统一校验 | 读接口接受 `?token=` 或请求头；**写接口只接受请求头**。 |
-| 恒时比较 | `server.js:57` `timingSafeEqual` | 逐字节比长度再比内容，避免 token 比较泄露时序。 |
+| 恒时比较 | `src/console/server.js` 的 `equal()`（内部用 `timingSafeEqual`） | 逐字节比长度再比内容，避免 token 比较泄露时序。 |
 | 防 CSRF | 写接口**额外**要求请求头令牌，并在 `Origin` 存在且不是 `null` 时要求它是回环 | 跨站页面既不能在简单请求上自定义请求头，也过不了我们从不回应的 CORS 预检。`Origin: null`（沙箱 iframe、`file://`）被放行，因为此时"请求头令牌"仍是唯一且不可绕过的凭据。 |
-| 防点击劫持 | `X-Frame-Options: DENY` + `Content-Security-Policy: frame-ancestors 'none'; base-uri 'none'; form-action 'none'` | 见 §3.7 与测试 `responses refuse to be framed…`。 |
+| 防点击劫持 | `X-Frame-Options: DENY` + `Content-Security-Policy`（`default-src 'none'`，只放行同源的 `script`／`style`／`img`／`connect`，`frame-ancestors`、`base-uri`、`form-action` 均为 `'none'`） | 见 §3.7 与测试 `responses refuse to be framed…`。 |
 | 其他响应头 | `nosniff`、`Referrer-Policy: no-referrer`、`Cache-Control: no-store` | 防 MIME 嗅探、防 token 随 Referer 外泄、防缓存页面留在磁盘。 |
-| 凭据打码 | `api.js:16` `redact()` + `mask()` | 字段名匹配 `SECRET` 正则的一律打码；`/api/config` 单独把 `apiKey`/`onebotToken`/`consoleToken` 打码。递归深度封顶 6 层。 |
+| 凭据打码 | `src/console/api.js` 的 `redact()` + `mask()` | 字段名匹配 `SECRET` 正则的一律打码；`/api/config` 单独把 `apiKey`/`onebotToken`/`consoleToken` 打码。递归深度封顶 6 层。 |
 | 请求体上限 | `MAX_BODY_BYTES = 128 KiB`；读取时超限即 `req.destroy()` | 一个卡住或恶意的客户端不能把进程堆撑爆。 |
 | 静态资源白名单 | `ASSETS` 是 `Map`，按**请求路径查表**，不拼文件系统路径 | 路径穿越在结构上不可能；测试断言 `/../src/config.js` 返回 404。 |
 | 不展示聊天正文 | `/api/sessions` 只给会话键与计数；`/api/social` 给状态与判定原因；`/api/slang` 列表**不含 `example`**（群聊原句），只有点开单条详情才返回 | **没有任何接口能读到 `messages` 表**。 |
@@ -98,8 +100,8 @@
 |---|---|
 | 本机 NapCat（WebSocket） | §3.1：`ws:` + 主机名白名单，配置层拦截。 |
 | 模型 API（HTTPS） | 地址来自 `MODEL_BASE_URL` 等配置项；带 `Authorization` 请求头；超时受控。 |
-| 图片（读图） | `src/vision.js:9`：必须 `https:`、端口为 443 或缺省、不带用户名密码，主机名必须是 `qpic.cn`、`*.qpic.cn` 或 `multimedia.nt.qq.com.cn`。**不做本地路径、不做任意 URL、不做文件上传、不落地持久化。** |
-| 图片重定向 | `redirect: 'manual'`，然后在 `vision.js:39` 把 `Location` 解析出来后**重新过一遍同一套校验**，再决定要不要跟。跟到一半才出白名单的情况不存在。 |
+| 图片（读图） | `src/vision.js` 的 `imageUrl()`：必须 `https:`、端口为 443 或缺省、不带用户名密码，主机名必须是 `qpic.cn`、`*.qpic.cn` 或 `multimedia.nt.qq.com.cn`。**不做本地路径、不做任意 URL、不做文件上传、不落地持久化。** |
+| 图片重定向 | `redirect: 'manual'`，然后在 `src/vision.js` 的 `loadImages()` 里把 `Location` 解析出来后**重新过一遍同一套校验**，再决定要不要跟。跟到一半才出白名单的情况不存在。 |
 | 搜索 | 只解析返回结果里 `http:`/`https:` 的 URL 作为**来源展示**；URL 长度上限 500，去重，标题截断到 80 字符并去掉换行。抓取回来的页面文本按不可信输入处理（§3.3）。 |
 
 `src/vision.js` 头部注释里写着这条设计取向，别改：
@@ -109,16 +111,16 @@
 ### 3.5 出站内容：会说什么、不会说什么
 
 - **只会说话的地方**：QQ 群里（@ 它 / 命令 / 仿真主动发言）、私聊。没有 webhook、没有邮件、没有第三方上报、没有遥测。
-- **没有任何分析/上报 SDK**。仪表盘是本地 HTML + 原生 SVG/CSS，`index.html` 里**零外部资源**（同源两个 `<script>`）。断网时控制台照常工作。
+- **没有任何分析/上报 SDK**。仪表盘是本地 HTML + 原生 CSS/DOM，`index.html` 里**零外部资源**——13 个同源 `<script>` 加 1 个同源 `console.css`，全部经 `ASSETS` 白名单发放。断网时控制台照常工作。
 - **控制台的"不读正文"规则**与出站一样重要：能把聊天内容带出去的地方首先得能读到它。
 
 ### 3.6 预算就是安全控制
 
 花钱 = 出站调用 = 唯一可以被滥用的资源。所以预算器同时也是限流器。
 
-- **原子预留**：`src/store.js:129` `reserve()` 在 `BEGIN IMMEDIATE` 事务里再判断一次当日余额，返回 `null` 表示拒绝。**所有**模型调用（问答、仿真发言、黑话抽取、联网查义）都先过这一步。
+- **原子预留**：`src/store.js` 的 `reserve()` 在 `BEGIN IMMEDIATE` 事务里再判断一次当日余额，返回 `null` 表示拒绝。**所有**模型调用（问答、仿真发言、黑话抽取、联网查义）都先过这一步。
 - **闸门在调用之前**：仿真层的相关度阈值、冷却、每群日上限、静音开关，全部在 `engine.js` 里于调用之前判定。判不出来就不调，**沉默的成本是 0**。
-- **一次超支，当日熔断**：`settle()` 发现实际花费超过预留时置 `overrun:<day>=1`（`store.js:144`），此后 `reserve()` 对该日一律返回 `null`。宁可当天不再说话，也不让花费失控。
+- **一次超支，当日熔断**：`settle()` 发现实际花费超过预留时置 `overrun:<day>=1`（`src/store.js` 的 `settle()`），此后 `reserve()` 对该日一律返回 `null`。宁可当天不再说话，也不让花费失控。
 - **失败的调用仍然占额**：模型超时/报错时预留**保留**（转为 `uncertain`），因为上游可能已经计费。这是有意的保守选择——"可能被扣了但没记账"比"多花了一点"危险得多。
 - **自动抽取默认关闭**：`SLANG_AUTO_EXTRACT` 默认 `false`。周期性模型调用没人按键也花钱，与"预算安全第一"冲突，所以主路径是控制台按钮。
 
