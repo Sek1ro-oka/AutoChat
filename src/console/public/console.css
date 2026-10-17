@@ -292,3 +292,13 @@ input[type=checkbox] { width:16px; height:16px; accent-color:var(--brand-ink); }
 .dim { opacity:.75; }
 /* 预览区（人格行为层 / 黑话注入块 / 表情包拼图）：必须能换行，否则长句会把卡片撑破 */
 .pre { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12.2px; line-height:1.55; color:#2C3550; background:var(--panel-2); border:1px solid var(--line); border-radius:var(--r-sm); padding:10px 12px; margin:0; max-height:260px; overflow:auto; white-space:pre-wrap; word-break:break-word; }
+
+/* ---------- 服务卡片（T-020） ----------
+   按钮行要跟上面的键值表拉开一点距离；「确认」态必须一眼看出这一下真的会执行 ——
+   只把字换掉、外观不变，点错的人不会停手。禁用态连 hover 都不许变色：
+   看起来能点的禁用按钮，等于没禁用。 */
+.svc-actions { margin-top:12px; }
+.btn.is-armed { font-weight:700; box-shadow:0 0 0 3px var(--focus-halo), 0 0 0 1px var(--focus); }
+.btn[disabled]:hover { border-color:var(--line-ctl); background:var(--panel); }
+.btn-danger[disabled]:hover { border-color:var(--err); background:#FEF0EF; }
+:root[data-theme="dark"] .btn-danger[disabled]:hover { background:#2A1618; }
