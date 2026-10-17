@@ -4,6 +4,11 @@
 !.env.example
 !.env.sample
 
+# Multi-instance configuration: one env file per bot, each holding that bot's
+# tokens. The naming convention is documented in instances/README.md, which is
+# tracked; the per-instance files themselves never are.
+instances/*.env
+
 # Dependencies and virtual environments
 node_modules/
 .venv/

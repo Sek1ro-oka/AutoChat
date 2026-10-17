@@ -16,18 +16,30 @@
 //
 // CLI: `node scripts/supervisor.js` supervises; `--status` prints one JSON line —
 // the single "is it running" judgement that insert/stop scripts consume.
+// `--instance <name>` supervises `instances/<name>.env` instead of `.env`: it loads
+// that file, injects AUTOCHAT_INSTANCE so the console can tell which account it
+// manages, and takes a per-instance mutex (data/autochat-supervisor-<name>.lock).
+// Without the flag nothing changes, which is what the default-path tests pin down.
 import { spawn } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   acquireLock, defaultIsAlive, lockPathFor, readLockHolder, supervisorLockPathFor,
 } from '../src/lifecycle.js';
+import {
+  instanceFile, instanceSettings, instanceSupervisorLockPath, readInstanceEnv, validInstanceName,
+} from './instances.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
 
 export const EXIT_RESTART = 75;
 export const EXIT_ALREADY_RUNNING = 2;
+// Bad arguments, and "the instance file is missing or unreadable": the start script
+// can tell a configuration mistake apart from a crash.
+export const EXIT_USAGE = 64;
+export const EXIT_CONFIG = 78;
 export const MAX_ATTEMPTS = 6;
 export const BACKOFF_BASE_MS = 1000;
 export const BACKOFF_CAP_MS = 30000;
@@ -56,14 +68,25 @@ export function nextAction(code, attempt) {
   return { action: 'retry', attempt: next, delayMs: backoffDelay(next) };
 }
 
-export function childArgs(root = ROOT) {
-  return [`--env-file=${join(root, '.env')}`, join(root, 'src', 'main.js')];
+export function childArgs(root = ROOT, { instance = null } = {}) {
+  // An instance file *is* the configuration of that bot, so it replaces `.env`
+  // rather than layering on top of it.
+  const envFile = instance ? instanceFile(root, instance) : join(root, '.env');
+  return [`--env-file=${envFile}`, join(root, 'src', 'main.js')];
 }
 
 // The supervisor's only channel to the console: a flag and its own pid, so the
 // console never has to guess the process tree.
-export function childEnv(base = process.env, supervisorPid = process.pid) {
-  return { ...base, AUTOCHAT_SUPERVISED: '1', AUTOCHAT_SUPERVISOR_PID: String(supervisorPid) };
+export function childEnv(base = process.env, supervisorPid = process.pid, { instance = null, shadow = [] } = {}) {
+  const env = { ...base };
+  // Node's --env-file never overrides a variable that is already set, and the
+  // supervisor is itself started with .env (scripts/start-autochat.ps1). Dropping
+  // every key the instance file declares is what lets the instance file win.
+  for (const key of shadow) delete env[key];
+  env.AUTOCHAT_SUPERVISED = '1';
+  env.AUTOCHAT_SUPERVISOR_PID = String(supervisorPid);
+  if (instance) env.AUTOCHAT_INSTANCE = instance;
+  return env;
 }
 
 export function lockPaths(root = ROOT, env = process.env) {
@@ -95,6 +118,58 @@ export function inspectLocks({ botLock, supervisorLock, isAlive = defaultIsAlive
 export function statusReport(root = ROOT, isAlive = defaultIsAlive) {
   const paths = lockPaths(root);
   return { ...inspectLocks({ ...paths, isAlive }), locks: { bot: paths.botLock, supervisor: paths.supervisorLock } };
+}
+
+// `--instance` is the only new argument. An unknown flag is now an error instead of
+// being ignored, because a typo in --instance must not silently start the default
+// bot against the default database.
+export function parseArgs(argv = []) {
+  let status = false;
+  let instance = null;
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = String(argv[index]);
+    if (arg === '--status') { status = true; continue; }
+    let value;
+    if (arg === '--instance') {
+      value = argv[index + 1];
+      index += 1;
+      if (value === undefined || String(value).startsWith('-')) {
+        return { ok: false, code: 'INSTANCE_NAME_MISSING', message: '--instance 后需要一个实例名。' };
+      }
+    } else if (arg.startsWith('--instance=')) {
+      value = arg.slice('--instance='.length);
+    } else {
+      return { ok: false, code: 'UNKNOWN_ARGUMENT', message: `未知参数：${arg}` };
+    }
+    if (!validInstanceName(String(value))) {
+      return { ok: false, code: 'INVALID_INSTANCE_NAME', message: `实例名 "${value}" 不合法：只能是小写字母、数字、下划线、短横线，以字母或数字开头，最多 24 个字符。` };
+    }
+    instance = String(value);
+  }
+  return { ok: true, status, instance };
+}
+
+// The same judgement as statusReport, but for one instance: the bot lock still
+// decides "running", while the mutex it reports beside it is the per-instance one.
+export function instanceStatusReport(root = ROOT, name, { isAlive = defaultIsAlive, entry = readInstanceEnv(root, name) } = {}) {
+  const supervisorLock = instanceSupervisorLockPath(root, name);
+  if (!entry.ok) {
+    return {
+      instance: name,
+      running: false,
+      botPid: null,
+      botStartedAt: null,
+      supervisorPid: null,
+      locks: { bot: null, supervisor: supervisorLock },
+      error: entry.code,
+    };
+  }
+  const settings = instanceSettings(root, name, entry.values);
+  return {
+    instance: name,
+    ...inspectLocks({ botLock: settings.botLock, supervisorLock, isAlive }),
+    locks: { bot: settings.botLock, supervisor: supervisorLock },
+  };
 }
 
 const sleep = ms => new Promise(done => setTimeout(done, ms));
@@ -186,18 +261,61 @@ export function createSupervisor({
   return { run, handle, childPid: () => child?.pid ?? null };
 }
 
-function main(argv) {
-  if (argv.includes('--status')) {
-    process.stdout.write(`${JSON.stringify(statusReport(ROOT))}\n`);
-    return 0;
+// Everything one instance's launch needs, resolved in one place: its locks follow
+// its own database and name, its child loads its own file, and the inherited
+// environment loses exactly the keys that file owns.
+export function instanceLaunch(root, name, { entry = readInstanceEnv(root, name), base = process.env, pid = process.pid } = {}) {
+  if (!entry.ok) return { ok: false, code: entry.code, file: entry.file };
+  const settings = instanceSettings(root, name, entry.values);
+  return {
+    ok: true,
+    settings,
+    paths: { botLock: settings.botLock, supervisorLock: settings.supervisorLock },
+    args: childArgs(root, { instance: name }),
+    env: childEnv(base, pid, { instance: name, shadow: Object.keys(entry.values) }),
+  };
+}
+
+function main(argv, { root = ROOT, base = process.env } = {}) {
+  const parsed = parseArgs(argv);
+  if (!parsed.ok) {
+    process.stderr.write(`[supervisor] ${parsed.message}\n`);
+    return EXIT_USAGE;
   }
-  const { botLock, supervisorLock } = lockPaths(ROOT);
-  const own = acquireLock(supervisorLock);
+  if (parsed.status) {
+    if (!parsed.instance) {
+      process.stdout.write(`${JSON.stringify(statusReport(root))}\n`);
+      return 0;
+    }
+    const report = instanceStatusReport(root, parsed.instance);
+    process.stdout.write(`${JSON.stringify(report)}\n`);
+    return report.error ? EXIT_CONFIG : 0;
+  }
+  const label = parsed.instance ? `[supervisor:${parsed.instance}] ` : '[supervisor] ';
+  let paths;
+  let launchArgs = childArgs(root);
+  let launchEnv = childEnv(base);
+  if (parsed.instance) {
+    const target = instanceLaunch(root, parsed.instance, { base });
+    if (!target.ok) {
+      process.stderr.write(`${label}cannot read ${target.file} (${target.code}); refusing to start.\n`);
+      return EXIT_CONFIG;
+    }
+    paths = target.paths;
+    launchArgs = target.args;
+    launchEnv = target.env;
+    // data/ need not exist on a fresh checkout; the mutex lives in it.
+    mkdirSync(dirname(paths.supervisorLock), { recursive: true });
+  } else {
+    const defaults = lockPaths(root);
+    paths = { botLock: defaults.botLock, supervisorLock: defaults.supervisorLock };
+  }
+  const own = acquireLock(paths.supervisorLock);
   if (!own.ok) {
     const why = own.reason === 'already_running'
       ? `another supervisor is already running (pid ${own.holder.pid})`
-      : `cannot take ${supervisorLock} (${own.error?.code ?? 'unknown'})`;
-    process.stderr.write(`[supervisor] ${why}; refusing to start a second one.\n`);
+      : `cannot take ${paths.supervisorLock} (${own.error?.code ?? 'unknown'})`;
+    process.stderr.write(`${label}${why}; refusing to start a second one.\n`);
     return EXIT_ALREADY_RUNNING;
   }
   // `release` is idempotent and the exit hook covers the crash path too.
@@ -207,12 +325,13 @@ function main(argv) {
     // The bot lock is released by the bot on exit, so a lock that is still held by
     // a live pid belongs to someone else: never start a second bot over it.
     beforeLaunch: () => {
-      const state = inspectLocks({ botLock, supervisorLock });
+      const state = inspectLocks(paths);
       return state.running ? { ok: false, reason: 'already_running', pid: state.botPid } : { ok: true };
     },
-    launch: () => spawn(process.execPath, childArgs(ROOT), {
-      cwd: ROOT, env: childEnv(process.env), stdio: ['ignore', 'pipe', 'pipe'],
+    launch: () => spawn(process.execPath, launchArgs, {
+      cwd: root, env: launchEnv, stdio: ['ignore', 'pipe', 'pipe'],
     }),
+    ...(parsed.instance ? { write: line => process.stderr.write(`${label}${line}\n`) } : {}),
   });
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => supervisor.handle(signal));
   supervisor.run().then(code => {
