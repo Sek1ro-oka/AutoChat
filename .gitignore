@@ -50,3 +50,7 @@ napcat/
 # deliverables under work/agent-tasks/*/ are intentionally NOT ignored.
 work/reference/
 work/agent-tasks/*/_src/
+
+# Release archives are build output, not source (rebuild with scripts/package.ps1)
+downloads/
+
