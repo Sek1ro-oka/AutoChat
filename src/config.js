@@ -171,6 +171,17 @@ export function loadConfig(env = process.env) {
     qzoneBatchMin: integer('QZONE_BATCH_MIN', 8, 3, 60),
     qzoneMaterialTtlHours: integer('QZONE_MATERIAL_TTL_HOURS', 6, 1, 24),
     qzoneModelOutputTokens: integer('QZONE_MODEL_OUTPUT_TOKENS', 300, 64, 1024),
+    // Poke (T-025). `POKE_ENABLED` is the master switch; `POKE_MODE` only decides
+    // what happens once it is on, so `POKE_MODE=active` with the switch off still
+    // does nothing. `reply` (the default) never calls a poke action — a poke
+    // produces at most one text message, i.e. the same cost and risk as any reply.
+    // An empty `POKE_REPLY_TEXT` means "say nothing", which makes `reply` silent
+    // until a text is configured; `active` still pokes back.
+    pokeEnabled: (env.POKE_ENABLED || 'false').trim() === 'true',
+    pokeMode: (env.POKE_MODE || 'reply').trim(),
+    pokeCooldownSeconds: integer('POKE_COOLDOWN_SECONDS', 30, 5, 3600),
+    pokeDailyLimit: integer('POKE_DAILY_LIMIT', 20, 1, 200),
+    pokeReplyText: env.POKE_REPLY_TEXT === undefined ? '' : env.POKE_REPLY_TEXT.trim(),
   };
   if (!['true', 'false'].includes((env.CONSOLE_ENABLED || 'false').trim())) {
     throw new Error('CONSOLE_ENABLED 必须是 true 或 false');
@@ -241,6 +252,13 @@ export function loadConfig(env = process.env) {
     || Number(config.qzoneHours.split('-')[0]) < 0 || Number(config.qzoneHours.split('-')[1]) > 23) {
     throw new Error('QZONE_HOURS 必须是 H-H 形式（0-23，起点 ≤ 终点），如 9-23');
   }
+  if (!['true', 'false'].includes((env.POKE_ENABLED || 'false').trim())) {
+    throw new Error('POKE_ENABLED 必须是 true 或 false');
+  }
+  if (!['off', 'reply', 'active'].includes(config.pokeMode)) {
+    throw new Error('POKE_MODE 必须是 off / reply / active');
+  }
+  if (Array.from(config.pokeReplyText).length > 200) throw new Error('POKE_REPLY_TEXT 最多200字');
   config.modelProfiles = loadModelProfiles(env, config);
   config.sendThinking = config.modelProfiles[0].sendThinking;
   return Object.freeze(config);

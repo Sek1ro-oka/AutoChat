@@ -32,6 +32,7 @@ export const GROUPS = Object.freeze([
   ['group', '群管理'],
   ['antispam', '防刷屏'],
   ['terms', '触发与屏蔽词'],
+  ['poke', '戳一戳'],
   ['bot', '机器人身份'],
   ['qzone', '空间说说'],
 ]);
@@ -100,6 +101,19 @@ const FIELDS = Object.freeze([
     } },
   { name: 'qzoneBatchMin', key: 'cfg:qzone_batch_min', kind: 'integer', group: 'qzone', label: '攒够多少条才评估', min: 3, max: 60 },
   { name: 'qzoneMaterialTtlHours', key: 'cfg:qzone_material_ttl_hours', kind: 'integer', group: 'qzone', label: '素材有效期（小时）', min: 1, max: 24 },
+  // --- poke (T-025) ---------------------------------------------------------
+  // All five are runtime-mutable: `Poke.observe` reads them per event, so a change
+  // here applies to the next poke without a restart.
+  { name: 'pokeEnabled', key: 'cfg:poke_enabled', kind: 'boolean', group: 'poke', label: '戳一戳',
+    hint: '总开关。关闭时既不回应也不反戳，不写任何计数。' },
+  { name: 'pokeMode', key: 'cfg:poke_mode', kind: 'enum', group: 'poke', label: '回应档位', options: ['off', 'reply', 'active'],
+    hint: 'reply 只回文字、不反戳；active 允许反戳，仍受间隔与每日上限约束；off 与关掉总开关等效。' },
+  { name: 'pokeCooldownSeconds', key: 'cfg:poke_cooldown_seconds', kind: 'integer', group: 'poke', label: '每人间隔（秒）', min: 5, max: 3600,
+    hint: '同一个人在这个间隔内只回应一次。' },
+  { name: 'pokeDailyLimit', key: 'cfg:poke_daily_limit', kind: 'integer', group: 'poke', label: '每日上限（次）', min: 1, max: 200,
+    hint: '按群计数；私聊按人计数。北京时间每天零点重置。' },
+  { name: 'pokeReplyText', key: 'cfg:poke_reply_text', kind: 'string', group: 'poke', label: '回应文案', max: 200,
+    hint: '留空 = 不回应。' },
 ]);
 
 const FIELDS_BY_NAME = new Map(FIELDS.map(field => [field.name, field]));

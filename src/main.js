@@ -11,6 +11,7 @@ import { Social } from './social/engine.js';
 import { Slang } from './social/slang.js';
 import { StickerLib } from './sticker-lib.js';
 import { QZone } from './qzone.js';
+import { Poke } from './poke.js';
 import { DEFAULT_PERSONA } from './persona.js';
 import { createLogger } from './logger.js';
 import { HOLIDAY_YEARS, warnStaleHolidayTable } from './holidays.js';
@@ -92,6 +93,10 @@ const social = new Social({ config, store, model, ledger, personas, slang, stick
 // console can switch it on at runtime; every entry point returns immediately
 // while QZONE_ENABLED is off, so a stock `.env` costs nothing.
 const qzone = new QZone({ config, store, model, ledger, personas, log });
+// Poke (T-025). Always constructed, like Social and QZone, so the console can turn
+// it on at runtime; a stock `.env` leaves it off, where `observe` costs one
+// boolean read per event and writes nothing.
+const poke = new Poke({ config, store, log });
 // Every OneBot event fans out through the runtime. The answering bot handles what
 // addresses it; the simulation handles everything else in the same groups.
 const runtime = new Runtime({ log });
@@ -100,6 +105,10 @@ runtime.use('social', (event, send, alive) => social.observe(event, send, alive)
 // QZone keeps its own material pool: with SIM off nothing else would write the
 // `messages` rows it reads. It records whitelisted groups only, and only while on.
 runtime.use('qzone', event => qzone.observe(event));
+// Poke notices never reach `bot.js`: `parseEvent` drops every non-message event,
+// and the message pipeline is built around messages. This participant takes them
+// straight from the transport instead, and answers in the same `send` channel.
+runtime.use('poke', (event, send, alive) => poke.observe(event, send, alive));
 const transport = new OneBot(config, { onEvent: (...args) => runtime.dispatch(...args), log });
 // The maintenance tick also gives the slang library its periodic chance to
 // extract. Off unless SLANG_AUTO_EXTRACT is set; the promise is kept so shutdown
