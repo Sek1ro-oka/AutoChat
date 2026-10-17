@@ -14,8 +14,7 @@ test('persona writes require the header token and a loopback origin', async t =>
   await server.start();
   t.after(() => server.stop());
   const base = `http://127.0.0.1:${server.address().port}`;
-  // A query-string token is fine for reads (that is how the printed link works)
-  // but never for writes: a URL can be replayed by a third party.
+  // A query-string token is fine for reads but never for writes: a URL can be replayed.
   const onlyQuery = await fetch(`${base}/api/personas/file?token=${TOKEN}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: '甲', content: '内容' }),
@@ -214,11 +213,7 @@ const fakeConsole = created => {
       this.tagName = tag; this.value = ''; this.textContent = ''; this.className = '';
       this.dataset = {}; this.style = {}; this.attrs = {}; this.writes = 0;
       this._html = ''; this._classes = new Set(); this.validity = { badInput: false };
-      this.classList = {
-        add: name => this._classes.add(name),
-        remove: name => this._classes.delete(name),
-        contains: name => this._classes.has(name),
-      };
+      this.classList = { add: n => this._classes.add(n), remove: n => this._classes.delete(n), contains: n => this._classes.has(n) };
     }
     set innerHTML(value) { this._html = String(value); this.writes += 1; }
     get innerHTML() { return this._html; }
@@ -240,11 +235,10 @@ const fakeConsole = created => {
     querySelectorAll: () => [],
     createElement: tag => { const node = new El(tag); created.push(node); return node; },
   };
-  return { document, main: pick(ids, 'main'), input: selector => pick(selectors, selector) };
+  return { document, main: pick(ids, 'main'), input: selector => pick(selectors, selector), byId: id => pick(ids, id) };
 };
 
-// 与 index.html 里的 <script src> 顺序一致：core 先定义工具，页面脚本往 pages 上挂，
-// app.js 最后启动路由与事件委派。
+// 与 index.html 里的 <script src> 顺序一致：core 先定义工具，页面脚本往 pages 上挂，app.js 最后启动路由与事件委派。
 const CONSOLE_SCRIPTS = ['core.js', 'pages-overview.js', 'pages-model.js', 'pages-personas.js', 'pages-groups.js',
   'pages-activity.js', 'pages-assets.js', 'assets-stickers.js', 'assets-slang.js', 'pages-cost.js',
   'pages-logs.js', 'pages-settings.js', 'app.js'];
@@ -252,7 +246,7 @@ const CONSOLE_SCRIPTS = ['core.js', 'pages-overview.js', 'pages-model.js', 'page
 // 只把真请求转给测试服务器，其余（主题、图标之类）就地成功即可。
 const loadConsoleScripts = base => {
   const created = [], calls = [];
-  const { document, main, input } = fakeConsole(created);
+  const { document, main, input, byId } = fakeConsole(created);
   const stored = new Map([['autochat.console.token', TOKEN]]);
   const context = vm.createContext({
     document,
@@ -281,7 +275,7 @@ const loadConsoleScripts = base => {
   vm.runInContext('globalThis.__pages = pages;', context);
   // 改版后页面不再往 window 上挂全局函数：唯一入口是 ACTIONS 表（事件委派用）。
   vm.runInContext('globalThis.__actions = ACTIONS;', context);
-  return { calls, created, context, input, main };
+  return { calls, created, context, input, main, byId };
 };
 
 test('the group page marks an override, clears it by english key, and refuses a blank locally', async t => {
@@ -295,15 +289,14 @@ test('the group page marks an override, clears it by english key, and refuses a 
   const dump = () => store.db.prepare('SELECT key, value FROM settings ORDER BY key').all()
     .map(row => `${row.key}=${row.value}`).join('\n');
 
-  const { calls, context, input, main } = loadConsoleScripts(base);
+  const { calls, context, input, main, byId } = loadConsoleScripts(base);
   await new Promise(resolve => setTimeout(resolve, 150)); // 等首次渲染的请求落地，别和下面的快照抢
 
   const html = await context.__pages.groups();
   const blockOf = (source, name) => {
     const id = source.indexOf(`id="g-${name}-20000"`);
     assert.ok(id > 0, `群设置页缺 ${name} 输入框`);
-    // 从 <input 开始切，这样「输入框自己的属性」和它后面的说明都落在同一块里。
-    return source.slice(source.lastIndexOf('<input', id), source.indexOf('</label>', id));
+    return source.slice(source.lastIndexOf('<input', id), source.indexOf('</label>', id)); // 属性与说明同块
   };
   for (const name of ['threshold', 'cooldownSeconds', 'dailyLimit']) {
     const block = blockOf(html, name);
@@ -353,22 +346,33 @@ test('the group page marks an override, clears it by english key, and refuses a 
   assert.match(ui.reason(new Error('SOCIAL_PARAM_NOT_GROUP_SCOPED')), /不能按群单独设置/);
   assert.equal(ui.explain('SOMETHING_NEW'), 'SOMETHING_NEW', '没收录的码照原样显示');
 
-  // 入口 B（全局仿真参数）：POST /api/social/config 不带 group 写的就是全局，
-  // 所以活动页得有可编辑控件——但只给运行期真有写入路径的字段，上下文条数/
-  // 分段数/打字延迟来自配置文件，仍然只读，避免长出「改了不生效」的控件。
+  // 入口 B（全局仿真参数）：只给运行期真有写入路径的字段；上下文条数/分段数/
+  // 打字延迟来自配置文件，仍然只读，避免长出「改了不生效」的控件。
   const activity = await context.__pages.activity();
-  for (const key of ['threshold', 'cooldownSeconds', 'dailyLimit', 'idleMinutes', 'idleHours']) {
+  for (const key of ['threshold', 'cooldownSeconds', 'dailyLimit', 'idleMinutes', 'idleHours'])
     assert.match(activity, new RegExp(`id="act-${key}"`), `${key} 可以全局改，必须有输入框`);
-  }
-  assert.match(activity, /data-act="activityToggle" data-value="idleEnabled"/, '插话开关要能改');
-  for (const key of ['contextMessages', 'maxChunks', 'minDelayMs', 'maxDelayMs', 'messageTtlHours']) {
+  for (const key of ['contextMessages', 'maxChunks', 'minDelayMs', 'maxDelayMs', 'messageTtlHours'])
     assert.doesNotMatch(activity, new RegExp(`id="act-${key}"`), `${key} 没有运行期写入路径，不能给输入框`);
-  }
+  assert.match(activity, /data-act="activityToggle" data-value="idleEnabled"/, '插话开关要能改');
   assert.match(activity, /全局参数/);
+  // T-017 回归一：idleHours 是「冒泡时段」（H-H），做成数字框会让每次保存都 400。
+  assert.match(activity, /冒泡时段[\s\S]{0,300}?type="text" id="act-idleHours"[\s\S]{0,300}?H-H，如 9-22/, '时段要文本输入，标签与提示写清 H-H 形式');
+  byId('act-idleHours').value = '9-25';
+  calls.length = 0;
+  await context.__actions.get('activitySave')({ dataset: { value: 'idleHours' } });
+  assert.equal(calls.filter(call => call.method === 'POST').length, 0, '起止颠倒的时段必须就地拦下，一个请求都不发');
+  assert.match(byId('act-notice').innerHTML, /9-22/, '就地提示要给出正确写法');
+  assert.ok(byId('act-idleHours').classList.contains('is-invalid'), '出错的输入框要标出来');
+  byId('act-idleHours').value = ' 9-22 ';
+  calls.length = 0;
+  await context.__actions.get('activitySave')({ dataset: { value: 'idleHours' } });
+  assert.deepEqual(calls.filter(call => call.method === 'POST').map(call => call.body), [{ idleHours: '9-22' }], '合法时段要 trim 后按 H-H 原样发出去');
+  // T-017 回归二：走势图数据只能来自 /api/cost 的 series。
+  const cost = await context.__pages.cost();
+  assert.match(cost, /aria-label="花费走势"[\s\S]*data-bar="\d+"/, '花费走势图要回来，柱高留给 CSSOM');
 });
 
-// E-10 / D-19 控制台半：熔断与手动停止翻的是同一个开关，但处理办法相反，
-// 所以概览页要按 /api/summary 带来的 enabledReason 分开说，不能一句「已停止」了事。
+// E-10 / D-19 控制台半：熔断与手动停止翻的是同一个开关，但处理办法相反，概览页要按 enabledReason 分开说。
 test('the overview tells an automatic meltdown apart from a manual stop', async t => {
   const { store, server } = fixture(t);
   await server.start();

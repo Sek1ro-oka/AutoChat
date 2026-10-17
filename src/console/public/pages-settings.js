@@ -14,11 +14,40 @@ const settingNotice = () => (settingsState.notice
   ? alertBox(settingsState.bad ? 'err' : 'ok', settingsState.bad ? '没保存' : '已保存', settingsState.notice)
   : '');
 
+/* 每个字段下面的一句话后果说明：只说「改了这个值，机器人那边会变成什么样」，
+ * 字段本身的含义仍由 runtime-config.js 的 hint 负责。键名与那边保持一致。
+ */
+const SETTING_WHY = {
+  qzoneEnabled: '关着 = 整条链路不跑：不读素材、不调模型、不占预算、不发说说。',
+  qzoneDryRun: '开着只生成草稿、只进「空间说说」列表，协议端一条都收不到。',
+  qzoneUgcRight: '发出去的那条说说在 QQ 空间里对谁可见；不确定就留在「好友」。',
+  qzoneMaxPerDay: '一天最多评估并发布几条；到上限后当天不再评估，次日零点（北京时间）重置。',
+  qzoneMinGapHours: '两条之间至少隔这么久；它同时会把素材攒得更久，写出来更像一段时间的总结。',
+  qzoneHours: '只在这个时段内发布，时段外连模型都不调；起点不能晚于终点，所以不支持跨零点。',
+  qzoneBatchMin: '攒够这么多条群消息才评估一次；调大更省预算，但素材跨度更长。',
+  qzoneMaterialTtlHours: '只用这么久以内的群消息当素材；调小更贴近当下，但也可能一直攒不够一批。',
+};
+
+// 可见范围在 QQ 协议里是数字，给人看得写中文（值仍是协议要的数字）。
+const SETTING_ENUM_TEXT = {
+  qzoneUgcRight: { 1: '1 · 公开', 4: '4 · 好友', 16: '16 · 仅自己', 64: '64 · 密码', 128: '128 · 指定人' },
+};
+
+// 分组级别的提示：只在分组顶部插一条，不重复每个字段的说明。
+const SETTING_GROUP_NOTE = {
+  qzone: ['info', '默认关闭，先干跑再开',
+    '空间说说默认关闭：总开关关着的时候，机器人既不挑素材也不调模型，一条都不会发出去。'
+    + '第一次开启请同时把「只生成不发布」打开，在「空间说说」页看几天草稿的措辞，满意了再关掉干跑。'],
+};
+
 const SETTING_CONTROL = {
   boolean: field => sw(field.value === 'true', '', `data-act="settingToggle" data-name="${esc(field.name)}"`),
-  enum: field => `<select id="cfg-${esc(field.name)}">${(field.options || [])
-    .map(option => `<option value="${esc(option)}"${String(option) === String(field.value) ? ' selected' : ''}>${esc(option)}</option>`)
-    .join('')}</select>`,
+  enum: field => {
+    const text = SETTING_ENUM_TEXT[field.name] || {};
+    return `<select id="cfg-${esc(field.name)}">${(field.options || [])
+      .map(option => `<option value="${esc(option)}"${String(option) === String(field.value) ? ' selected' : ''}>${esc(text[option] ?? option)}</option>`)
+      .join('')}</select>`;
+  },
   number: field => `<input id="cfg-${esc(field.name)}" type="number" step="any" value="${esc(field.value)}"${field.min === undefined ? '' : ` min="${esc(field.min)}"`}${field.max === undefined ? '' : ` max="${esc(field.max)}"`}>`,
   integer: field => `<input id="cfg-${esc(field.name)}" type="number" step="1" value="${esc(field.value)}"${field.min === undefined ? '' : ` min="${esc(field.min)}"`}${field.max === undefined ? '' : ` max="${esc(field.max)}"`}>`,
 };
@@ -32,6 +61,7 @@ const settingControl = (field) => {
 const settingRow = (field) => {
   const overridden = String(field.value) !== String(field.defaultValue);
   const control = settingControl(field);
+  const why = SETTING_WHY[field.name];
   const buttons = field.kind === 'boolean'
     ? ''
     : `<div class="row">
@@ -48,10 +78,15 @@ const settingRow = (field) => {
       ${field.hint ? `<span class="lkey">${esc(field.hint)}</span>` : ''}
       ${buttons}
     </div>
+    ${why ? `<div class="fhint">${esc(why)}</div>` : ''}
   </div>`;
 };
 
-const settingGroup = (group, fields) => card(group.label, `${num(fields.length)} 项`, fields.map(settingRow).join(''));
+const settingGroup = (group, fields) => {
+  const note = SETTING_GROUP_NOTE[group.id];
+  return card(group.label, `${num(fields.length)} 项`,
+    (note ? alertBox(note[0], note[1], note[2]) : '') + fields.map(settingRow).join(''));
+};
 
 const settingSections = d => {
   const fields = Array.isArray(d && d.fields) ? d.fields : [];

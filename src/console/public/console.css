@@ -16,9 +16,7 @@
   /* 女仆粉：--maid-graphic 只做图形/装饰，文字必须用 --maid-ink（5.66✓） */
   --maid:#FF8FAB; --maid-ink:#C2255C; --maid-graphic:#E8628C; --maid-soft:#FFF0F5;
   /* 图表：绘图区底色必须是 --panel(#FFFFFF)，不得用 --bg 那种浅蓝底 */
-  --chart-1:#4D6BFE; --chart-11:#D97706; --chart-grid:#7C89A3;
-  /* 热力图 6 档：低档位对白底的对比度天然不足 3:1，靠 --chart-grid 缝隙网格线划分单元格 */
-  --heat-0:#EEF2FF; --heat-1:#CBD6FE; --heat-2:#A7BAFD; --heat-3:#7E97FC; --heat-4:#4D6BFE; --heat-5:#2F4BD8;
+  --chart-1:#4D6BFE; --chart-11:#D97706;
   /* 焦点环：内圈深色 + 外圈白色 halo（暗色模式反过来：内白外黑） */
   --focus:#111827; --focus-halo:#FFFFFF;
   --r:14px; --r-sm:10px;
@@ -193,27 +191,6 @@ table.tbl td.num, table.tbl th.num { text-align:right; font-variant-numeric:tabu
 .bar-label { font-size:11.5px; color:var(--muted); margin-top:6px; white-space:nowrap; }
 .bar-col.is-today .bar-label { color:var(--money); font-weight:700; }
 
-/* ---------- 热力图 ---------- */
-/* 网格线不画线：容器铺 --chart-grid，靠 2px 的 grid gap 露出来（低档位对白底天然不足 3:1，
-   这层缝隙才是让每格边界可辨认的东西） */
-.hm { display:grid; grid-template-columns:44px repeat(24, minmax(0,1fr)); gap:2px; align-items:stretch; background:var(--chart-grid); padding:2px; border-radius:6px; }
-.hm-h { font-size:9.5px; color:var(--muted); text-align:center; font-variant-numeric:tabular-nums; }
-.hm-label { font-size:11.5px; color:var(--muted); padding-right:4px; white-space:nowrap; }
-.hm-h, .hm-label { background:var(--panel); display:flex; align-items:center; }
-.hm-h { justify-content:center; padding:1px 0; }
-.hm-label { padding-left:4px; }
-.hm-cell { height:19px; border-radius:3px; background:var(--heat-0); }
-.hm-cell:hover { outline:2px solid var(--focus); outline-offset:1px; }
-.hm-l0 { background:var(--heat-0); }
-.hm-l1 { background:var(--heat-1); }
-.hm-l2 { background:var(--heat-2); }
-.hm-l3 { background:var(--heat-3); }
-.hm-l4 { background:var(--heat-4); }
-.hm-l5 { background:var(--heat-5); }
-.hm-row-today .hm-label { color:var(--money); font-weight:700; }
-.hm-legend { display:flex; align-items:center; gap:6px; margin-top:10px; font-size:11.5px; color:var(--muted); flex-wrap:wrap; }
-.swatch { width:16px; height:12px; border-radius:3px; display:inline-block; border:1px solid var(--line-ctl); }
-
 /* ---------- 预算进度 ---------- */
 /* 进度条也是图形对象：旧浅端 #7C93FF 2.81✗ / #FFC067 1.62✗ / #FF9C93 2.01✗，两端都不达标 */
 .progress { height:14px; border-radius:999px; background:var(--panel-2); border:1px solid var(--line-ctl); overflow:hidden; }
@@ -248,12 +225,10 @@ table.tbl td.num, table.tbl th.num { text-align:right; font-variant-numeric:tabu
   --brand-dark:#7E97FC; --brand-soft:#1E2537;
   --ok:#4ADE80; --warn:#FBBF24; --err:#F87171; --money:#FDBA74;
   --maid:#FFB3C6; --maid-ink:#FFB3C6; --maid-graphic:#FFB3C6; --maid-soft:#2A1D24;
-  --chart-1:#7E97FC; --chart-11:#FBBF24; --chart-grid:#5A6A94;
-  --heat-0:#232C42; --heat-1:#2F4067; --heat-2:#3E5AA8; --heat-3:#5573E0; --heat-4:#7E97FC; --heat-5:#A9BCFF;
+  --chart-1:#7E97FC; --chart-11:#FBBF24;
   --focus:#FFFFFF; --focus-halo:#0B1020;
   --shadow:0 1px 2px rgba(0,0,0,.45), 0 8px 24px rgba(0,0,0,.4);
   --shadow-sm:0 1px 2px rgba(0,0,0,.45);
-}
 }
 /* 深色下的实底控件：白字全部换成近黑字（#7E97FC / #4ADE80 上的白字都不到 3:1） */
 :root[data-theme="dark"] .btn-primary,
@@ -307,7 +282,6 @@ input[type=checkbox] { width:16px; height:16px; accent-color:var(--brand-ink); }
 /* 30 根柱子挨在一起会糊成一片：只收紧间距和字号，柱宽仍由 .bar-track 的 max-width 决定 */
 .bars.dense { gap:3px; }
 .bars.dense .bar-value, .bars.dense .bar-label { font-size:9.5px; }
-.bars.short { height:132px; }
 /* 页面里成组的表单：竖排时每个 label 自己占一行，横排时一排铺开（窄屏自动换行） */
 .form { display:flex; flex-direction:column; gap:10px; }
 .form-inline { flex-direction:row; align-items:flex-end; flex-wrap:wrap; }

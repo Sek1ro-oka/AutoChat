@@ -17,6 +17,53 @@ const costRange = (d) => {
   return `<div class="toolbar">${seg(options, costState.range || d.range, 'costRange')}</div>`;
 };
 
+// 分桶时间戳是桶的起点（按北京时间对齐）：小时桶「02-13 14时」，日桶「02-13」。
+const costPad = value => String(value).padStart(2, '0');
+const costLabel = (t, unit) => {
+  const at = new Date(Number(t));
+  const day = `${costPad(at.getMonth() + 1)}-${costPad(at.getDate())}`;
+  return unit === 'hour' ? `${day} ${costPad(at.getHours())}时` : day;
+};
+
+// 花费走势：设计稿的柱状图是 div + CSS（.bars/.bar-track/.bar-fill），不是 SVG。
+// 高度只能由 CSSOM 写（CSP 禁内联 style），见下面 costPaint。
+const costChart = d => {
+  const series = Array.isArray(d.series) ? d.series : [];
+  if (!series.length) return card('花费走势', '', '<div class="empty">这个区间还没有分桶数据。</div>');
+  const unit = d.unit === 'hour' ? '小时' : '天';
+  const max = Math.max(1, ...series.map(point => Number(point.totalMicro) || 0));
+  const dense = series.length > 10;
+  const every = Math.max(1, Math.ceil(series.length / 7));
+  const last = series.length - 1;
+  const bars = series.map((point, index) => {
+    const total = Number(point.totalMicro) || 0;
+    const peak = Number(point.peakMicro) || 0;
+    const off = Number(point.offMicro) || 0;
+    const percent = total > 0 ? Math.max(4, Math.round((total / max) * 100)) : 0;
+    const isNow = index === last;
+    const when = costLabel(point.t, d.unit);
+    const hint = `${when}\n花费 ${cny(total)}（峰时 ${cny(peak)} · 谷时 ${cny(off)}）`
+      + `\n命中 ${num(point.hit)} · 未命中 ${num(point.miss)} · 输出 ${num(point.out)}（token）`
+      + `\n调用 ${num(point.calls)} 次`;
+    const label = index % every === 0 || isNow ? `${when}${isNow && d.unit !== 'hour' ? ' 今天' : ''}` : '&nbsp;';
+    return `<div class="bar-col${isNow ? ' is-today' : ''}" title="${esc(hint)}">`
+      + (dense ? '' : `<div class="bar-value">${total > 0 ? cny(total) : DASH}</div>`)
+      + `<div class="bar-track"><div class="bar-fill${isNow ? ' is-today' : ''}" data-bar="${percent}"></div></div>`
+      + `<div class="bar-label">${label}</div></div>`;
+  }).join('');
+  return card(`花费走势（每${unit}）`,
+    `${d.range} · ${num(series.length)} 桶 · 纵轴按区间峰值自适应；条形悬停看峰谷明细，橙色是当前${unit}`,
+    `<div class="bars${dense ? ' dense' : ''}" role="img" aria-label="花费走势">${bars}</div>`);
+};
+
+// app.js 的 paintWidths 只处理 [data-width]，而 CSP 不许内联 style，所以柱高挂载后由这里补；
+// render() 是同步写 innerHTML，0 毫秒定时器一定排在挂载之后。
+const costPaint = () => {
+  for (const node of document.querySelectorAll('[data-bar]')) {
+    node.style.height = `${Number(node.dataset.bar) || 0}%`;
+  }
+};
+
 const costMeter = (totals) => {
   const hit = Number(totals.hit) || 0;
   const miss = Number(totals.miss) || 0;
@@ -75,6 +122,7 @@ const pages_costBody = (d, charges) => {
       ${stat('谷时花费', cny(totals.offMicro), `峰时 ${cny(totals.peakMicro)}`)}
     </div>`
     + costRange(d)
+    + costChart(d)
     + card('每日预算占用', '', costCharges(charges))
     + card('按会话', `${num(sessions.length)} 个会话`, table(
       ['会话', '轮数', '调用', '命中 / 未命中（token）', '输出（token）', '花费', ''],
@@ -116,7 +164,9 @@ pages.cost = async () => {
   } catch (error) {
     charges = { days: [] };
   }
-  return head + pages_costBody(d, charges);
+  const html = head + pages_costBody(d, charges);
+  setTimeout(costPaint, 0);
+  return html;
 };
 
 action('costRange', (button) => {

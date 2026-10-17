@@ -19,7 +19,7 @@ import {
   buildSummary, buildSessions, buildCharges, buildConfig, buildCost, buildCostTurns,
   buildPersonas, buildPersonaFile, buildSocial, buildSlang, buildSlangEntry,
   buildGroups, applyGroupPatch, buildStickers, buildStickerEntry,
-  buildSettings, applySetting,
+  buildSettings, applySetting, buildQzonePosts, deleteQzonePost,
 } from './api.js';
 import { readLogs } from './logs.js';
 import { harden } from '../permissions.js';
@@ -27,11 +27,10 @@ import { createNapCatWebui } from '../napcat-webui.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const INDEX_PATH = join(HERE, 'public', 'index.html');
-// Whitelisted shell assets. The page logic lives in its own files so none of
-// them has to grow past the project's 400-line ceiling as pages are added.
-// core.js defines the helpers (and the `pages` object) every page script fills
-// in; the page scripts must be listed (and loaded) before app.js, which owns the
-// single click/change listener that renders whatever page is open.
+// Whitelisted shell assets: page logic lives in its own files so none of them has
+// to grow past the 400-line ceiling. core.js defines the helpers (and `pages`);
+// the page scripts must be listed and loaded before app.js, which owns the one
+// click/change listener that renders whatever page is open.
 const JS = 'text/javascript; charset=utf-8';
 const ASSETS = new Map([
   ['/console.css', ['public/console.css', 'text/css; charset=utf-8']],
@@ -41,6 +40,7 @@ const ASSETS = new Map([
   ['/pages-personas.js', ['public/pages-personas.js', JS]],
   ['/pages-groups.js', ['public/pages-groups.js', JS]],
   ['/pages-activity.js', ['public/pages-activity.js', JS]],
+  ['/pages-qzone.js', ['public/pages-qzone.js', JS]],
   ['/pages-assets.js', ['public/pages-assets.js', JS]],
   ['/assets-stickers.js', ['public/assets-stickers.js', JS]],
   ['/assets-slang.js', ['public/assets-slang.js', JS]],
@@ -51,21 +51,18 @@ const ASSETS = new Map([
 ]);
 const TOKEN_HEADER = 'x-console-token';
 const MAX_BODY_BYTES = 128 * 1024;
-// A slang backup may legitimately hold the full 2000-entry library, which is far
-// larger than any structured body the other endpoints accept.
+// A slang backup may hold the full 2000-entry library: bigger than any other body.
 const BODY_LIMITS = new Map([['/api/slang/import', 2 * 1024 * 1024], ['/api/stickers/upload', 8 * 1024 * 1024]]);
 const bodyLimit = pathname => BODY_LIMITS.get(pathname) ?? MAX_BODY_BYTES;
 
-// Persona failures are the only ones a client can cause, so they get real
-// status codes instead of a blanket 500.
+// Client-caused failures get real status codes instead of a blanket 500.
 const ERROR_STATUS = new Map([
   ['PERSONA_NAME_INVALID', 400], ['PERSONA_CONTENT_INVALID', 400], ['PERSONA_CONTENT_EMPTY', 400],
   ['PERSONA_CONTENT_TOO_LARGE', 413], ['PERSONA_LIMIT', 409], ['PERSONA_NOT_FOUND', 404],
   ['PERSONA_UNAVAILABLE', 503], ['BODY_TOO_LARGE', 413], ['bad_json', 400],
   ['SOCIAL_UNAVAILABLE', 503], ['SOCIAL_PARAM_INVALID', 400],
-  // A group-scoped patch that could not write anything (the idle fields only
-  // exist globally). Without this entry the operator sees a 500 "internal"
-  // instead of the reason, which is exactly the class of failure I-01 is about.
+  // A group-scoped patch that could not write anything (the idle fields are
+  // global-only): without it the operator sees a 500 instead of the reason (I-01).
   ['SOCIAL_PARAM_NOT_GROUP_SCOPED', 400],
   // The slang library: 4xx for what the operator can fix, 502 for upstream.
   ['SLANG_UNAVAILABLE', 503], ['SLANG_PARAM_INVALID', 400], ['SLANG_NOT_FOUND', 404],
@@ -85,6 +82,9 @@ const ERROR_STATUS = new Map([
   ['WEBUI_AUTH_FAILED', 502], ['WEBUI_2FA_REQUIRED', 409], ['LOGIN_ALREADY_ONLINE', 409],
   ['QR_REFRESH_FAILED', 502], ['QR_REFRESH_TIMEOUT', 504], ['QR_EXPIRED', 409],
   ['QR_NOT_FOUND', 404],
+  // QQ Zone (I-09): 4xx for fixable input, 502/503/504 for the protocol side.
+  ['QZONE_POST_NOT_FOUND', 404], ['QZONE_POST_ALREADY_DELETED', 409], ['QZONE_POST_NO_TID', 409],
+  ['QZONE_DELETE_UNAVAILABLE', 503], ['QZONE_DELETE_TIMEOUT', 504], ['QZONE_DELETE_REJECTED', 502], ['QZONE_DELETE_FAILED', 502],
 ]);
 
 const equal = (a, b) => {
@@ -131,15 +131,12 @@ function send(res, status, body, type = 'application/json; charset=utf-8') {
     'Cache-Control': 'no-store',
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
-    // A malicious page must not be able to frame the console: the write
-    // endpoints accept same-origin requests, so an invisible iframe over a
-    // logged-in browser would be a clickjacking path to the persona editor.
-    // The page loads no external asset, so a deny-everything CSP costs nothing.
-    // script-src/style-src are the load-bearing part: the shell has no inline
-    // <script>, no on* handler and no style="" (everything is delegated through
-    // data-act / data-page), so there is nothing inline left to allow. The
-    // sticker thumbnails are same-origin images behind ?token=, hence img-src
-    // 'self' rather than default-src 'none' alone.
+    // A malicious page must not frame the console: the write endpoints accept
+    // same-origin requests, so an invisible iframe would be a clickjacking path
+    // into the editors. The shell has no inline <script>, no on* handler and no
+    // style="" (all delegated through data-act / data-page), so script-src and
+    // style-src 'self' are the load-bearing part; sticker thumbnails are
+    // same-origin images behind ?token=, hence img-src 'self'.
     'X-Frame-Options': 'DENY',
     'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; " +
       "img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
@@ -148,12 +145,11 @@ function send(res, status, body, type = 'application/json; charset=utf-8') {
 }
 
 // A request whose body was never read to the end leaves the connection unusable
-// for a second request, and the client is usually still sending. Drain those
-// bytes and only then drop the socket: closing a socket that still has unread
-// data in its receive buffer makes the stack reply with RST, which throws away
-// the response we just flushed — the client would see the very ECONNRESET this
-// fix exists to remove (I-07 / D-26). Nothing is buffered while draining: the
-// `data` handler in `readBody` drops every chunk after the overflow.
+// for a second request, so drain it and only then drop the socket: closing one
+// with unread data in its buffer makes the stack reply with RST, which throws
+// away the response we just flushed — the very ECONNRESET this fix removes
+// (I-07 / D-26). `readBody` drops every chunk after the overflow, so nothing is
+// buffered while draining.
 function closeAfterOverflow(req) {
   const drop = () => req.destroy();
   req.on('error', drop);
@@ -172,10 +168,9 @@ function readBody(req, max = MAX_BODY_BYTES) {
       size += chunk.length;
       if (size > max) {
         // Stop consuming instead of `req.destroy()`: the socket has to stay
-        // alive long enough for the 413 to be written and flushed, otherwise
-        // the client only ever sees ECONNRESET and `BODY_TOO_LARGE` is
-        // unreachable in `ERROR_STATUS` (I-07 / D-26). The overflowing chunk
-        // is never pushed, so the heap stays bounded by `max` plus one chunk.
+        // alive long enough for the 413 to be flushed, otherwise the client only
+        // ever sees ECONNRESET (I-07 / D-26). The overflowing chunk is dropped,
+        // so the heap stays bounded by `max` plus one chunk.
         overflowed = true;
         req.pause();
         reject(new Error('BODY_TOO_LARGE'));
@@ -224,6 +219,7 @@ export function createConsole({
     '/api/logs': (url) => ({ logs: readLogs(logDirectory, Number(url.searchParams.get('limit')) || 120) }),
     '/api/config': () => buildConfig({ config }),
     '/api/settings': () => buildSettings({ config, store }),
+    '/api/qzone/posts': () => buildQzonePosts({ config, store, now: now() }),
     '/api/cost': (url) => buildCost({ config, store, range: url.searchParams.get('range') ?? '24h', now: now() }),
     '/api/cost/turns': (url) => buildCostTurns({
       config, store, session: url.searchParams.get('session') ?? '',
@@ -240,8 +236,7 @@ export function createConsole({
     '/api/slang/entry': (url) => buildSlangEntry({ slang: requireSlang(), id: url.searchParams.get('id') ?? '' }),
     '/api/stickers': () => buildStickers({ stickers }),
     '/api/stickers/entry': (url) => buildStickerEntry({ stickers: requireStickers(), id: url.searchParams.get('id') ?? '' }),
-    // The backup is served as a plain JSON document so the browser can save it
-    // with one click; restoring goes through the write route below.
+    // The backup is a plain JSON document; restoring goes through the write route.
     '/api/slang/export': () => requireSlang().exportAll(),
     // Console login: status only, and never anything that came out of the
     // WebUI token or the Credential (see src/napcat-webui.js).
@@ -265,6 +260,8 @@ export function createConsole({
       return { active: target.setActive(body?.name ?? ''), ...buildPersonas({ personas }) };
     },
     '/api/settings': (url, body) => applySetting({ config, store, name: body?.name, value: body?.value }),
+    // Deleting a post is a protocol action: `delete_qzone_msg` first, row second.
+    '/api/qzone/delete': (url, body) => deleteQzonePost({ config, store, transport, id: body?.id }),
     '/api/social/config': (url, body) => requireSocial().setParams(body ?? {}),
     // Per-group specialisation: one endpoint, routed by `subsystem`, so the page
     // has a single save path for persona / social / slang / reset.
@@ -365,7 +362,12 @@ export function createConsole({
         res.setHeader('Connection', 'close');
         res.once('finish', () => closeAfterOverflow(req));
       }
-      send(res, ERROR_STATUS.get(code) ?? 500, { error: ERROR_STATUS.has(code) ? code : 'internal' });
+      // A failure may carry a short, already-sanitised reason (a protocol message
+      // such as ONEBOT_TIMEOUT). Only errors that set `detail` expose it, so the
+      // shape of every other error body stays exactly `{ error }`.
+      const body = { error: ERROR_STATUS.has(code) ? code : 'internal' };
+      if (typeof error?.detail === 'string' && error.detail) body.detail = error.detail;
+      send(res, ERROR_STATUS.get(code) ?? 500, body);
     }
   }
 

@@ -11,6 +11,7 @@ const PAGES = [
   { id: 'personas', title: '人格' },
   { id: 'groups', title: '群管理' },
   { id: 'activity', title: '活跃度与静默' },
+  { id: 'qzone', title: '空间说说' },
   { id: 'assets', title: '素材库' },
   { id: 'cost', title: '计费看板' },
   { id: 'logs', title: '日志与健康' },

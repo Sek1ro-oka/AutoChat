@@ -14,7 +14,8 @@ const ACTIVITY_PARAMS = [
   ['messageTtlHours', '消息保留', v => `${num(v)} 小时`],
   ['idleEnabled', '看气氛插话', v => (v ? '已开启' : '已关闭')],
   ['idleMinutes', '插话最短空闲', v => `${num(v)} 分钟`],
-  ['idleHours', '插话最长空闲', v => `${num(v)} 小时`],
+  // 这是「允许冒泡的时段」（H-H），不是时长：别用 num() 格式化成小时数。
+  ['idleHours', '冒泡时段', v => (v === undefined || v === null || v === '' ? DASH : String(v))],
 ];
 
 // 可写的五项数字 + 一个开关，键名就是 POST /api/social/config 的字段名。
@@ -23,7 +24,8 @@ const ACTIVITY_EDITABLE = [
   ['cooldownSeconds', '发言冷却（秒）', '1', '同一群里两次发言之间至少隔这么久。'],
   ['dailyLimit', '每日上限（条）', '1', '0 等于这个群今天不再发言。'],
   ['idleMinutes', '插话最短空闲（分钟）', '1', '群里安静够久才可能被当成「气氛到了」。'],
-  ['idleHours', '插话最长空闲（小时）', '1', '超过这个时长就不插话了，避免冷场硬接。'],
+  // 后端 src/social/params.js 的 validHours 只收 H-H（0-23、起点 ≤ 终点），所以这里是文本框。
+  ['idleHours', '冒泡时段', '', 'H-H，如 9-22；只在这个时段里主动冒泡（0-23，起点不晚于终点）。', 'text'],
 ];
 
 const ACTIVITY_STATE = {
@@ -80,8 +82,9 @@ pages.activity = async () => {
   const tableHtml = table(['群', '状态', '能量', '今日 / 上限', '最近发言', '最近判断'], rows,
     { empty: '还没有任何群被登记。让机器人先在群里跑一次。' });
 
-  const editable = ACTIVITY_EDITABLE.map(([key, label, step, hint]) => field(label, `social.${key}`,
-    `<input type="number" id="act-${key}" step="${step}" min="0" value="${esc(String(params[key] ?? ''))}">`
+  const editable = ACTIVITY_EDITABLE.map(([key, label, step, hint, type = 'number']) => field(label, `social.${key}`,
+    `<input type="${type}" id="act-${key}"${type === 'number' ? ` step="${step}" min="0"` : ' placeholder="9-22"'}`
+    + ` value="${esc(String(params[key] ?? ''))}">`
     + `<button type="button" class="btn btn-sm" data-act="activitySave" data-value="${key}">保存</button>`, hint));
   const idle = field('看气氛插话', 'social.idleEnabled',
     sw(params.idleEnabled === true, '看气氛插话', 'data-act="activityToggle" data-value="idleEnabled"'),
@@ -91,11 +94,26 @@ pages.activity = async () => {
 
   return pageHead('动态', '每个群的仿真状态、能量与最近一次判断依据。')
     + stats + tableHtml
-    + card('全局参数', '改这里影响所有没做按群覆盖的群；按群覆盖请去「群管理」', editable.concat(idle).join(''))
+    + card('全局参数', '改这里影响所有没做按群覆盖的群；按群覆盖请去「群管理」',
+      // 就地报错的提示位：放在卡片顶部，保存失败时只改这里，不整页重绘。
+      '<div id="act-notice"></div>' + editable.concat(idle).join(''))
     + fixed;
 };
 
 const isEditable = key => key === 'idleEnabled' || ACTIVITY_EDITABLE.some(([name]) => name === key);
+
+// 冒泡时段是「H-H」文本：后端 params.js 的 validHours 要的就是这个形式，
+// 这里先按同一套规则拦住（0-23、起点 ≤ 终点），省一次 400，也避免把空值当 0。
+const ACTIVITY_SPAN = /^(\d{1,2})-(\d{1,2})$/;
+
+const activitySpan = raw => {
+  const match = ACTIVITY_SPAN.exec(raw);
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  if (start > 23 || end > 23 || start > end) return null;
+  return `${start}-${end}`;
+};
 
 // 数字字段只收「不小于 0 的数」；不合法就标红并让调用方别发请求。
 const activityValue = key => {
@@ -103,6 +121,11 @@ const activityValue = key => {
   if (!input) return null;
   input.classList.remove('is-invalid');
   const raw = String(input.value ?? '').trim();
+  if (key === 'idleHours') {
+    const span = activitySpan(raw);
+    if (span === null) input.classList.add('is-invalid');
+    return span;
+  }
   const value = Number(raw);
   if (raw === '' || !Number.isFinite(value) || value < 0) {
     input.classList.add('is-invalid');
@@ -111,11 +134,22 @@ const activityValue = key => {
   return value;
 };
 
+// 就地写错误，不整页重绘：重绘会把操作者刚填的其它字段一起冲掉。
+const activityRefuse = text => {
+  const slot = document.getElementById('act-notice');
+  if (slot) slot.innerHTML = alertBox('err', '没有保存', esc(text));
+};
+
+const ACTIVITY_INVALID = {
+  idleHours: '时段要写成 9-22 这种形式（0-23，起点不晚于终点）',
+  value: '请填一个不小于 0 的数字',
+};
+
 action('activitySave', async button => {
   const key = button.dataset.value;
   const value = activityValue(key);
   if (value === null) {
-    toast('请填一个不小于 0 的数字', 'err');
+    activityRefuse(ACTIVITY_INVALID[key] || ACTIVITY_INVALID.value);
     return;
   }
   await post('/api/social/config', { [key]: value });

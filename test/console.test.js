@@ -11,7 +11,7 @@ test('every api route requires the console token', async t => {
   const base = `http://127.0.0.1:${server.address().port}`;
   for (const path of ['/api/summary', '/api/sessions', '/api/charges', '/api/logs', '/api/config',
     '/api/cost', '/api/cost/turns', '/api/personas', '/api/personas/file', '/api/social',
-    '/api/settings', '/api/slang', '/api/slang/entry', '/api/slang/export']) {
+    '/api/settings', '/api/slang', '/api/slang/entry', '/api/slang/export', '/api/qzone/posts']) {
     assert.equal((await fetch(base + path)).status, 401, path);
   }
   assert.equal((await fetch(`${base}/api/summary?token=wrong`)).status, 401);
@@ -61,9 +61,9 @@ test('unknown api routes 404 and the shell page needs no token', async t => {
   assert.equal(page.status, 200);
   const html = await page.text();
   assert.match(html, /AutoChat 控制台/);
-  const pages = ['overview', 'model', 'personas', 'groups', 'activity', 'assets', 'cost', 'logs', 'settings'];
+  const pages = ['overview', 'model', 'personas', 'groups', 'activity', 'qzone', 'assets', 'cost', 'logs', 'settings'];
   for (const name of pages) assert.match(html, new RegExp(`data-page="${name}"`), `${name} is reachable from the nav`);
-  // The redesign merged eleven old tabs into nine, so the old ids must be gone.
+  // The redesign merged eleven old tabs into nine, then 空间说说 became the tenth.
   for (const gone of ['social', 'slang', 'stickers', 'config', 'sessions']) {
     assert.ok(!html.includes(`data-page="${gone}"`), `${gone} is no longer a tab of its own`);
   }
@@ -75,8 +75,8 @@ test('unknown api routes 404 and the shell page needs no token', async t => {
   // The script assets are served without a token: they are code, not data, and
   // the browser cannot attach a header to its own <script> fetch.
   const scripts = ['core.js', 'pages-overview.js', 'pages-model.js', 'pages-personas.js', 'pages-groups.js',
-    'pages-activity.js', 'pages-assets.js', 'assets-stickers.js', 'assets-slang.js', 'pages-cost.js',
-    'pages-logs.js', 'pages-settings.js', 'app.js'];
+    'pages-activity.js', 'pages-qzone.js', 'pages-assets.js', 'assets-stickers.js', 'assets-slang.js',
+    'pages-cost.js', 'pages-logs.js', 'pages-settings.js', 'app.js'];
   for (const asset of scripts) {
     const served = await fetch(`${base}/${asset}`);
     assert.equal(served.status, 200, asset);
@@ -91,6 +91,7 @@ test('unknown api routes 404 and the shell page needs no token', async t => {
   assert.match(await (await fetch(`${base}/pages-personas.js`)).text(), /pages\.personas/);
   assert.match(await (await fetch(`${base}/pages-groups.js`)).text(), /pages\.groups/);
   assert.match(await (await fetch(`${base}/pages-activity.js`)).text(), /pages\.activity/);
+  assert.match(await (await fetch(`${base}/pages-qzone.js`)).text(), /pages\.qzone/);
   assert.match(await (await fetch(`${base}/pages-assets.js`)).text(), /pages\.assets/);
   assert.match(await (await fetch(`${base}/assets-stickers.js`)).text(), /sticker/);
   assert.match(await (await fetch(`${base}/assets-slang.js`)).text(), /slang/);
