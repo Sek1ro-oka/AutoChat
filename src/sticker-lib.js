@@ -134,7 +134,7 @@ export class StickerLib {
         await send(action, { ...target, message: [{ type: 'image', data: { file } }] });
         this.store.recordStickerUse(sticker.id, this.now());
         sent += 1;
-      } catch { this.log('sticker_send_failed'); }
+      } catch (error) { this.log('sticker_send_failed', errorDetail(error)); }
     }
     return sent;
   }

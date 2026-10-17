@@ -360,7 +360,7 @@ export class Bot {
     if (stickerIntent.ids.length) {
       try {
         await this.stickers.sendByIds(stickerIntent.ids, { action: message.action, target: message.target }, send);
-      } catch { this.log('sticker_send_failed'); }
+      } catch (error) { this.log('sticker_send_failed', errorDetail(error)); }
     }
   }
 }

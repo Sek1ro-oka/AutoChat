@@ -321,7 +321,7 @@ export class Social extends IdleSpeech {
         response = await send('send_group_msg', {
           group_id: Number(group), message: [{ type: 'text', data: { text: chunks[index] } }],
         });
-      } catch { this.log('social_send_failed'); break; }
+      } catch (error) { this.log('social_send_failed', errorDetail(error)); break; }
       sent += 1;
       this.memory.remember({
         id: response?.message_id === undefined || response?.message_id === null ? null : String(response.message_id),
@@ -332,7 +332,7 @@ export class Social extends IdleSpeech {
     if (stickerIds.length) {
       try {
         sent += await this.stickers.sendByIds(stickerIds, { action: 'send_group_msg', target: { group_id: Number(group) } }, send);
-      } catch { this.log('social_sticker_send_failed'); }
+      } catch (error) { this.log('social_sticker_send_failed', errorDetail(error)); }
     }
     if (!sent) return false;
 
