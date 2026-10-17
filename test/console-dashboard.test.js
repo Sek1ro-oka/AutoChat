@@ -84,3 +84,65 @@ test('the cost dashboard zero-fills its range and prices samples supplied by the
   store.close();
 });
 
+// T-031a：三张卡是「从该周期起点到 now」的累计，起点按北京时间自然日 / ISO 周一 / 月初
+// 截断，上界是 now 本身 —— 正好落在 now 的样本归下一个窗口（costTotals 是左闭右开）。
+test('cost cards accumulate from China midnight, Monday and the 1st up to now', () => {
+  const store = new Store();
+  const config = { inputPrice: 2, outputPrice: 8, cacheHitPrice: 0.04, offPeakRatio: 0.5 };
+  const now = Date.UTC(2026, 9, 8, 2, 30); // 北京时间 2026-10-08（周四）10:30
+  const note = (turn, at, miss) => store.noteSample({ turnKey: `private:1:${turn}:1`,
+    session: 'private:1', turn, seq: 1, at, miss, hit: 0, out: 0 });
+  note(1, Date.UTC(2026, 8, 20, 0, 0), 4000); // 北京 09-20：本月之外
+  note(2, Date.UTC(2026, 9, 6, 0, 0), 2000); // 北京 10-06 08:00：本周，但不是今天
+  note(3, Date.UTC(2026, 9, 8, 1, 0), 1000); // 北京 10-08 09:00：今天
+  note(4, now, 500); // 正好落在 now：归下一个窗口
+  const { cards, totals } = buildCost({ config, store, now });
+  assert.equal(cards.today.since, Date.UTC(2026, 9, 7, 16, 0), '北京 10-08 00:00');
+  assert.equal(cards.week.since, Date.UTC(2026, 9, 4, 16, 0), '北京 10-05 周一 00:00');
+  assert.equal(cards.month.since, Date.UTC(2026, 9, 0, 16, 0), '北京 10-01 00:00（= 09-30T16:00Z）');
+  for (const card of [cards.today, cards.week, cards.month]) assert.equal(card.until, now);
+  assert.deepEqual([cards.today.tokens, cards.week.tokens, cards.month.tokens], [1000, 3000, 3000], '09-20 那条属于上月');
+  assert.deepEqual([cards.today.calls, cards.week.calls, cards.today.turns], [1, 2, 1]);
+  assert.equal(cards.today.totalMicro, 2000); // 1000 未命中 token × 2 元/M
+  assert.deepEqual([cards.today.avgCallMicro, cards.today.avgTurnMicro], [2000, 2000]);
+  // 24h 区间的上界是下一个整点，所以 totals 把「正好在 now」那条也算进来了。
+  assert.deepEqual([totals.calls, totals.tokens], [2, 1500], '卡与 totals 的上界不同，不矛盾');
+  // 卡的字段形状与 totals 完全一致，只有 since / until 是卡自己的。
+  const shape = block => Object.keys(block).filter(key => key !== 'since' && key !== 'until').sort();
+  for (const card of [cards.today, cards.week, cards.month]) assert.deepEqual(shape(card), shape(totals));
+  const empty = new Store();
+  const zero = buildCost({ config, store: empty, now }).cards.today;
+  assert.deepEqual([zero.tokens, zero.hitRate, zero.avgCallMicro], [0, null, 0], '空库：除零得 0，不是 NaN');
+  empty.close();
+  store.close();
+});
+
+// T-031a：热力图是固定的 7 × 24 = 168 格，覆盖 28 天（4 个完整周），与 range 无关。
+// 同一个「周几 × 小时」格子把 4 周加在一起，这正是它比折线图多的那点信息。
+test('the heatmap is a zero-filled 7 x 24 grid over the last 28 China days', () => {
+  const store = new Store();
+  const config = { inputPrice: 2, outputPrice: 8, cacheHitPrice: 0.04, offPeakRatio: 0.5 };
+  const now = Date.UTC(2026, 9, 8, 2, 30); // 北京 2026-10-08（周四）10:30
+  const note = (turn, at, miss) => store.noteSample({ turnKey: `private:1:${turn}:1`,
+    session: 'private:1', turn, seq: 1, at, miss, hit: 0, out: 0 });
+  note(1, Date.UTC(2026, 8, 29, 1, 0), 1000000); // 北京 09-29（周二）09:00
+  note(2, Date.UTC(2026, 9, 6, 1, 0), 1000000); // 北京 10-06（周二）09:00：与上一条同格
+  note(3, Date.UTC(2026, 9, 7, 1, 0), 500000); // 北京 10-07（周三）09:00
+  note(4, Date.UTC(2026, 8, 1, 1, 0), 1000); // 北京 09-01：28 天窗口之外
+  const { heatmap } = buildCost({ config, store, now });
+  // 上界是下一个整点（北京 11:00），下界正好 28 天之前
+  assert.equal(heatmap.until, Date.UTC(2026, 9, 8, 3, 0));
+  assert.equal(heatmap.since, heatmap.until - 28 * 86400000);
+  assert.deepEqual(heatmap.rows.map(row => row.weekday), [1, 2, 3, 4, 5, 6, 7], '行按周一到周日排好');
+  const cells = heatmap.rows.flatMap(row => row.hours);
+  assert.equal(cells.length, 168, '恰好 7 × 24 格');
+  assert.deepEqual(Object.keys(cells[0]), ['totalMicro', 'calls'], '每格只有两个数字，没有峰谷拆分');
+  assert.equal(cells.reduce((sum, cell) => sum + cell.calls, 0), 3, '28 天之外的那条不进图');
+  assert.deepEqual(heatmap.rows[1].hours[9], { totalMicro: 4000000, calls: 2 }, '周二 09:00 把两周加在一起');
+  assert.deepEqual(heatmap.rows[2].hours[9], { totalMicro: 1000000, calls: 1 }, '周三 09:00 是独立一格');
+  assert.equal(cells.filter(cell => cell.calls > 0).length, 2, '其余 166 格都是零填充');
+  // 与 range 无关：换区间不挪窗口
+  const other = buildCost({ config, store, now, range: '30d' }).heatmap;
+  assert.deepEqual([other.since, other.until, other.rows], [heatmap.since, heatmap.until, heatmap.rows]);
+  store.close();
+});
