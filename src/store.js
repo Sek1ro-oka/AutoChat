@@ -28,10 +28,19 @@ const columns = (db, table) => new Set(db.prepare(`PRAGMA table_info(${table})`)
 // Slang persistence lives in src/store-slang.js (mixed in by extending
 // `SlangStore`) so this file stays inside the project's size ceiling.
 export class Store extends StickerStore {
-  constructor(path = ':memory:') {
+  // `readonly` is deliberately not SQLite's own read-only flag: the database runs in
+  // WAL mode, which a read-only connection cannot open. It means "open someone else's
+  // database without owning it" — no directory creation, no schema, no migration,
+  // just a short busy timeout so a locked file fails fast instead of blocking the
+  // console. Only readers (src/console/hub.js) pass it.
+  constructor(path = ':memory:', { readonly = false } = {}) {
     super();
-    if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
+    if (!readonly && path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
+    if (readonly) {
+      this.db.exec('PRAGMA busy_timeout = 2000');
+      return;
+    }
     this.db.exec(SCHEMA);
     this.migrate();
   }

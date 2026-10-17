@@ -2,7 +2,7 @@
 // only has to own the HTTP transport (auth, dispatch, static assets).
 
 import {
-  buildSummary, buildSessions, buildCharges, buildConfig, buildSettings,
+  buildSummary, buildSessions, buildCharges, buildConfig, buildSettings, buildInstances,
   buildQzonePosts, buildCost, buildCostTurns,
   buildPersonas, buildPersonaFile, buildSocial, buildGroups, buildSlang, buildSlangEntry,
   buildStickers, buildStickerEntry, applySetting, deleteQzonePost, applyGroupPatch,
@@ -10,7 +10,7 @@ import {
 import { readLogs } from './logs.js';
 
 export function createRoutes({
-  config, store, bot, transport, runtime, personas, social, slang, stickers,
+  config, store, hub, bot, transport, runtime, personas, social, slang, stickers,
   now, startedAt, logDirectory,
   requirePersonas, requireSocial, requireSlang, requireStickers, login, service,
 }) {
@@ -27,6 +27,8 @@ export function createRoutes({
       config, store, session: url.searchParams.get('session') ?? '',
       limit: Number(url.searchParams.get('limit')) || 100,
     }),
+    // Every instance on this machine, read through a read-only hub (T-033).
+    '/api/instances': () => buildInstances({ hub }),
     '/api/personas': () => buildPersonas({ personas }),
     '/api/personas/file': (url) => buildPersonaFile({
       personas, kind: url.searchParams.get('kind') === 'behavior' ? 'behavior' : 'card',

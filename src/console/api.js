@@ -7,6 +7,7 @@
 
 export {
   redact, buildSummary, buildSessions, buildCharges, buildConfig, buildSettings, applySetting,
+  buildInstances,
 } from './api-core.js';
 
 export { COST_RANGES, buildCost, buildCostTurns } from './api-cost.js';

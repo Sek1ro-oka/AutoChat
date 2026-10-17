@@ -88,3 +88,11 @@ export function applySetting({ config, store, name, value }) {
   applyRuntimeValue(config, store, name, value);
   return runtimeValues(config, store);
 }
+
+// --- Instance hub ----------------------------------------------------------
+// The hub is injected, never imported here: routes stay pure over their inputs, and
+// a console started without one still answers (`server.js` builds the default).
+export function buildInstances({ hub }) {
+  if (!hub) throw new Error('HUB_UNAVAILABLE');
+  return hub.list();
+}

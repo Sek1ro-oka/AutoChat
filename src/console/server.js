@@ -16,6 +16,7 @@ import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServiceApi } from './api.js';
+import { createHub } from './hub.js';
 import { createRoutes } from './routes.js';
 import { harden } from '../permissions.js';
 import { createNapCatWebui } from '../napcat-webui.js';
@@ -175,7 +176,7 @@ function readBody(req, max = MAX_BODY_BYTES) {
 }
 
 export function createConsole({
-  config, store, bot, transport, runtime, personas = null, social = null, slang = null, stickers = null, webui = null,
+  config, store, hub = null, bot, transport, runtime, personas = null, social = null, slang = null, stickers = null, webui = null,
   log = () => {},
   startedAt = Date.now(), host = '127.0.0.1', port = null, logDirectory = 'logs',
   // The console may ask this process to exit (T-019); both hooks are injectable so
@@ -202,8 +203,10 @@ export function createConsole({
   const requireStickers = requireOf(stickers, 'STICKER_UNAVAILABLE');
 
   // The endpoint tables live in routes.js: this file only owns the transport.
+  // Without an injected hub the console still answers /api/instances — the default
+  // hub reads the same root this process was started from.
   const { reads, writes } = createRoutes({
-    config, store, bot, transport, runtime, personas, social, slang, stickers,
+    config, store, hub: hub ?? createHub({ config }), bot, transport, runtime, personas, social, slang, stickers,
     now, startedAt, logDirectory,
     requirePersonas, requireSocial, requireSlang, requireStickers, login, service,
   });

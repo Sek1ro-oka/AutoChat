@@ -82,6 +82,14 @@ function heatGrid({ store, config, now }) {
   return { since, until, rows };
 }
 
+// The three spend cards, on their own so the instance hub can fill one per row
+// without rebuilding a whole /api/cost payload for every database it opens.
+export function costCards({ config, store, now = Date.now() }) {
+  const windows = cardWindows(now);
+  const card = window => ({ ...window, ...metrics(store.costTotals(window), config) });
+  return { today: card(windows.today), week: card(windows.week), month: card(windows.month) };
+}
+
 export function buildCost({ config, store, range = '24h', sessions = 50, samples = 20, now = Date.now() }) {
   const spec = COST_RANGES[range] ?? COST_RANGES['24h'];
   // Align to China-time bucket boundaries (`epoch multiples` would put a "day"
@@ -89,9 +97,6 @@ export function buildCost({ config, store, range = '24h', sessions = 50, samples
   const until = Math.ceil((now + CHINA_OFFSET_MS) / spec.unitMs) * spec.unitMs - CHINA_OFFSET_MS;
   const since = until - spec.buckets * spec.unitMs;
   const span = { since, until };
-  const windows = cardWindows(now);
-  // A card is the same metric block as `totals`, accumulated from its own start.
-  const card = window => ({ ...window, ...metrics(store.costTotals(window), config) });
   return {
     range: COST_RANGES[range] ? range : '24h', ranges: Object.keys(COST_RANGES),
     unit: spec.unit, unitMs: spec.unitMs, since, until,
@@ -100,7 +105,7 @@ export function buildCost({ config, store, range = '24h', sessions = 50, samples
       cacheHitPrice: config.cacheHitPrice ?? null, offPeakRatio: config.offPeakRatio ?? 0.5,
     },
     totals: metrics(store.costTotals(span), config),
-    cards: { today: card(windows.today), week: card(windows.week), month: card(windows.month) },
+    cards: costCards({ config, store, now }),
     heatmap: heatGrid({ store, config, now }),
     series: series(store.costSeries({ ...span, unitMs: spec.unitMs }), { start: since, ...spec }, config),
     sessions: store.costSessions({ ...span, limit: sessions }).map(row => ({
