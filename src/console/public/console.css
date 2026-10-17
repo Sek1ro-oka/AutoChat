@@ -1,23 +1,40 @@
 /* AutoChat 控制台样式表。
    颜色 token、布局与组件规格来自 work/program/demo/console-redesign-demo.html（用户已确认的设计稿）。
-   数值原样搬运，没有做"看起来更好"的微调：--line 只做装饰分隔线（对白底不足 3:1，不能当控件边界），
-   控件边界一律 --line-ctl(3.52:1)；白字压 --brand(#4D6BFE) 只有 4.33:1，所以实底按钮用 --brand-solid(5.79:1)。
+   T-021 / 批次 A 只动颜色：色板从"蓝白灰"换成六个鲜艳色相，布局与页面结构一行没动
+   （卡片左侧色条、KPI 胶囊这类页面级强调属于批次 B，不在这里）。
+   --line 只做装饰分隔线（对白底不足 3:1，不能当控件边界），控件边界一律 --line-ctl(3.52:1)。
+   白字压 --brand(#4D6BFE) 只有 4.33:1，所以实底按钮用 --blue(#1D4ED8 = 6.70:1)。
    样式全部在这里：CSP 是 style-src 'self'，页面里不许有 <style>、style="" 或 style.cssText。 */
 :root {
   /* 底色与分隔：--line 只能做装饰性分隔线，任何"控件边界"必须用 --line-ctl（3.52:1） */
   --bg:#F5F8FF; --panel:#FFFFFF; --panel-2:#EEF3FF; --line:#E3E9F5; --line-ctl:#7C89A3;
-  /* 文字：--muted 由 #6B7A99（4.31✗）换成 #5A6884（5.60✓） */
-  --fg:#1B2233; --muted:#5A6884;
-  /* 品牌蓝：--brand 只做图形与大字号；正文、按钮底色一律用 -ink/-solid/-strong */
-  --brand:#4D6BFE; --brand-ink:#3B55E6; --brand-solid:#3B57E0; --brand-strong:#2F4BD8;
-  --brand-dark:#3B57E0; --brand-soft:#EEF2FF;
-  /* 语义色：旧值 --ok 2.76✗ / --warn 2.35✗ / --err 3.76 / --money 2.35✗ 全部不达 4.5:1 */
-  --ok:#0E7C4A; --warn:#B45309; --err:#C62828; --money:#C2410C;
-  /* 女仆粉：--maid-graphic 只做图形/装饰，文字必须用 --maid-ink（5.66✓） */
-  --maid:#FF8FAB; --maid-ink:#C2255C; --maid-graphic:#E8628C; --maid-soft:#FFF0F5;
-  /* 图表：绘图区底色必须是 --panel(#FFFFFF)，不得用 --bg 那种浅蓝底 */
-  --chart-1:#4D6BFE; --chart-11:#D97706;
-  /* 焦点环：内圈深色 + 外圈白色 halo（暗色模式反过来：内白外黑） */
+  /* 文字：--muted 由 #6B7A99（4.31✗）换成 #5A6884（5.60✓）；--fg-2 给表头/数据块当次级深色 */
+  --fg:#1B2233; --fg-2:#3A4664; --muted:#5A6884;
+  /* 六个鲜艳色相，每个配 tint(浅底) / line(浅底装饰边框)。ink 压自己的 tint 仍 ≥4.5:1（T-021 报告里逐对比值）；
+     tint 是不透明底，所以徽章的字永远落在自己的 tint 上，不会落到表格 hover 的浅蓝上。 */
+  --violet:#6D28D9; --violet-tint:#F4EDFF; --violet-line:#D8C7FA;
+  --blue:#1D4ED8; --blue-tint:#E8EFFF; --blue-line:#BED0FF;
+  --teal:#0F766E; --teal-tint:#E3F4F1; --teal-line:#A9DDD6;
+  --amber:#B45309; --amber-tint:#FFF6E6; --amber-line:#F3D29B;
+  --rose:#BE185D; --rose-tint:#FDE9F1; --rose-line:#F8C0D5;
+  --green:#047857; --green-tint:#E4F7EE; --green-line:#A8DFC2;
+  /* 语义别名：组件只写语义名，色相只在上面的六行里出现一次。危险 = 玫红（原 #C62828 并入，见报告） */
+  --ok:var(--green); --ok-tint:var(--green-tint); --ok-line:var(--green-line);
+  --warn:var(--amber); --warn-tint:var(--amber-tint); --warn-line:var(--amber-line);
+  --err:var(--rose); --err-tint:var(--rose-tint); --err-line:var(--rose-line);
+  --info:var(--blue); --info-tint:var(--blue-tint); --info-line:var(--blue-line);
+  --run:var(--violet); --run-tint:var(--violet-tint); --run-line:var(--violet-line);
+  --money:var(--amber);
+  /* 品牌蓝：--brand 只给 logo 与装饰图形（白字压它 4.33✗）；实底、正文、交互一律走 --blue(6.70) */
+  --brand:#4D6BFE; --brand-ink:var(--blue); --brand-solid:var(--blue); --brand-strong:#1E40AF;
+  --brand-dark:var(--blue); --brand-soft:var(--blue-tint);
+  /* 女仆粉：文字用 --maid-ink（=玫红，对 #FFF0F5 5.47✓）；--maid-graphic 只做图形/装饰 */
+  --maid:#FF8FAB; --maid-ink:var(--rose); --maid-graphic:#E8628C; --maid-soft:#FFF0F5;
+  /* 图表：分类色板按色相拉开（蓝-紫-青-琥珀-玫红-翠绿，相邻色相差 ≥30°）。单序列只用一个色相，
+     同一条序列涂多色等于说谎；今日柱是"另一条序列"，用琥珀单独高亮。绘图区底色必须是 --panel。 */
+  --chart-1:var(--blue); --chart-2:var(--violet); --chart-3:var(--teal);
+  --chart-4:var(--amber); --chart-5:var(--rose); --chart-6:var(--green);
+  /* 焦点环：内圈深色 + 外圈白色 halo（暗色模式反过来：内白外黑），两个方向都 ≥3:1 */
   --focus:#111827; --focus-halo:#FFFFFF;
   --r:14px; --r-sm:10px;
   --shadow:0 1px 2px rgba(27,34,51,.06), 0 8px 24px rgba(27,34,51,.06);
@@ -46,8 +63,9 @@ code { font-size:12.5px; color:var(--brand-dark); background:var(--brand-soft); 
 .topmeta { margin-left:auto; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .chip { display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; background:var(--panel-2); border:1px solid var(--line); color:var(--muted); font-size:12px; }
 .chip b { color:var(--fg); font-weight:600; }
-.chip-ok { background:#E9FBF2; border-color:#BFEBD5; color:var(--ok); }
-.chip-warn { background:#FFF7E8; border-color:#FBE0B4; color:#8A5A00; }
+/* 顶栏胶囊：状态色也只落在 tint 上，深色字压 tint 仍 ≥4.5:1（琥珀 4.68 / 翠绿 4.92） */
+.chip-ok { background:var(--ok-tint); border-color:var(--ok-line); color:var(--ok); }
+.chip-warn { background:var(--warn-tint); border-color:var(--warn-line); color:var(--warn); }
 
 /* ---------- 布局 ---------- */
 .layout { display:grid; grid-template-columns:220px minmax(0,1fr); gap:20px; padding:18px 20px 8px; align-items:start; }
@@ -56,10 +74,11 @@ code { font-size:12.5px; color:var(--brand-dark); background:var(--brand-soft); 
 .navgroup { font-size:11px; color:var(--muted); padding:8px 10px 6px; letter-spacing:.6px; }
 .nav-btn { display:flex; align-items:center; gap:10px; width:100%; padding:9px 10px; margin:1px 0; border:1px solid transparent; border-radius:var(--r-sm); background:transparent; color:var(--fg); font:inherit; font-size:13.5px; text-align:left; cursor:pointer; transition:.14s; }
 .nav-btn:hover { background:var(--panel-2); }
-.nav-btn.active { background:var(--brand-soft); border-color:#D6E0FF; color:var(--brand-dark); font-weight:600; }
-.nav-btn.active .ico { color:var(--brand); }
+/* 当前页 = 紫：整屏唯一的"你在哪"标记，用色相而不是加粗去说话（紫字压紫 tint 6.23:1） */
+.nav-btn.active { background:var(--run-tint); border-color:var(--run-line); color:var(--run); font-weight:600; }
+.nav-btn.active .ico { color:var(--run); }
 .nav-btn .ico { color:var(--muted); flex:none; }
-.nav-tip { margin-top:10px; padding:9px 10px; border-radius:var(--r-sm); background:var(--maid-soft); border:1px solid #FFE0EA; color:#9B4A63; font-size:12px; }
+.nav-tip { margin-top:10px; padding:9px 10px; border-radius:var(--r-sm); background:var(--maid-soft); border:1px solid var(--rose-line); color:var(--maid-ink); font-size:12px; }
 
 .main { min-width:0; }
 .page { display:none; }
@@ -84,15 +103,18 @@ code { font-size:12.5px; color:var(--brand-dark); background:var(--brand-soft); 
 /* ---------- 徽章 / 状态点 ---------- */
 .badge { display:inline-flex; align-items:center; gap:5px; padding:1px 8px; border-radius:999px; font-size:11.5px; font-weight:600; border:1px solid transparent; white-space:nowrap; }
 /* [未落地] maid 粉「新」徽章只给女仆卡（删自设计稿第 86–87 行） */
-.badge-ok { background:#E9FBF2; border-color:#BFEBD5; color:var(--ok); }
-.badge-warn { background:#FFF7E8; border-color:#FBE0B4; color:#8A5A00; }
-.badge-err { background:#FEF0EF; border-color:#FBD5D2; color:#B42318; }
+/* 状态徽章：五档语义各占一个色相 —— 成功=翠绿、警告=琥珀、失败/危险=玫红、信息=蓝、中性=灰。
+   徽章底色是不透明的 tint，所以文字只压在 tint 上，不压表格的隔行/ hover 色：
+   翠绿 4.92 / 琥珀 4.68 / 玫红 5.20 / 蓝 5.82 / 灰 5.04（对各自 tint，全部 ≥4.5:1）。 */
+.badge-ok { background:var(--ok-tint); border-color:var(--ok-line); color:var(--ok); }
+.badge-warn { background:var(--warn-tint); border-color:var(--warn-line); color:var(--warn); }
+.badge-err { background:var(--err-tint); border-color:var(--err-line); color:var(--err); }
 .badge-muted { background:var(--panel-2); border-color:var(--line); color:var(--muted); }
-.badge-brand { background:var(--brand-soft); border-color:#D6E0FF; color:var(--brand-dark); }
+.badge-brand { background:var(--info-tint); border-color:var(--info-line); color:var(--info); }
 .dot { display:inline-block; width:8px; height:8px; border-radius:50%; flex:none; }
-.dot-ok { background:var(--ok); box-shadow:0 0 0 3px rgba(14,124,74,.15); }
+.dot-ok { background:var(--ok); box-shadow:0 0 0 3px rgba(4,120,87,.15); }
 .dot-warn { background:var(--warn); box-shadow:0 0 0 3px rgba(180,83,9,.15); }
-.dot-err { background:var(--err); box-shadow:0 0 0 3px rgba(198,40,40,.15); }
+.dot-err { background:var(--err); box-shadow:0 0 0 3px rgba(190,24,93,.15); }
 .dot-off { background:var(--line-ctl); }
 
 /* ---------- 键值 / 统计 ---------- */
@@ -109,9 +131,10 @@ code { font-size:12.5px; color:var(--brand-dark); background:var(--brand-soft); 
 /* 关闭态轨道由 #DDE3F0 换成 --line-ctl：旧值对白底 1.29:1、白色滑块对它也只有 1.29:1，等于看不见 */
 .sw { flex:none; width:44px; height:24px; border-radius:999px; border:1px solid var(--line-ctl); background:var(--line-ctl); position:relative; cursor:pointer; padding:0; transition:.16s; }
 .sw .sw-knob { position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%; background:#fff; box-shadow:0 1px 3px rgba(27,34,51,.25); transition:.16s; }
-.sw-on { background:var(--ok); border-color:#12A05E; }
+/* 打开态用整条实底 --ok（白滑块压它 5.48:1，控件边界 ≥3:1），不改成 tint：开关的"在什么位置"靠滑块位置读 */
+.sw-on { background:var(--ok); border-color:var(--ok); }
 .sw-on .sw-knob { left:22px; }
-.sw-off-err { background:var(--err); border-color:#D92D20; }
+.sw-off-err { background:var(--err); border-color:var(--err); }
 .sw-off-err .sw-knob { left:2px; }
 .sw-text { min-width:0; }
 .sw-name { font-weight:600; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
@@ -122,11 +145,13 @@ code { font-size:12.5px; color:var(--brand-dark); background:var(--brand-soft); 
 /* 按钮边框是控件边界：--line(1.22✗) / #C9D6F5(1.46✗) / #FBD5D2(1.35✗) 全部换成 ≥3:1 的值 */
 .btn { display:inline-flex; align-items:center; gap:6px; padding:6px 13px; border-radius:var(--r-sm); border:1px solid var(--line-ctl); background:var(--panel); color:var(--fg); font:inherit; font-size:13px; cursor:pointer; transition:.14s; }
 .btn:hover { border-color:var(--brand-ink); background:var(--panel-2); }
-.btn-primary { background:var(--brand-solid); border-color:var(--brand-solid); color:#fff; box-shadow:0 4px 12px rgba(59,87,224,.28); }
+/* 主按钮：白字压 --brand-solid(=--blue，6.70:1)，hover 压 --brand-strong(#1E40AF，8.72:1)，比旧值 5.79 更稳 */
+.btn-primary { background:var(--brand-solid); border-color:var(--brand-solid); color:#fff; box-shadow:0 4px 12px rgba(29,78,216,.26); }
 .btn-primary:hover { background:var(--brand-strong); border-color:var(--brand-strong); }
 .btn-sm { padding:3px 9px; font-size:12px; border-radius:8px; }
-.btn-danger { color:var(--err); border-color:var(--err); background:#FEF0EF; }
-.btn-danger:hover { background:#FDE5E3; border-color:var(--err); }
+/* 危险按钮：玫红字压玫红 tint（5.20:1），hover 深一档（4.62:1）；边框是控件边界，另算 ≥3:1 */
+.btn-danger { color:var(--err); border-color:var(--err); background:var(--err-tint); }
+.btn-danger:hover { background:#FBD8E5; border-color:var(--err); }
 .btn[disabled] { opacity:.55; cursor:not-allowed; }
 
 /* ---------- 表单 ---------- */
@@ -138,37 +163,46 @@ code { font-size:12.5px; color:var(--brand-dark); background:var(--brand-soft); 
 .fctl { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .fhint { grid-column:2; color:var(--muted); font-size:11.8px; margin-top:2px; }
 .fhint code { font-size:11.5px; }
-input[type=text], input[type=number], input[type=password], select, textarea { font:inherit; font-size:13px; color:var(--fg); background:#fff; border:1px solid var(--line-ctl); border-radius:var(--r-sm); padding:6px 10px; min-width:0; }
+input[type=text], input[type=number], input[type=password], select, textarea { font:inherit; font-size:13px; color:var(--fg); background:var(--panel); border:1px solid var(--line-ctl); border-radius:var(--r-sm); padding:6px 10px; min-width:0; }
 input[type=text]:focus, input[type=number]:focus, input[type=password]:focus, select:focus, textarea:focus { border-color:var(--brand-ink); }
 input.w-160 { width:160px; } input.w-220 { width:220px; } input.w-90 { width:90px; } input.w-320 { width:320px; }
 select.w-220 { width:220px; }
 input[type=range] { width:260px; accent-color:var(--brand-ink); }
 .msg { font-size:12.3px; }
 .msg-ok { color:var(--ok); } .msg-err { color:var(--err); } .msg-warn { color:var(--warn); }
-pre.mono-block { margin:6px 0 0; padding:10px 12px; background:var(--panel-2); border:1px solid var(--line); border-radius:var(--r-sm); font-size:12px; color:#2C3550; white-space:pre-wrap; word-break:break-word; max-height:260px; overflow:auto; }
-.spin { width:13px; height:13px; border:2px solid rgba(77,107,254,.25); border-top-color:var(--brand); border-radius:50%; display:inline-block; animation:spin .7s linear infinite; vertical-align:-2px; }
+/* 数据/代码块统一归"数据 = 青"这条语义：tint 底 + 深色字，不去和链接蓝抢注意力 */
+pre.mono-block { margin:6px 0 0; padding:10px 12px; background:var(--teal-tint); border:1px solid var(--teal-line); border-radius:var(--r-sm); font-size:12px; color:var(--fg-2); white-space:pre-wrap; word-break:break-word; max-height:260px; overflow:auto; }
+/* 转圈 = 进行中 = 紫，和徽章 badge-brand、段控打开态同一个色相 */
+.spin { width:13px; height:13px; border:2px solid rgba(109,40,217,.25); border-top-color:var(--run); border-radius:50%; display:inline-block; animation:spin .7s linear infinite; vertical-align:-2px; }
 @keyframes spin { to { transform:rotate(360deg); } }
 
 /* ---------- 表格 ---------- */
 .table-wrap { max-height:460px; overflow:auto; border:1px solid var(--line); border-radius:var(--r-sm); }
 table.tbl { border-collapse:separate; border-spacing:0; width:100%; font-size:12.8px; }
-table.tbl th { position:sticky; top:0; z-index:2; background:var(--panel-2); text-align:left; font-weight:600; color:#3A4664; padding:8px 10px; border-bottom:1px solid var(--line); white-space:nowrap; }
+/* 表头是"青"的落点：整条 th 换成 mint tint + 深色字（--fg-2 压青 tint 8.25:1），sticky 滚动时不刺眼 */
+table.tbl th { position:sticky; top:0; z-index:2; background:var(--teal-tint); text-align:left; font-weight:600; color:var(--fg-2); padding:8px 10px; border-bottom:1px solid var(--teal-line); white-space:nowrap; }
 table.tbl td { padding:7px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
 table.tbl tbody tr:nth-child(even) { background:#FAFBFF; }
 table.tbl tbody tr:hover { background:var(--brand-soft); }
 table.tbl tbody tr:last-child td { border-bottom:0; }
 table.tbl td.num, table.tbl th.num { text-align:right; font-variant-numeric:tabular-nums; }
 .empty { padding:22px; text-align:center; color:var(--muted); font-size:12.5px; background:var(--panel-2); border-radius:var(--r-sm); border:1px dashed var(--line); }
-.tag { display:inline-block; padding:0 7px; border-radius:6px; background:var(--panel-2); border:1px solid var(--line); color:#3A4664; font-size:11.5px; }
+.tag { display:inline-block; padding:0 7px; border-radius:6px; background:var(--teal-tint); border:1px solid var(--teal-line); color:var(--teal); font-size:11.5px; }
 
 /* ---------- 告警块 ---------- */
+/* 每条告警整块染上自己的语义色（tint 底 + 同色图标）：告警是"事件"不是装饰，一屏最多三五条，
+   染底比只染 20×20 的图标更快读出级别。tint 上的 --muted 正文 4.83–5.22:1、--fg 13.96:1 均达标。 */
 .alert { display:flex; gap:10px; padding:11px 12px; border-radius:var(--r-sm); border:1px solid var(--line); background:var(--panel-2); margin-bottom:9px; font-size:12.8px; }
 .alert:last-child { margin-bottom:0; }
 .alert-ico { flex:none; width:20px; height:20px; border-radius:6px; display:grid; place-items:center; font-size:12px; font-weight:700; color:#fff; }
+.alert-ok { background:var(--ok-tint); border-color:var(--ok-line); }
 .alert-ok .alert-ico { background:var(--ok); }
+.alert-warn { background:var(--warn-tint); border-color:var(--warn-line); }
 .alert-warn .alert-ico { background:var(--warn); }
+.alert-err { background:var(--err-tint); border-color:var(--err-line); }
 .alert-err .alert-ico { background:var(--err); }
-/* 白色字形压在 --brand(#4D6BFE) 上只有 4.33:1，正文尺寸不达标；--brand-solid 是 5.79:1 */
+/* 白字压 --brand(#4D6BFE) 只有 4.33:1，正文尺寸不达标；这里用 --brand-solid(=-blue) 6.70:1 */
+.alert-info { background:var(--info-tint); border-color:var(--info-line); }
 .alert-info .alert-ico { background:var(--brand-solid); }
 .alert-title { font-weight:600; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .alert-body { color:var(--muted); font-size:12.2px; margin-top:1px; }
@@ -177,26 +211,30 @@ table.tbl td.num, table.tbl th.num { text-align:right; font-variant-numeric:tabu
 /* ---------- 分段切换 ---------- */
 .seg { display:inline-flex; padding:3px; background:var(--panel-2); border:1px solid var(--line-ctl); border-radius:999px; gap:2px; }
 .seg-btn { border:0; background:transparent; font:inherit; font-size:13px; color:var(--muted); padding:5px 16px; border-radius:999px; cursor:pointer; transition:.14s; }
-.seg-btn.on { background:var(--panel); color:var(--brand-dark); font-weight:600; box-shadow:var(--shadow-sm); }
+/* 段控打开态 = 紫 tint + 紫字（6.23:1），和导航选中、转圈共用"进行中/当前"这一个色相 */
+.seg-btn.on { background:var(--run-tint); color:var(--run); font-weight:600; box-shadow:var(--shadow-sm); }
 
 /* ---------- 柱状图 ---------- */
 .bars { display:flex; align-items:flex-end; gap:10px; height:190px; padding:10px 4px 0; }
 .bar-col { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; min-width:0; }
 .bar-value { font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums; margin-bottom:4px; }
 .bar-track { width:100%; max-width:46px; height:100%; display:flex; align-items:flex-end; }
-/* 绘图区底色 = --panel(#FFFFFF)；渐变两端都换成 ≥3:1 的档位（旧浅端 #7C93FF 2.81✗） */
+/* 绘图区底色 = --panel；渐变两端都取 ≥3:1 的档位（旧浅端 #7C93FF 2.81✗）。
+   柱状图这里只有一条序列，所以只用蓝色一个色相——单序列涂多色等于说谎；
+   "今日"是另一条序列，用琥珀单独拎出来，和蓝色柱明显不同色相。 */
 .bar-fill { width:100%; border-radius:8px 8px 3px 3px; background:linear-gradient(180deg,var(--chart-1),var(--brand-strong)); transition:.2s; }
-.bar-fill.is-today { background:linear-gradient(180deg,var(--chart-11),var(--money)); }
+.bar-fill.is-today { background:linear-gradient(180deg,var(--chart-4),#92400E); }
 .bar-col:hover .bar-fill { filter:brightness(1.08); }
 .bar-label { font-size:11.5px; color:var(--muted); margin-top:6px; white-space:nowrap; }
 .bar-col.is-today .bar-label { color:var(--money); font-weight:700; }
 
 /* ---------- 预算进度 ---------- */
-/* 进度条也是图形对象：旧浅端 #7C93FF 2.81✗ / #FFC067 1.62✗ / #FF9C93 2.01✗，两端都不达标 */
+/* 进度条也是图形对象：旧浅端 #7C93FF 2.81✗ / #FFC067 1.62✗ / #FF9C93 2.01✗，两端都不达标。
+   正常=蓝→紫，警告=琥珀→深琥珀，超支=玫红→深玫红：每档一个色相家族，不混色。 */
 .progress { height:14px; border-radius:999px; background:var(--panel-2); border:1px solid var(--line-ctl); overflow:hidden; }
-.progress > i { display:block; height:100%; background:linear-gradient(90deg,var(--brand-solid),var(--brand-strong)); }
-.progress.warn > i { background:linear-gradient(90deg,var(--chart-11),var(--warn)); }
-.progress.err > i { background:linear-gradient(90deg,var(--err),#991B1B); }
+.progress > i { display:block; height:100%; background:linear-gradient(90deg,var(--chart-1),var(--chart-2)); }
+.progress.warn > i { background:linear-gradient(90deg,var(--warn),#92400E); }
+.progress.err > i { background:linear-gradient(90deg,var(--err),#831843); }
 .money { color:var(--money); font-weight:700; font-variant-numeric:tabular-nums; }
 
 /* [未落地] 决策卡（设计评审交互）+ 女仆形象（内嵌位图，注释明说不可发布）（删自设计稿第 224–250 行） */
@@ -216,21 +254,30 @@ table.tbl td.num, table.tbl th.num { text-align:right; font-variant-numeric:tabu
    把 data-theme 换成 dark 即可看到下面这套按调研实测值配的深色；
    成品再按调研 §4.2 补 @media (prefers-color-scheme: dark) 一层才生效（形如 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){…}}）；
    ★ 本块只定义 token，未启用：本稿把 data-theme 写死成 light，页面永远走不到下面这套，别当成暗色已交付。
-   主按钮 #7E97FC + #0B1020 = 6.96:1（白字压 #7E97FC 只有 2.72:1，不能用）；
+   T-021：浅色那六个色相在暗底上必须整体提亮（暗底上的"更鲜艳"= 更亮更饱和），所以这里重定义六个 ink/tint/line；
+   语义别名(--ok/--err/--info/--run/--money…)是 var() 链，会自己跟着换，不重抄一遍。
+   实底控件在深色下用近黑字（#0B1020 压 #7E97FC 6.96:1；白字压它只有 2.72:1，不能用）；
    焦点环必须双色：白环对面板 17.00:1，但对 #7E97FC 只有 2.72:1，所以外圈换 #0B1020（6.96:1）。 */
 :root[data-theme="dark"] {
   --bg:#0F1420; --panel:#161C2B; --panel-2:#1E2537; --line:#2A3348; --line-ctl:#5A6A94;
-  --fg:#E8ECF5; --muted:#9AA6BF;
-  --brand:#7E97FC; --brand-ink:#7E97FC; --brand-solid:#7E97FC; --brand-strong:#8FA5FF;
-  --brand-dark:#7E97FC; --brand-soft:#1E2537;
-  --ok:#4ADE80; --warn:#FBBF24; --err:#F87171; --money:#FDBA74;
-  --maid:#FFB3C6; --maid-ink:#FFB3C6; --maid-graphic:#FFB3C6; --maid-soft:#2A1D24;
-  --chart-1:#7E97FC; --chart-11:#FBBF24;
+  --fg:#E8ECF5; --fg-2:#C4CDE2; --muted:#9AA6BF;
+  /* 暗色六色相：ink 压自己的 tint = 8.72 / 5.24 / 10.24 / 9.51 / 6.36 / 8.85，全部 ≥4.5:1 */
+  --violet:#C4B5FD; --violet-tint:#241C3B; --violet-line:#4A3A78;
+  --blue:#7E97FC; --blue-tint:#1F2A44; --blue-line:#33406B;
+  --teal:#5EEAD4; --teal-tint:#102A2A; --teal-line:#2A5A55;
+  --amber:#FBBF24; --amber-tint:#2A2110; --amber-line:#5A4A1C;
+  --rose:#FB7185; --rose-tint:#2A1618; --rose-line:#5A2A3A;
+  --green:#4ADE80; --green-tint:#12291E; --green-line:#2F5A40;
+  --chart-1:var(--blue); --chart-2:var(--violet); --chart-3:var(--teal);
+  --chart-4:var(--amber); --chart-5:var(--rose); --chart-6:var(--green);
+  --brand:#7E97FC; --brand-ink:var(--blue); --brand-solid:var(--blue); --brand-strong:#8FA5FF;
+  --brand-dark:var(--blue); --brand-soft:var(--blue-tint);
+  --maid:#FFB3C6; --maid-ink:var(--rose); --maid-graphic:var(--rose); --maid-soft:#2A1D24;
   --focus:#FFFFFF; --focus-halo:#0B1020;
   --shadow:0 1px 2px rgba(0,0,0,.45), 0 8px 24px rgba(0,0,0,.4);
   --shadow-sm:0 1px 2px rgba(0,0,0,.45);
 }
-/* 深色下的实底控件：白字全部换成近黑字（#7E97FC / #4ADE80 上的白字都不到 3:1） */
+/* 深色下的实底控件：白字全部换成近黑字（#7E97FC / #4ADE80 / #FBBF24 / #FB7185 上的白字都不到 3:1） */
 :root[data-theme="dark"] .btn-primary,
 :root[data-theme="dark"] .toast-ok,
 :root[data-theme="dark"] .toast-err,
@@ -238,21 +285,15 @@ table.tbl td.num, table.tbl th.num { text-align:right; font-variant-numeric:tabu
 :root[data-theme="dark"] .sw .sw-knob { background:#0B1020; }
 :root[data-theme="dark"] .toast { background:var(--panel-2); color:var(--fg); border:1px solid var(--line-ctl); }
 /* [未落地] 暗色下的免责条覆盖（删自设计稿第 296–297 行） */
-:root[data-theme="dark"] .chip-ok, :root[data-theme="dark"] .badge-ok { background:#12291E; border-color:#2F5A40; color:var(--ok); }
-:root[data-theme="dark"] .chip-warn, :root[data-theme="dark"] .badge-warn { background:#2A2110; border-color:#5A4A1C; color:var(--warn); }
-:root[data-theme="dark"] .badge-err { background:#2A1618; border-color:#5A2A2A; color:var(--err); }
-:root[data-theme="dark"] .nav-tip { background:var(--maid-soft); border-color:#5A3448; }
-:root[data-theme="dark"] .btn-danger { background:#2A1618; }
+/* 徽章/胶囊/告警/危险按钮的深色底已经由 --*-tint 给出，这里不再逐类覆盖 */
 :root[data-theme="dark"] .btn-danger:hover { background:#3A1D20; }
+/* 选中导航项：底色和文字已由 --run* 换成紫，边框留中性 --line-ctl(3.18:1)，
+   免得深色下出来一圈比信息本身还亮的紫边 */
 :root[data-theme="dark"] .nav-btn.active { border-color:var(--line-ctl); }
-:root[data-theme="dark"] .seg-btn.on { background:#2A3348; }
 /* [未落地] 暗色下的决策卡/女仆覆盖（删自设计稿第 306–309 行） */
-/* 浅色用的 #991B1B 深端在暗底上只有 1.75:1，深色改成往亮处走 */
-:root[data-theme="dark"] .progress.err > i { background:linear-gradient(90deg,var(--err),#FCA5A5); }
+/* 浅色用的 #831843 深端在暗底上只有 1.75:1，深色改成往亮处走 */
+:root[data-theme="dark"] .progress.err > i { background:linear-gradient(90deg,var(--err),#FDA4AF); }
 :root[data-theme="dark"] table.tbl tbody tr:nth-child(even) { background:#1B2233; }
-:root[data-theme="dark"] table.tbl th,
-:root[data-theme="dark"] .tag,
-:root[data-theme="dark"] pre.mono-block { color:var(--fg); }
 :root[data-theme="dark"] .whale { filter:drop-shadow(0 3px 6px rgba(0,0,0,.5)); }
 
 @media (max-width:960px) {
@@ -272,7 +313,7 @@ table.tbl td.num, table.tbl th.num { text-align:right; font-variant-numeric:tabu
 .grid > .card { margin-bottom:0; }
 .card > :last-child { margin-bottom:0; }
 /* 客户端就地拦下时只给输入框染色，不改布局：操作者已经填好的其它字段要原样留着 */
-.is-invalid { border-color:var(--err) !important; box-shadow:0 0 0 3px rgba(198,40,40,.14); }
+.is-invalid { border-color:var(--err) !important; box-shadow:0 0 0 3px rgba(190,24,93,.14); }
 .banner { margin:0 0 12px; }
 .toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:0 0 12px; }
 .row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
@@ -289,9 +330,13 @@ input[type=checkbox] { width:16px; height:16px; accent-color:var(--brand-ink); }
 .lbl { display:block; font-size:12.5px; font-weight:600; color:var(--muted); }
 .lbl > input, .lbl > select, .lbl > textarea { display:block; margin-top:5px; font-weight:400; color:var(--fg); }
 .between { justify-content:space-between; }
-.dim { opacity:.75; }
-/* 预览区（人格行为层 / 黑话注入块 / 表情包拼图）：必须能换行，否则长句会把卡片撑破 */
-.pre { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12.2px; line-height:1.55; color:#2C3550; background:var(--panel-2); border:1px solid var(--line); border-radius:var(--r-sm); padding:10px 12px; margin:0; max-height:260px; overflow:auto; white-space:pre-wrap; word-break:break-word; }
+/* T-021 顺手修：旧值是 opacity:.75，把 --muted 的白底 5.60 拖成 3.30（AA ✗，还被用在
+   assets-slang/pages-model/pages-personas 三处正文上）。改用 --muted 实色：白底 5.60 / 浅蓝底 5.04 都达标，
+   视觉上仍是"次级信息"，只是不再靠透明度。 */
+.dim { color:var(--muted); }
+/* 预览区（人格行为层 / 黑话注入块 / 表情包拼图）：必须能换行，否则长句会把卡片撑破。
+   和 pre.mono-block 同一套"数据 = 青"的底色，深色下 --teal-tint 自己会换 */
+.pre { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12.2px; line-height:1.55; color:var(--fg-2); background:var(--teal-tint); border:1px solid var(--teal-line); border-radius:var(--r-sm); padding:10px 12px; margin:0; max-height:260px; overflow:auto; white-space:pre-wrap; word-break:break-word; }
 
 /* ---------- 服务卡片（T-020） ----------
    按钮行要跟上面的键值表拉开一点距离；「确认」态必须一眼看出这一下真的会执行 ——
@@ -300,5 +345,4 @@ input[type=checkbox] { width:16px; height:16px; accent-color:var(--brand-ink); }
 .svc-actions { margin-top:12px; }
 .btn.is-armed { font-weight:700; box-shadow:0 0 0 3px var(--focus-halo), 0 0 0 1px var(--focus); }
 .btn[disabled]:hover { border-color:var(--line-ctl); background:var(--panel); }
-.btn-danger[disabled]:hover { border-color:var(--err); background:#FEF0EF; }
-:root[data-theme="dark"] .btn-danger[disabled]:hover { background:#2A1618; }
+.btn-danger[disabled]:hover { border-color:var(--err); background:var(--err-tint); }
