@@ -28,14 +28,25 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const INDEX_PATH = join(HERE, 'public', 'index.html');
 // Whitelisted shell assets. The page logic lives in its own files so none of
 // them has to grow past the project's 400-line ceiling as pages are added.
-// pages.js and pages-extra.js must be listed (and loaded) before app.js: they
-// define the `pages` object that app.js's render() dispatches to.
+// core.js defines the helpers (and the `pages` object) every page script fills
+// in; the page scripts must be listed (and loaded) before app.js, which owns the
+// single click/change listener that renders whatever page is open.
+const JS = 'text/javascript; charset=utf-8';
 const ASSETS = new Map([
-  ['/pages.js', ['public/pages.js', 'text/javascript; charset=utf-8']],
-  ['/pages-extra.js', ['public/pages-extra.js', 'text/javascript; charset=utf-8']],
-  ['/pages-stickers.js', ['public/pages-stickers.js', 'text/javascript; charset=utf-8']],
-  ['/pages-settings.js', ['public/pages-settings.js', 'text/javascript; charset=utf-8']],
-  ['/app.js', ['public/app.js', 'text/javascript; charset=utf-8']],
+  ['/console.css', ['public/console.css', 'text/css; charset=utf-8']],
+  ['/core.js', ['public/core.js', JS]],
+  ['/pages-overview.js', ['public/pages-overview.js', JS]],
+  ['/pages-model.js', ['public/pages-model.js', JS]],
+  ['/pages-personas.js', ['public/pages-personas.js', JS]],
+  ['/pages-groups.js', ['public/pages-groups.js', JS]],
+  ['/pages-activity.js', ['public/pages-activity.js', JS]],
+  ['/pages-assets.js', ['public/pages-assets.js', JS]],
+  ['/assets-stickers.js', ['public/assets-stickers.js', JS]],
+  ['/assets-slang.js', ['public/assets-slang.js', JS]],
+  ['/pages-cost.js', ['public/pages-cost.js', JS]],
+  ['/pages-logs.js', ['public/pages-logs.js', JS]],
+  ['/pages-settings.js', ['public/pages-settings.js', JS]],
+  ['/app.js', ['public/app.js', JS]],
 ]);
 const TOKEN_HEADER = 'x-console-token';
 const MAX_BODY_BYTES = 128 * 1024;
@@ -118,8 +129,14 @@ function send(res, status, body, type = 'application/json; charset=utf-8') {
     // endpoints accept same-origin requests, so an invisible iframe over a
     // logged-in browser would be a clickjacking path to the persona editor.
     // The page loads no external asset, so a deny-everything CSP costs nothing.
+    // script-src/style-src are the load-bearing part: the shell has no inline
+    // <script>, no on* handler and no style="" (everything is delegated through
+    // data-act / data-page), so there is nothing inline left to allow. The
+    // sticker thumbnails are same-origin images behind ?token=, hence img-src
+    // 'self' rather than default-src 'none' alone.
     'X-Frame-Options': 'DENY',
-    'Content-Security-Policy': "frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; " +
+      "img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
   });
   res.end(payload);
 }

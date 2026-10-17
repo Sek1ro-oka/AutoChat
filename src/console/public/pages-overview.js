@@ -1,0 +1,163 @@
+/* 概览：运行状态、总开关、预算、健康、最近事件、会话。
+ * 数据全部来自 /api/summary + /api/settings + /api/logs + /api/sessions，一个都不编。
+ */
+
+// 这四个布尔项是真能写的（都登记在 runtime-config 的 FIELDS 里，走 POST /api/settings）。
+const WRITABLE_SWITCHES = [
+  ['webSearchEnabled', '联网搜索', '关掉之后模型不再调用搜索，省 token 也省等待。'],
+  ['visionEnabled', '图片识别', '关掉之后带图消息只按文字处理。'],
+  ['antiSpamEnabled', '防刷屏', '关掉之后同一个群的连续刷屏不再被静音。'],
+  ['groupManagementEnabled', '群管理命令', '关掉之后群里的 /禁言 这类管理命令不再响应。'],
+];
+
+const fieldOf = (settings, name) => (settings.fields || []).find(field => field.name === name) || null;
+const isOn = field => String(field && field.value).toLowerCase() === 'true';
+
+const switchCard = settings => {
+  const rows = WRITABLE_SWITCHES.map(([name, label, why]) => {
+    const field = fieldOf(settings, name);
+    if (!field) {
+      return switchRow(label, sw(false, label, 'disabled'), '<span class="muted">这个版本的配置里没有这一项。</span>');
+    }
+    const on = isOn(field);
+    const control = sw(on, label, `data-act="setting-toggle" data-name="${esc(name)}"`);
+    return switchRow(label, control, `${esc(why)}默认值：${esc(String(field.defaultValue))}。
+      <span class="muted">${on ? '现在是开着的。' : '现在是关着的。'}</span>`);
+  });
+  return card('总开关', '改完立刻生效，不用重启', rows.join(''));
+};
+
+const readonlySwitches = summary => {
+  const switches = summary.switches || {};
+  const reason = switches.enabled ? '在 QQ 里发 /停止 可以让它停下来。' : '在 QQ 里发 /启动 可以让它继续。';
+  const rows = [
+    ['模型回复', switches.enabled
+      ? badge('已开启', 'ok')
+      : badge('已停止', 'err') + ' <span class="muted">' + esc(reason) + '</span>'],
+    ['群聊参与', switches.groupEnabled ? badge('已开启', 'ok') : badge('已关闭', 'muted')],
+  ];
+  const note = alertBox('info', '这两项控制台改不了', '它们是 QQ 命令写的运行时状态，不是配置文件项：只能在群里发 /启动 或 /停止。做成开关就是点了没反应的开关。');
+  return card('模型回复与群聊参与', '只读', kv(rows) + note);
+};
+
+const budgetCard = summary => {
+  const budget = summary.budget || {};
+  const queue = summary.queue || {};
+  const used = Number(budget.used || 0);
+  const limit = Number(budget.limitMicro || 0);
+  const percent = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+  const level = percent >= 100 ? 'err' : percent >= 80 ? 'warn' : '';
+  const rows = [
+    ['账期', esc(budget.day || DASH) + ' <span class="muted">（香港时间）</span>'],
+    ['已用', `<span class="money">${cny(used)}</span> / ${cny(limit, 2)}`],
+    ['预留中', cny(budget.held)],
+    ['剩余', cny(budget.remaining)],
+    ['待发队列', num(queue.depth) + ' 条'],
+    ['发送失败', num(queue.sendFailures) + ' 次'],
+  ];
+  // 宽度走 data-width：CSP 是 style-src 'self'，HTML 里的 style="" 会被浏览器丢弃，
+  // 所以由 app.js 在写入 innerHTML 之后用 CSSOM（el.style.width）补上。
+  const bar = `<div class="progress${level ? ' ' + level : ''}"><i data-width="${percent}"></i></div>`;
+  return card('预算与队列', '今日账期', bar + kv(rows));
+};
+
+const healthCard = summary => {
+  const queue = summary.queue || {};
+  const switches = summary.switches || {};
+  const budget = summary.budget || {};
+  const alerts = [];
+  if (!switches.enabled) {
+    alerts.push(alertBox('err', '模型回复已停止', 'QQ 里的 /停止 或连续发送失败都会让它停下。发 /启动 恢复。'));
+  }
+  if (Number(queue.sendFailures) > 0) {
+    alerts.push(alertBox('warn', `发送失败 ${num(queue.sendFailures)} 次`, '连续 3 次失败会自动停止模型回复。检查 OneBot 连接。'));
+  }
+  if (Number(budget.remaining) <= 0) {
+    alerts.push(alertBox('warn', '预算用完了', '今天的请求会被预算闸门拦下，明天零点（香港时间）重置。'));
+  }
+  if (!alerts.length) alerts.push(alertBox('ok', '没有发现异常', '连接、预算、发送三个方向都正常。'));
+  alerts.push(alertBox('info', '日志级告警在「日志与健康」页',
+    '写盘失败、权限失败、黑话导入损坏这类事件只在事件日志里，概览页不去重复统计。'));
+  return card('健康与告警', '只看 /api/summary 能拿到的信号', alerts.join(''));
+};
+
+const eventsCard = entries => {
+  const rows = (entries || []).slice(0, 8).map(entry => [
+    `<span class="nowrap">${esc(stampOf(entry.time))}</span>`, `<code>${esc(entry.event)}</code>`,
+  ]);
+  return card('最近事件', '来自 /api/logs', rows.length
+    ? table(['时间', '事件'], rows)
+    : '<div class="empty">日志目录里还没有事件。</div>');
+};
+
+// 日志里的 time 是 ISO 字符串（不是毫秒数），所以不能直接用 core.js 的 time()。
+const stampOf = value => {
+  if (!value) return DASH;
+  const parsed = new Date(String(value));
+  return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString('zh-CN', { hour12: false });
+};
+
+const sessionsCard = sessions => {
+  const rows = (sessions || []).map(item => [
+    `<code>${esc(item.key)}</code>`, esc(item.scope || DASH), num(item.items),
+    `<span class="nowrap">${esc(time(item.updated))}</span>`,
+  ]);
+  return card('会话', '来自 /api/sessions（最近 20 条）', rows.length
+    ? table(['会话键', '作用域', { label: '条数', num: true }, '更新时间'], rows)
+    : '<div class="empty">还没有会话记录。</div>');
+};
+
+const participantsCard = summary => {
+  const rows = (summary.participants || []).map(item => [
+    `<code>${esc(item.name)}</code>`, { label: num(item.failures), num: true },
+    item.lastError ? `<code>${esc(item.lastError)}</code>` : '<span class="muted">—</span>',
+  ]);
+  return rows.length
+    ? table(['参与者', { label: '失败', num: true }, '最后一次错误'], rows)
+    : '<div class="empty">没有参与者记录。</div>';
+};
+
+const groupsDueCard = summary => {
+  const rows = (summary.groups || []).map(item => [
+    `<code>${esc(item.id)}</code>`, `<span class="nowrap">${esc(time(item.due))}</span>`,
+  ]);
+  return card('群与下次清理', '来自 /api/summary', rows.length ? table(['群号', '下次清理'], rows) : '<div class="empty">还没有群。</div>');
+};
+
+const renderOverview = async () => {
+  const [summary, settings, logs, sessions] = await Promise.all([
+    api('/api/summary'),
+    api('/api/settings').catch(() => ({ fields: [] })),
+    api('/api/logs?limit=8').catch(() => ({ logs: [] })),
+    api('/api/sessions?limit=20').catch(() => ({ sessions: [] })),
+  ]);
+  applyChips(summary);
+  const switches = summary.switches || {};
+  const model = summary.model || {};
+  const connection = summary.connection || {};
+  const stats = `<div class="grid g4">
+    ${stat('运行时长', esc(dur(summary.uptimeMs)), '进程启动至今')}
+    ${stat('当前模型', esc(model.name || DASH), model.active ? '生效层级：' + model.active : '没有可用模型')}
+    ${stat('OneBot 连接', connection.ready ? '就绪' : connection.reconnecting ? '重连中' : '未连接',
+    connection.reconnecting ? `第 ${num(connection.retry)} 次重试` : connection.ready ? '消息通道正常' : '消息发不出去')}
+    ${stat('今日花费', cny(summary.budget && summary.budget.used), '预算 ' + cny(summary.budget && summary.budget.limitMicro, 2))}
+  </div>`;
+  return `<div class="page active">
+    ${pageHead('概览', '机器人现在在做什么、花了多少钱、有没有哪里不对。')}
+    ${stats}
+    <div class="grid g2">${switchCard(settings)}${readonlySwitches(summary)}</div>
+    <div class="grid g2">${budgetCard(summary)}${healthCard(summary)}</div>
+    <div class="grid g2">${eventsCard(logs.logs)}${card('参与者与发送', '来自 /api/summary', participantsCard(summary))}</div>
+    <div class="grid g2">${sessionsCard(sessions.sessions)}${groupsDueCard(summary)}</div>
+  </div>`;
+};
+
+action('setting-toggle', async element => {
+  const name = element.dataset.name;
+  const next = element.getAttribute('aria-checked') !== 'true';
+  await post('/api/settings', { name, value: next ? 'true' : 'false' });
+  toast(`${next ? '已打开' : '已关闭'}`, 'ok');
+  rerender();
+});
+
+pages.overview = renderOverview;

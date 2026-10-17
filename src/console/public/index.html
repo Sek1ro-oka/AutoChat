@@ -3,132 +3,71 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
 <title>AutoChat 控制台</title>
-<style>
-  :root {
-    --bg: #f5f6f8; --panel: #ffffff; --panel-2: #eef0f4; --text: #1c1f24; --muted: #6b7280;
-    --border: #dfe3e9; --accent: #2f6fed; --ok: #16a34a; --warn: #d97706; --bad: #dc2626;
-    --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.10);
-  }
-  :root[data-theme="dark"] {
-    --bg: #14161a; --panel: #1c1f26; --panel-2: #23272f; --text: #e8eaee; --muted: #97a0ad;
-    --border: #2e333c; --accent: #5b8dff; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171;
-    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 1px 3px rgba(0,0,0,.5);
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #14161a; --panel: #1c1f26; --panel-2: #23272f; --text: #e8eaee; --muted: #97a0ad;
-      --border: #2e333c; --accent: #5b8dff; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171;
-      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 1px 3px rgba(0,0,0,.5);
-    }
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text);
-    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", Roboto, sans-serif; }
-  header { display: flex; align-items: center; gap: 12px; padding: 12px 20px;
-    background: var(--panel); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 5; }
-  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
-  .pill { font-size: 12px; padding: 2px 9px; border-radius: 999px; background: var(--panel-2);
-    color: var(--muted); border: 1px solid var(--border); }
-  .pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
-  .pill.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
-  .spacer { flex: 1; }
-  button { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--border);
-    border-radius: 8px; padding: 5px 12px; cursor: pointer; }
-  button:hover { border-color: var(--accent); }
-  .layout { display: grid; grid-template-columns: 176px 1fr; min-height: calc(100vh - 53px); }
-  nav { border-right: 1px solid var(--border); padding: 12px 8px; background: var(--panel); }
-  nav a { display: block; padding: 8px 12px; border-radius: 8px; color: var(--muted);
-    text-decoration: none; cursor: pointer; margin-bottom: 2px; }
-  nav a:hover { background: var(--panel-2); color: var(--text); }
-  nav a.active { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); font-weight: 600; }
-  main { padding: 20px; overflow: auto; }
-  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
-    padding: 14px 16px; box-shadow: var(--shadow); }
-  .card h3 { margin: 0 0 8px; font-size: 12px; color: var(--muted); font-weight: 600;
-    text-transform: uppercase; letter-spacing: .6px; }
-  .metric { font-size: 24px; font-weight: 650; font-variant-numeric: tabular-nums; }
-  .metric small { font-size: 13px; font-weight: 400; color: var(--muted); margin-left: 4px; }
-  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; }
-  .kv dt { color: var(--muted); }
-  .kv dd { margin: 0; font-variant-numeric: tabular-nums; }
-  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 600; font-size: 12px; }
-  tbody tr:hover { background: var(--panel-2); }
-  code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; font-size: 12.5px; }
-  pre { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
-    padding: 12px; overflow: auto; max-height: 60vh; margin: 0; }
-  .section { margin-bottom: 18px; }
-  .section > h2 { font-size: 14px; margin: 0 0 10px; }
-  .muted { color: var(--muted); }
-  .empty { color: var(--muted); padding: 18px; text-align: center; }
-  .error { color: var(--bad); padding: 18px; text-align: center; }
-  .bar { height: 8px; border-radius: 999px; background: var(--panel-2); overflow: hidden; }
-  .bar > span { display: block; height: 100%; background: var(--accent); }
-  .seg { display: inline-flex; gap: 4px; }
-  .seg button { padding: 3px 10px; font-size: 12px; }
-  .seg button.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
-  .legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; }
-  svg.chart { width: 100%; height: auto; display: block; }
-  tbody tr.click { cursor: pointer; }
-  tbody tr.sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
-  textarea { width: 100%; min-height: 230px; resize: vertical; box-sizing: border-box;
-    font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; font-size: 12.5px; line-height: 1.65;
-    color: var(--text); background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
-  input[type=text] { font: inherit; color: var(--text); background: var(--panel-2);
-    border: 1px solid var(--border); border-radius: 8px; padding: 5px 10px; min-width: 220px; }
-  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; align-items: center; }
-  .warn-text { color: var(--warn); }
-  .ok-text { color: var(--ok); }
-  .bad-text { color: var(--bad); }
-  .banner { border-radius: 10px; padding: 9px 12px; font-size: 12.5px; margin-bottom: 12px; border: 1px solid var(--border); }
-  .banner.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
-  .banner.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
-  .banner.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
-  .setting-row { display: grid; grid-template-columns: minmax(190px, 1fr) minmax(150px, auto) auto auto;
-    gap: 10px 14px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); }
-  .setting-row:last-child { border-bottom: none; }
-  .setting-label { font-size: 13px; }
-  .setting-label .muted { font-size: 11px; }
-  .setting-input input, .setting-input select { width: 100%; min-width: 0; }
-  .setting-input input[type=checkbox] { width: auto; }
-  .setting-default { font-size: 12px; white-space: nowrap; }
-  .setting-actions { display: flex; gap: 6px; }
-</style>
+<link rel="stylesheet" href="/console.css">
 </head>
 <body>
-<header>
-  <h1>AutoChat 控制台</h1>
-  <span class="pill" id="conn">连接中…</span>
-  <span class="pill" id="stamp"></span>
-  <span class="spacer"></span>
-  <button id="theme" title="切换主题">主题</button>
-  <button id="refresh">刷新</button>
+<header class="topbar">
+  <div class="brandrow">
+    <div class="brand">
+      <svg class="whale" viewBox="0 0 64 64" width="36" height="36" role="img" aria-label="AutoChat 标志">
+        <path fill="#4D6BFE" d="M4 30C4 20 10 12 19 10c7-1.7 14-1 19 2 3-4 6-7 10-9 1-.6 2 .5 1.5 1.5-2 4-4 8-4 12 3 3 5 7 5 11 0 9-8 16-20 16S4 40 4 30Z"/>
+        <path fill="#FFFFFF" d="M8 32c3-4 8-6 14-5 7 1 12 5 14 10 .6 1.6.2 3.2-1 4.2-4 3-9.5 3.4-14.5 1.2C14 39.4 10 36 8 32Z"/>
+        <circle cx="42" cy="24" r="2" fill="#FFFFFF"/>
+      </svg>
+      <div>
+        <div class="brandtext">AutoChat 控制台</div>
+        <div class="brandsub">QQ 机器人 · 本机运行 · 令牌保护</div>
+      </div>
+    </div>
+    <div class="topmeta">
+      <span class="chip" id="conn"><span class="dot dot-off"></span>OneBot 连接 <b>—</b></span>
+      <span class="chip" id="modelchip">模型 <b>—</b></span>
+      <span class="chip" id="spendchip">今日花费 <b>—</b></span>
+      <span class="chip" id="stamp">生成时间 <b>—</b></span>
+      <button class="btn btn-sm" id="theme" type="button" data-act="theme">深色</button>
+      <button class="btn btn-sm" id="refresh" type="button" data-act="refresh">刷新</button>
+    </div>
+  </div>
 </header>
+
 <div class="layout">
-  <nav>
-    <a data-page="overview" class="active">运行总览</a>
-    <a data-page="sessions">会话</a>
-    <a data-page="cost">花费与令牌</a>
-    <a data-page="personas">人格</a>
-    <a data-page="social">仿真</a>
-    <a data-page="groups">群设置</a>
-    <a data-page="slang">黑话</a>
-    <a data-page="stickers">表情包</a>
-    <a data-page="logs">日志</a>
-    <a data-page="settings">设置</a>
-    <a data-page="config">配置</a>
-  </nav>
-  <main id="main"><div class="empty">加载中…</div></main>
+  <aside class="sidebar">
+    <nav class="sidenav" id="nav">
+      <div class="navgroup">运营</div>
+      <button class="nav-btn active" type="button" data-page="overview"><svg class="ico" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true" focusable="false"><rect x="3" y="3" width="6" height="6" rx="1.2"/><rect x="11" y="3" width="6" height="6" rx="1.2"/><rect x="3" y="11" width="6" height="6" rx="1.2"/><rect x="11" y="11" width="6" height="6" rx="1.2"/></svg>概览</button>
+      <button class="nav-btn" type="button" data-page="model"><svg class="ico" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="3.2"/><path d="M9.4 9.4 16.5 16.5M13.6 13.6l1.8-1.8"/></svg>模型与 API Key</button>
+      <button class="nav-btn" type="button" data-page="personas"><svg class="ico" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="10" cy="6.5" r="3.2"/><path d="M4 17c0-3.3 2.7-6 6-6s6 2.7 6 6"/></svg>人格</button>
+      <button class="nav-btn" type="button" data-page="groups"><svg class="ico" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="2.8"/><circle cx="14" cy="7.6" r="2.2"/><path d="M2.6 16.4c0-2.4 2-4.4 4.4-4.4s4.4 2 4.4 4.4M12.2 12.3c2.2-.4 4.2 1.2 4.2 3.4"/></svg>群管理</button>
+      <button class="nav-btn" type="button" data-page="activity"><svg class="ico" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M2 11h4l2-6 3 10 2.4-5H18"/></svg>活跃度与静默</button>
+      <div class="navgroup">数据</div>
+      <button class="nav-btn" type="button" data-page="assets"><svg class="ico" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="14" height="12" rx="2"/><circle cx="7.4" cy="8.4" r="1.4"/><path d="M3.4 14.6 8 10l3 3 2.2-2.2 3.4 3.4"/></svg>素材库</button>
+      <button class="nav-btn" type="button" data-page="cost"><svg class="ico" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M3 17V9M8 17V4M13 17v-7M17.5 17V7"/></svg>计费看板</button>
+      <button class="nav-btn" type="button" data-page="logs"><svg class="ico" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M3.5 5.5h13M3.5 10h13M3.5 14.5h8"/></svg>日志与健康</button>
+      <div class="navgroup">系统</div>
+      <button class="nav-btn" type="button" data-page="settings"><svg class="ico" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="10" cy="10" r="2.6"/><path d="M10 2.6v2.2M10 15.2v2.2M2.6 10h2.2M15.2 10h2.2M5.2 5.2l1.6 1.6M13.2 13.2l1.6 1.6M14.8 5.2l-1.6 1.6M6.8 13.2l-1.6 1.6"/></svg>系统设置</button>
+      <div class="nav-tip">页面每 3 秒自动刷新；要保存的表单所在页不轮询，免得打断输入。带 <code>?</code> 的说明在每张卡片的副标题里。</div>
+    </nav>
+  </aside>
+  <main class="main" id="main"></main>
 </div>
-<script src="pages.js"></script>
-<script src="pages-extra.js"></script>
-<script src="pages-stickers.js"></script>
-<script src="pages-settings.js"></script>
-<script src="app.js"></script>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<noscript><p class="muted">这个控制台需要启用 JavaScript。</p></noscript>
+
+<script src="/core.js"></script>
+<script src="/pages-overview.js"></script>
+<script src="/pages-model.js"></script>
+<script src="/pages-personas.js"></script>
+<script src="/pages-groups.js"></script>
+<script src="/pages-activity.js"></script>
+<script src="/pages-assets.js"></script>
+<script src="/assets-stickers.js"></script>
+<script src="/assets-slang.js"></script>
+<script src="/pages-cost.js"></script>
+<script src="/pages-logs.js"></script>
+<script src="/pages-settings.js"></script>
+<script src="/app.js"></script>
 </body>
 </html>

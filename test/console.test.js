@@ -61,25 +61,50 @@ test('unknown api routes 404 and the shell page needs no token', async t => {
   assert.equal(page.status, 200);
   const html = await page.text();
   assert.match(html, /AutoChat 控制台/);
-  for (const page of ['social', 'slang', 'stickers', 'settings']) assert.match(html, new RegExp(`data-page="${page}"`), `${page} is reachable from the nav`);
-  // Load order matters: pages.js defines the `pages` object, pages-extra.js,
-  // pages-stickers.js and pages-settings.js add their pages to it, and app.js
-  // renders the result.
-  assert.match(html, /<script src="pages\.js"><\/script>\s*<script src="pages-extra\.js"><\/script>\s*<script src="pages-stickers\.js"><\/script>\s*<script src="pages-settings\.js"><\/script>\s*<script src="app\.js"><\/script>/);
+  const pages = ['overview', 'model', 'personas', 'groups', 'activity', 'assets', 'cost', 'logs', 'settings'];
+  for (const name of pages) assert.match(html, new RegExp(`data-page="${name}"`), `${name} is reachable from the nav`);
+  // The redesign merged eleven old tabs into nine, so the old ids must be gone.
+  for (const gone of ['social', 'slang', 'stickers', 'config', 'sessions']) {
+    assert.ok(!html.includes(`data-page="${gone}"`), `${gone} is no longer a tab of its own`);
+  }
+  // Load order matters: core.js defines the helpers (and the `pages` object) every
+  // page script fills in, and app.js owns the single delegated click/change listener.
+  assert.match(html, /<link rel="stylesheet" href="\/console\.css">/);
+  assert.match(html, /<script src="\/core\.js"><\/script>\s*<script src="\/pages-overview\.js"><\/script>/);
+  assert.match(html, /<script src="\/pages-settings\.js"><\/script>\s*<script src="\/app\.js"><\/script>/);
   // The script assets are served without a token: they are code, not data, and
   // the browser cannot attach a header to its own <script> fetch.
-  for (const asset of ['app.js', 'pages.js', 'pages-extra.js', 'pages-stickers.js', 'pages-settings.js']) {
+  const scripts = ['core.js', 'pages-overview.js', 'pages-model.js', 'pages-personas.js', 'pages-groups.js',
+    'pages-activity.js', 'pages-assets.js', 'assets-stickers.js', 'assets-slang.js', 'pages-cost.js',
+    'pages-logs.js', 'pages-settings.js', 'app.js'];
+  for (const asset of scripts) {
     const served = await fetch(`${base}/${asset}`);
     assert.equal(served.status, 200, asset);
     assert.match(served.headers.get('content-type'), /javascript/, asset);
   }
-  assert.match(await (await fetch(`${base}/app.js`)).text(), /autochat\.console\.token/);
-  assert.match(await (await fetch(`${base}/pages.js`)).text(), /async overview\(\)/);
-  assert.match(await (await fetch(`${base}/pages-extra.js`)).text(), /async slang\(\)/);
-  assert.match(await (await fetch(`${base}/pages-stickers.js`)).text(), /async stickers\(\)/);
-  assert.match(await (await fetch(`${base}/pages-settings.js`)).text(), /async settings\(\)/);
+  const css = await fetch(`${base}/console.css`);
+  assert.equal(css.status, 200);
+  assert.match(css.headers.get('content-type'), /text\/css/);
+  assert.match(await (await fetch(`${base}/core.js`)).text(), /autochat\.console\.token/);
+  assert.match(await (await fetch(`${base}/pages-overview.js`)).text(), /pages\.overview/);
+  assert.match(await (await fetch(`${base}/pages-model.js`)).text(), /pages\.model/);
+  assert.match(await (await fetch(`${base}/pages-personas.js`)).text(), /pages\.personas/);
+  assert.match(await (await fetch(`${base}/pages-groups.js`)).text(), /pages\.groups/);
+  assert.match(await (await fetch(`${base}/pages-activity.js`)).text(), /pages\.activity/);
+  assert.match(await (await fetch(`${base}/pages-assets.js`)).text(), /pages\.assets/);
+  assert.match(await (await fetch(`${base}/assets-stickers.js`)).text(), /sticker/);
+  assert.match(await (await fetch(`${base}/assets-slang.js`)).text(), /slang/);
+  assert.match(await (await fetch(`${base}/pages-cost.js`)).text(), /pages\.cost/);
+  assert.match(await (await fetch(`${base}/pages-logs.js`)).text(), /pages\.logs/);
+  assert.match(await (await fetch(`${base}/pages-settings.js`)).text(), /pages\.settings/);
+  // The shell must be able to lock itself down: no inline script, no inline style.
+  const csp = page.headers.get('content-security-policy') ?? '';
+  assert.match(csp, /script-src 'self'/);
+  assert.match(csp, /style-src 'self'/);
+  assert.ok(!/unsafe-inline/.test(csp), 'no inline escape hatch');
   assert.equal((await fetch(`${base}/../src/config.js`)).status, 404, 'no path traversal out of public/');
   assert.equal((await fetch(`${base}/app.js.bak`)).status, 404);
+  assert.equal((await fetch(`${base}/pages.js`)).status, 404, 'the retired pre-redesign scripts are not served');
 });
 
 test('credentials never appear in console responses', async t => {

@@ -207,7 +207,7 @@ test('the slang page reads the library, guards its writes and keeps chat text ou
 });
 
 // 控制台前端是经典脚本，没有模块边界，只能按 index.html 的顺序在同一 vm 上下文里跑。
-// 这里搭一个最小假 DOM：只实现这三个脚本真正碰到的接口，其余返回空值走各自的兜底分支。
+// 这里搭一个最小假 DOM：只实现这些脚本真正碰到的接口，其余返回空值走各自的兜底分支。
 const fakeConsole = created => {
   class El {
     constructor(tag = 'div') {
@@ -243,6 +243,12 @@ const fakeConsole = created => {
   return { document, main: pick(ids, 'main'), input: selector => pick(selectors, selector) };
 };
 
+// 与 index.html 里的 <script src> 顺序一致：core 先定义工具，页面脚本往 pages 上挂，
+// app.js 最后启动路由与事件委派。
+const CONSOLE_SCRIPTS = ['core.js', 'pages-overview.js', 'pages-model.js', 'pages-personas.js', 'pages-groups.js',
+  'pages-activity.js', 'pages-assets.js', 'assets-stickers.js', 'assets-slang.js', 'pages-cost.js',
+  'pages-logs.js', 'pages-settings.js', 'app.js'];
+
 // 只把真请求转给测试服务器，其余（主题、图标之类）就地成功即可。
 const loadConsoleScripts = base => {
   const created = [], calls = [];
@@ -267,12 +273,14 @@ const loadConsoleScripts = base => {
     setInterval: () => 0, clearInterval: () => {}, setTimeout, clearTimeout,
     console, URLSearchParams, URL, Blob,
   });
-  for (const name of ['pages.js', 'pages-extra.js', 'app.js']) {
+  for (const name of CONSOLE_SCRIPTS) {
     const file = new URL(`../src/console/public/${name}`, import.meta.url);
     new vm.Script(readFileSync(file, 'utf8'), { filename: name }).runInContext(context);
   }
   // 顶层 const 在 vm 里可见但不会挂到 context 对象上，取出来才能直接调页面函数。
   vm.runInContext('globalThis.__pages = pages;', context);
+  // 改版后页面不再往 window 上挂全局函数：唯一入口是 ACTIONS 表（事件委派用）。
+  vm.runInContext('globalThis.__actions = ACTIONS;', context);
   return { calls, created, context, input, main };
 };
 
@@ -287,7 +295,7 @@ test('the group page marks an override, clears it by english key, and refuses a 
   const dump = () => store.db.prepare('SELECT key, value FROM settings ORDER BY key').all()
     .map(row => `${row.key}=${row.value}`).join('\n');
 
-  const { calls, created, context, input, main } = loadConsoleScripts(base);
+  const { calls, context, input, main } = loadConsoleScripts(base);
   await new Promise(resolve => setTimeout(resolve, 150)); // 等首次渲染的请求落地，别和下面的快照抢
 
   const html = await context.__pages.groups();
@@ -297,48 +305,46 @@ test('the group page marks an override, clears it by english key, and refuses a 
     // 从 <input 开始切，这样「输入框自己的属性」和它后面的说明都落在同一块里。
     return source.slice(source.lastIndexOf('<input', id), source.indexOf('</label>', id));
   };
-  const noteOf = (source, name) => {
-    const span = blockOf(source, name).match(/<span class="muted">([^<]*)<\/span>/);
-    assert.ok(span, `${name} 缺少继承状态说明`);
-    return span[1];
-  };
   for (const name of ['threshold', 'cooldownSeconds', 'dailyLimit']) {
-    assert.match(blockOf(html, name), /type="number"/, `${name} 要用数字输入框`);
-    assert.match(noteOf(html, name), /本群自定义/, '有覆盖的行必须说出来，不能一律显示成继承');
-    assert.doesNotMatch(noteOf(html, name), /继承全局/);
-    assert.match(blockOf(html, name), new RegExp(`groupSocialInherit\\(&quot;20000&quot;,'${name}'\\)`),
+    const block = blockOf(html, name);
+    assert.match(block, /type="number"/, `${name} 要用数字输入框`);
+    assert.match(block, /本群自定义/, '有覆盖的行必须说出来，不能一律显示成继承');
+    assert.doesNotMatch(block, /继承全局（\d/, '有覆盖时不能再显示继承来的全局值');
+    // 改版后没有内联 onclick：清除按钮只带 data-*，由 app.js 的唯一监听器派发。
+    assert.match(block, new RegExp(`data-act="groupSocialInherit" data-group="20000" data-key="${name}"`),
       '清除按钮必须把接口认识的英文键传回去');
+    assert.doesNotMatch(block, /onclick=/, 'CSP 禁内联处理器，按钮不能带 onclick');
   }
 
   calls.length = 0;
-  await context.window.groupSocialInherit('20000', 'threshold');
+  await context.__actions.get('groupSocialInherit')({ dataset: { group: '20000', key: 'threshold' } });
   const cleared = calls.filter(call => call.method === 'POST');
   assert.equal(cleared.length, 1);
   assert.equal(cleared[0].path, '/api/groups/config');
   assert.deepEqual(cleared[0].body, { group: '20000', subsystem: 'social', threshold: null });
   assert.equal(store.setting(GROUP_KEYS.socialThreshold('20000'), 'absent'), 'absent');
   const refreshed = await context.__pages.groups();
-  assert.match(noteOf(refreshed, 'threshold'), /继承全局（6）/, '清掉覆盖后要说清楚继承的是哪个全局值');
-  assert.match(noteOf(refreshed, 'cooldownSeconds'), /本群自定义/, '别的字段不能被连带说成继承');
+  assert.match(blockOf(refreshed, 'threshold'), /继承全局（6）/, '清掉覆盖后要说清楚继承的是哪个全局值');
+  assert.match(blockOf(refreshed, 'cooldownSeconds'), /本群自定义/, '别的字段不能被连带说成继承');
   await new Promise(resolve => setTimeout(resolve, 150)); // 上面那次重绘落地再取快照
 
   input('#g-threshold-20000').value = '';
   input('#g-cooldownSeconds-20000').value = '30';
   input('#g-dailyLimit-20000').value = '9';
-  const before = dump(), renders = main.writes, banners = created.length;
+  const before = dump(), renders = main.writes;
   calls.length = 0;
-  await context.window.groupSocialSave('20000');
+  await context.__actions.get('groupSocialSave')({ dataset: { group: '20000' } });
   assert.equal(calls.filter(call => call.method === 'POST').length, 0,
     '空值必须在客户端就地拦下：整个保存动作一个请求都不发');
   assert.equal(dump(), before, '一次都没写库');
   assert.equal(main.writes, renders, '不重绘，操作者刚填的其它字段要留着');
-  const banner = created.slice(banners).find(node => String(node.className).includes('banner'));
-  assert.ok(banner, '必须给出可见提示，不能悄悄不发请求');
-  assert.match(banner.textContent, /阈值不能为空/);
-  assert.match(banner.textContent, /本次没有保存任何改动/);
+  // 提示写进 #groups-notice（原地更新），所以断言的是这个节点的内容而不是新建节点。
+  const notice = input('#groups-notice').innerHTML;
+  assert.match(notice, /需在 0-100 之间/, '必须给出可见提示，不能悄悄不发请求');
+  assert.match(notice, /本次没有保存任何改动/);
   assert.equal(input('#g-threshold-20000').value, '', '输入框内容保持，让人接着改');
   assert.equal(input('#g-cooldownSeconds-20000').value, '30', '同一行别的字段不能被清掉');
-  assert.equal(input('#g-threshold-20000').style.borderColor, 'var(--bad)');
+  assert.ok(input('#g-threshold-20000').classList.contains('is-invalid'), '出错的输入框要标出来');
 
   // B-3：失败原因要让操作者看懂，但不能把没收录的码也一起吞掉。
   const ui = vm.runInContext('({ explain, reason })', context);
@@ -347,12 +353,16 @@ test('the group page marks an override, clears it by english key, and refuses a 
   assert.match(ui.reason(new Error('SOCIAL_PARAM_NOT_GROUP_SCOPED')), /不能按群单独设置/);
   assert.equal(ui.explain('SOMETHING_NEW'), 'SOMETHING_NEW', '没收录的码照原样显示');
 
-  // 入口 A（全局仿真页）走的是同一个判据，I-01 §11 担心的「客户端先 Number('') 成 0」在这里关闭。
-  input('#sim-idle-hours').value = '9-22';
-  input('#sim-threshold').value = '';
-  const requestsBefore = calls.length;
-  await vm.runInContext('window.socialSave()', context);
-  assert.equal(calls.length, requestsBefore, '全局仿真页留空时也不该发出请求');
-  assert.match(created.filter(node => node.className.includes('banner')).at(-1).textContent, /阈值不能为空/);
-  assert.equal(input('#sim-threshold').value, '', '输入的其它字段要原样留在框里');
+  // 入口 B（全局仿真参数）：POST /api/social/config 不带 group 写的就是全局，
+  // 所以活动页得有可编辑控件——但只给运行期真有写入路径的字段，上下文条数/
+  // 分段数/打字延迟来自配置文件，仍然只读，避免长出「改了不生效」的控件。
+  const activity = await context.__pages.activity();
+  for (const key of ['threshold', 'cooldownSeconds', 'dailyLimit', 'idleMinutes', 'idleHours']) {
+    assert.match(activity, new RegExp(`id="act-${key}"`), `${key} 可以全局改，必须有输入框`);
+  }
+  assert.match(activity, /data-act="activityToggle" data-value="idleEnabled"/, '插话开关要能改');
+  for (const key of ['contextMessages', 'maxChunks', 'minDelayMs', 'maxDelayMs', 'messageTtlHours']) {
+    assert.doesNotMatch(activity, new RegExp(`id="act-${key}"`), `${key} 没有运行期写入路径，不能给输入框`);
+  }
+  assert.match(activity, /全局参数/);
 });
