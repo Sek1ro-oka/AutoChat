@@ -192,8 +192,8 @@ POKE_REPLY_TEXT=在的，有事说事
 | --- | --- | --- | --- |
 | `POKE_ENABLED` | `false` | `true` / `false`；总开关 | `POKE_ENABLED 必须是 true 或 false` |
 | `POKE_MODE` | `reply` | `off` / `reply` / `active` | `POKE_MODE 必须是 off / reply / active` |
-| `POKE_COOLDOWN_SECONDS` | `30` | 整数，5–3600 | —（整数校验） |
-| `POKE_DAILY_LIMIT` | `20` | 整数，1–200 | —（整数校验） |
+| `POKE_COOLDOWN_SECONDS` | `30` | 整数，5–3600 | `数值配置不正确：POKE_COOLDOWN_SECONDS`（非数字或越界）；非整数时为 `需要整数：POKE_COOLDOWN_SECONDS` |
+| `POKE_DAILY_LIMIT` | `20` | 整数，1–200 | `数值配置不正确：POKE_DAILY_LIMIT`（非数字或越界）；非整数时为 `需要整数：POKE_DAILY_LIMIT` |
 | `POKE_REPLY_TEXT` | 空（不回应） | 最多 200 字 | `POKE_REPLY_TEXT 最多200字` |
 
 这五项都是运行时可变配置，在控制台「系统设置」页里改是**保存后立即生效（无需重启）**，对下一条戳一戳就生效；只改 `.env` 时仍要双击 `restart.cmd`。
