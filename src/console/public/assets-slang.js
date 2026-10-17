@@ -6,21 +6,30 @@
 const SLANG_STATUS = { candidate: '待确认', confirmed: '已确认', rejected: '已拒绝' };
 const SLANG_BADGE = { candidate: 'warn', confirmed: 'ok', rejected: 'err' };
 
-const slangGroupsText = (row, scopes) => (row.length ? row.join(' · ') : `<span class="muted">全局</span>`);
+// 生效群那一列：空数组 = 全局，给一行灰字而不是空白单元格。
+// 以前签名是 (row, scopes)，调用处却传 (scopes, row.groups)——两个参数是错位的，函数体只用到第一个，
+// 于是靠巧合在工作；某一行没有 groups 字段时第一个参数就是 undefined，undefined.length 会以同一类
+// TypeError 再崩一次，所以这里一并堵掉。
+const slangGroupsText = groups => (Array.isArray(groups) && groups.length
+  ? groups.join(' · ')
+  : `<span class="muted">全局</span>`);
 
-const slangRow = (row, scopes) => `<tr>
-    <td><strong>${esc(row.term || '')}</strong></td>
-    <td>${row.meaning ? esc(row.meaning) : `<span class="muted">${DASH}</span>`}</td>
-    <td>${badge(SLANG_STATUS[row.status] || row.status, SLANG_BADGE[row.status] || 'muted')}</td>
-    <td>${slangGroupsText(scopes, row.groups)}</td>
-    <td class="nowrap">${num(row.count)}</td>
-    <td class="nowrap"><div class="row">
+// core.js 的 table(headers, rows) 吃的是「每行一个单元格数组」，不是整行 <tr> 字符串；
+// 以前这里返回 <tr>，只要有一条词条就 TypeError: cells.map is not a function，整页白屏。
+// 原来写在 <td> 上的 nowrap 改由 CSS 的 .nowrap 类承担（单元格本身由 table() 生成）。
+const slangRow = row => [
+  `<strong>${esc(row.term || '')}</strong>`,
+  row.meaning ? esc(row.meaning) : `<span class="muted">${DASH}</span>`,
+  badge(SLANG_STATUS[row.status] || row.status, SLANG_BADGE[row.status] || 'muted'),
+  slangGroupsText(row.groups),
+  `<span class="nowrap">${num(row.count)}</span>`,
+  `<span class="nowrap"><div class="row">
       <button type="button" class="btn" data-act="slangEdit" data-id="${esc(row.id)}">详情</button>
       <button type="button" class="btn" data-act="slangStatus" data-id="${esc(row.id)}" data-status="confirmed">确认</button>
       <button type="button" class="btn" data-act="slangStatus" data-id="${esc(row.id)}" data-status="rejected">拒绝</button>
       <button type="button" class="btn" data-act="slangDelete" data-id="${esc(row.id)}">删除</button>
-    </div></td>
-  </tr>`;
+    </div></span>`,
+];
 
 // 详情卡：意思 / 怎么用 / 禁忌 三项可改，生效群可勾选（一个都不勾 = 全局生效）。
 const slangEditor = (entry, groups) => {
@@ -74,7 +83,7 @@ const assetsSlangView = d => {
     ? `上次抽取：${time(d.lastExtract.at)}，扫了 ${num(d.lastExtract.scanned)} 条消息，新增 ${num(d.lastExtract.created)} 条。`
     : '还没有抽取过。';
   const body = rows.length
-    ? table(['词', '意思', '状态', '生效群', '出现', '操作'], rows.map(row => slangRow(row, row.groups)), { empty: '这一分类下没有词条。' })
+    ? table(['词', '意思', '状态', '生效群', '出现', '操作'], rows.map(slangRow), { empty: '这一分类下没有词条。' })
     : '<div class="empty">这一分类下没有词条。开启黑话后，抽取到的候选会先出现在「待确认」里。</div>';
   const editor = assetsState.entry ? slangEditor(assetsState.entry, d.groups || []) : '';
   const preview = d.preview ? esc(d.preview) : '未注入任何内容（功能未开启，或还没有已确认的词条）。';

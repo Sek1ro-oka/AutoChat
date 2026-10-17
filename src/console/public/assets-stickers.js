@@ -12,25 +12,30 @@ const UPLOAD_MAX = 5 * 1024 * 1024;
 const stickerThumb = id =>
   `<img class="thumb" alt="表情包缩略图" loading="lazy" src="/api/stickers/image?id=${encodeURIComponent(id)}&token=${encodeURIComponent(token)}">`;
 
+// core.js 的 table(headers, rows) 吃的是「每行一个单元格数组」，不是整行 <tr> 字符串；
+// 以前这里返回 <tr>，只要库里有一张图就 TypeError: cells.map is not a function，整页白屏。
+// 顺序必须与调用点的表头 ['图','描述 / 备注','标签','状态','出现','用过','来源','操作'] 一一对应；
+// 原来写在 <td> 上的 nowrap 改由 CSS 的 .nowrap 类承担。
 const stickerRow = d => {
   const badges = STICKER_BADGE[d.status] || 'muted';
   const file = d.desc ? esc(d.desc) : `<span class="muted">${esc(d.note || '没有备注')}</span>`;
   const tags = (d.tags || []).length ? esc((d.tags || []).join(' · ')) : DASH;
-  return `<tr>
-    <td>${stickerThumb(d.id)}</td>
-    <td>${file}</td>
-    <td>${tags}</td>
-    <td>${badge(STICKER_STATUS[d.status] || d.status, badges)}</td>
-    <td class="nowrap">${num(d.seen)}</td>
-    <td class="nowrap">${num(d.useCount)}</td>
-    <td class="nowrap">${esc(STICKER_SOURCE[d.source] || d.source || DASH)}</td>
-    <td class="nowrap"><div class="row">
+  // 缩略图的 src 必须带 ?token=：<img> 发不了请求头，去掉就是一堆占位图。
+  return [
+    stickerThumb(d.id),
+    file,
+    tags,
+    badge(STICKER_STATUS[d.status] || d.status, badges),
+    `<span class="nowrap">${num(d.seen)}</span>`,
+    `<span class="nowrap">${num(d.useCount)}</span>`,
+    `<span class="nowrap">${esc(STICKER_SOURCE[d.source] || d.source || DASH)}</span>`,
+    `<span class="nowrap"><div class="row">
       <button type="button" class="btn" data-act="stickerEdit" data-id="${esc(d.id)}">编辑</button>
       <button type="button" class="btn" data-act="stickerStatus" data-id="${esc(d.id)}" data-status="confirmed">通过</button>
       <button type="button" class="btn" data-act="stickerStatus" data-id="${esc(d.id)}" data-status="rejected">拒绝</button>
       <button type="button" class="btn" data-act="stickerDelete" data-id="${esc(d.id)}">删除</button>
-    </div></td>
-  </tr>`;
+    </div></span>`,
+  ];
 };
 
 // 详情编辑卡：只在点了「编辑」之后出现，字段是可改的三项（描述 / 备注 / 标签）。
