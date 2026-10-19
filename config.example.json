@@ -50,6 +50,14 @@
     "useOpencli": true,
     "opencliBin": ""
   },
+  "qzone": {
+    "enabled": false,
+    "adminQQ": [],
+    "minIntervalMs": 21600000,
+    "dailyCap": 2,
+    "ugcRight": 4,
+    "maxChars": 300
+  },
   "ownerQQ": null,
   "sessionCwd": "",
   "agentPreset": "qq-chat",
