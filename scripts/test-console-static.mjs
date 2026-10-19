@@ -153,10 +153,12 @@ ok(html.includes('当前没有疑似僵死') && html.includes('>0 条<'), '空�
 
 // ── 说说卡（T-007b）：占位换成真卡片，id 全部 qz 前缀，不碰 wd* ──
 console.log('## 开关页（说说）');
-for (const id of ['qzBadge', 'qzStats', 'qzNext', 'qzScope', 'qzLatest', 'qzToggle', 'qzMsg', 'qzList', 'qzEmpty', 'qzBody']) {
+for (const id of ['qzBadge', 'qzStats', 'qzNext', 'qzLatest', 'qzToggle', 'qzMsg', 'qzList', 'qzEmpty', 'qzBody']) {
   const n = (html.match(new RegExp(`id="${id}"`, 'g')) ?? []).length;
   ok(n === 1, `说说卡元素 ${id}`, `${n} 处`);
 }
+// 可见范围读数已删：下方下拉框就写着当前值，读数行再写一遍是重复信息。
+ok(!html.includes('qzScope'), '可见范围读数 qzScope 已彻底移除（改由下拉框显示）');
 ok(/getElementById\('qzToggle'\)\.addEventListener\('click', toggleQzone\)/.test(html), '开关按钮已绑定 toggleQzone');
 ok(/api\('\/api\/qzone\/config', 'POST', \{ enabled: !current \}\)/.test(html), '开关按钮调 POST /api/qzone/config');
 // 两句确认文案必须逐字在：开关是可逆的，但「关掉之后不能发」这件事要说在点下去之前。
@@ -168,7 +170,7 @@ ok(/api\('\/api\/qzone\/recent'\)/.test(html), '读数来自 GET /api/qzone/rece
 ok(/currentConsolePage === 'switches'\) await refreshQzone\(\)/.test(html), 'refresh() 仅在开关页拉说说读数');
 ok(/if \(page === 'switches'\) \{ renderQzone\(lastQzone\); refreshQzone\(\); \}/.test(html), 'setConsolePage 切到开关页时先渲染缓存再拉');
 ok(html.includes("'今日已发 '") && html.includes("' 条'"), '读数行显示 今日已发 N 条（不写死上限）');
-ok(html.includes('距下次可发 ') && html.includes('默认可见范围 ') && html.includes('最近一次 '), '四项读数标题都在');
+ok(html.includes('距下次可发 ') && html.includes('最近一次 '), '读数标题都在（可见范围那格已删）');
 ok(!/软 15 分钟/.test(html) && html.includes('现在可以发'), '倒计时用接口给的 nextAllowedAt 现算');
 ok(/QZONE_RIGHT_LABELS = Object\.freeze\(\{ 1: '所有人可见', 4: '好友可见', 64: '仅自己可见' \}\)/.test(html), '可见范围三档与 QZONE_UGC_RIGHTS 语义一致');
 ok(html.includes('还没有发过说说。'), '空表占位在');

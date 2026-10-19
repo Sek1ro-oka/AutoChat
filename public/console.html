@@ -1785,6 +1785,25 @@ button:active:not(:disabled) {
   display:flex; align-items:center; gap:7px; margin:0 0 0 auto;
   cursor:pointer; white-space:nowrap; font-size:12px
 }
+/* 说说容器：把这一小节圈成「卡里的一块」，边界与浅底都吃控制台自己的变量。
+   作用域照旧挂 #section-switches，qzone-card / qzone-head 不会漏到别的页。 */
+#section-switches .qzone-card {
+  margin-top:22px;
+  padding:24px 26px 26px;
+  background:var(--surface-subtle);
+  border:1px solid var(--card-border);
+  border-radius:14px;
+  min-width:0;
+  overflow-wrap:anywhere
+}
+#section-switches .qzone-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:2px }
+#section-switches .qzone-head .layer-heading { margin:0; font-size:14px }
+#section-switches .qzone-head .layer-heading .meta { margin:0; font-size:11px }
+/* 开关按钮推到最右：它是这一块的主操作，跟读数挤在一起会被当成第四个读数。 */
+#section-switches .qzone-head #qzToggle { margin-left:auto; flex:0 0 auto }
+/* 读数行：.meta 自带 margin-top:8px，在 flex 行里会把四个读数各往下顶一截，这里抹平。 */
+#section-switches #qzReadouts { margin-top:14px }
+#section-switches #qzReadouts .meta { margin-top:0 }
 
 </style>
 <style id="sandboxStyle">
@@ -2877,19 +2896,20 @@ button:active:not(:disabled) {
         </table>
       </div>
 
-      <h3 class="layer-heading">说说<span class="meta">QQ 空间动态：开关与频率都落盘持久，删除会连空间里那条一起删</span></h3>
-      <div class="row" style="margin-top:10px">
-        <span class="pill" id="qzBadge">说说 读取中…</span>
-        <span class="meta" id="qzStats">今日已发 —</span>
-        <span class="meta" id="qzWindowCount">窗口 —</span>
-        <span class="meta" id="qzNext">距下次可发 —</span>
-        <span class="meta" id="qzScope">默认可见范围 —</span>
-        <span class="meta" id="qzLatest">最近一次 —</span>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <button id="qzToggle" class="danger" type="button" disabled>关闭说说</button>
-        <span class="meta" id="qzMsg"></span>
-      </div>
+      <section class="qzone-card" id="qzoneCard" aria-labelledby="qzoneTitle">
+        <div class="qzone-head">
+          <h3 class="layer-heading" id="qzoneTitle">说说<span class="meta">QQ 空间动态：频率与可见范围都落盘到 <code>config.json</code></span></h3>
+          <span class="pill g" id="qzBadge">读取中…</span>
+          <span class="meta" id="qzMsg" role="status" aria-live="polite"></span>
+          <button id="qzToggle" class="danger small" type="button" disabled>关闭说说</button>
+        </div>
+
+        <div class="row" id="qzReadouts">
+          <span class="meta" id="qzStats">今日已发 —</span>
+          <span class="meta" id="qzWindowCount">窗口 —</span>
+          <span class="meta" id="qzNext" title="距下次可发">距下次可发 —</span>
+          <span class="meta" id="qzLatest">最近一次 —</span>
+        </div>
 
       <div class="row" style="margin-top:14px">
         <span class="qz-sentence">
@@ -2929,6 +2949,7 @@ button:active:not(:disabled) {
           <tbody id="qzBody"></tbody>
         </table>
       </div>
+      </section>
     </section>
 <section class="card" id="sandbox" data-page="sandbox">
 <div class="wrap">
@@ -3335,18 +3356,18 @@ function renderQzone(qz) {
   if (qz !== undefined && qz !== null) {
     const enabled = qz.enabled === true;
     badge.className = 'pill ' + (enabled ? 'g' : 'r');
-    badge.textContent = enabled ? '说说 已开启' : '说说 已关闭';
+    badge.textContent = enabled ? '已开启' : '已关闭';
     // 只报条数，不带分母：T-008 之后生效的上限只有 windowCap，分母的唯一出处在下一格「窗口 24h 内 1/5」。
     // 这里的 todayCount 按 Asia/Shanghai 自然日算，跟滑动窗口不是一回事，写「x/2」会让同一张卡出现两个上限。
     document.getElementById('qzStats').textContent = '今日已发 ' + (Number(qz.todayCount) || 0) + ' 条';
     document.getElementById('qzWindowCount').textContent = qzWindowText(qz);
     document.getElementById('qzNext').textContent = '距下次可发 ' + qzNextText(qz);
-    document.getElementById('qzScope').textContent = '默认可见范围 ' + qzoneRightLabel(qz.ugcRight);
     const posts = Array.isArray(qz.posts) ? qz.posts : [];
     document.getElementById('qzLatest').textContent = '最近一次 '
       + (posts.length > 0 ? (fmtMinuteStamp(posts[0].createdAt) || '—') : '还没发过');
     toggle.disabled = false;
-    toggle.className = enabled ? 'danger' : 'primary';
+    // small 要跟着一起写：这里整条 className 覆盖，漏了它按钮会在第一次重绘后「长大」。
+    toggle.className = enabled ? 'danger small' : 'primary small';
     toggle.textContent = enabled ? '关闭说说' : '开启说说';
     // 空表文案每次都要写回：首帧是「读取中…」，若不再写一次，删到最后一条之后会一直挂着「读取中…」。
     empty.textContent = '还没有发过说说。';
@@ -3367,14 +3388,13 @@ function renderQzone(qz) {
   }
   // 读不到就说读不到：按钮按灰、每个读数写「—」，不摆一个假的「已关闭」或「0/2」。
   badge.className = 'pill';
-  badge.textContent = qz === null ? '说说 状态未知' : '说说 读取中…';
+  badge.textContent = qz === null ? '状态未知' : '读取中…';
   document.getElementById('qzStats').textContent = '今日已发 —';
   document.getElementById('qzWindowCount').textContent = '窗口 —';
   document.getElementById('qzNext').textContent = '距下次可发 —';
-  document.getElementById('qzScope').textContent = '默认可见范围 —';
   document.getElementById('qzLatest').textContent = '最近一次 —';
   toggle.disabled = true;
-  toggle.className = 'danger';
+  toggle.className = 'danger small';
   toggle.textContent = '关闭说说';
   empty.hidden = false;
   empty.textContent = qz === null ? '读不到说说状态（桥接版本不一致或接口出错）。' : '读取中…';
@@ -3446,6 +3466,11 @@ function renderQzoneParams(qz) {
   const cap = qzNum(qz && qz.windowCap);
   const reported = Number.isFinite(hours) && Number.isFinite(cap);
   qzoneWindowReported = reported;
+  // 两个计数是两种口径，同时摆着会像数据打架（「今日已发 0 条」旁边挂着「窗口 24h 内 1/2」）：
+  // 时间窗 > 0 时生效口径是滚动窗口，自然日计数整格藏起来；窗口 = 0 才退回它。
+  // 读不到参数时 hours 是 NaN，NaN > 0 为假 —— 那时留一行「今日已发 —」当占位。
+  const windowed = hours > 0;
+  document.getElementById('qzStats').hidden = windowed;
   // 回填只在「用户没动过 + 控件没拿到焦点」时做：这张卡每几秒重绘一次，
   // 正在敲的数字不能被自己人抹掉，刚选好的可见范围也不能在点「我已知晓」那一瞬间被改回去。
   const canFill = !qzoneParamsDirty;
