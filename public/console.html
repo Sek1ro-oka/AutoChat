@@ -1776,7 +1776,7 @@ button:active:not(:disabled) {
       <button data-view="access" class="nav-item"><span class="nav-icon" aria-hidden="true">⊙</span>访问与安全</button>
       <button data-view="operations" class="nav-item"><span class="nav-icon" aria-hidden="true">⌘</span>调试与运维</button>
       <button data-view="reference" class="nav-item"><span class="nav-icon" aria-hidden="true">ⓘ</span>工具参考</button>
-      <a id="demoLink" class="nav-item" href="/demo" title="打开看门狗决策沙盘（纯前端演示，/demo）" style="cursor:pointer"><span class="nav-icon" aria-hidden="true">◐</span>看门狗演示<span class="nav-note">DEMO</span></a>
+      <a id="demoLink" class="nav-item" href="/demo" title="打开看门狗决策沙盘（/demo）" style="cursor:pointer"><span class="nav-icon" aria-hidden="true">◐</span>看门狗</a>
     </nav>
     <div class="sidebar-bottom"><span class="local-dot"></span>本地控制台<small>QQ ↔ DeepSeek Harness</small></div>
   </aside>
@@ -2626,7 +2626,7 @@ button:active:not(:disabled) {
     localStorage.setItem('consoleToken', token);
     history.replaceState({}, '', location.pathname + location.hash);
   }
-  // 侧栏「看门狗演示」是一次真实的页面跳转（/demo），不经过 api()，所以令牌得自己带上。
+  // 侧栏「看门狗」是一次真实的页面跳转（/demo），不经过 api()，所以令牌得自己带上。
   // 用页面本来就有的那份 localStorage['consoleToken']（api() 的 401 重试也写这里），不引入新机制、
   // 也不写死令牌；没存过令牌时按裸 /demo 打开，交给服务端 401 页的 prompt() 追问。
   // 每次点击前重新读一次：用户可能在 prompt() 里刚补填过令牌。
