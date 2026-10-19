@@ -25,6 +25,7 @@ import {
   STALL_SOFT_MS, STALL_HARD_MS, STALL_SCAN_INTERVAL_MS, STALL_CONFIRM_ROUNDS,
   STALL_CANCEL_TIMEOUT_MS, STALL_ZOMBIE_MARK_TTL_MS
 } from './stall-watchdog.js';
+import { CONSOLE_COOKIE_NAME, buildSessionCookie, isPagePath, parseCookieHeader, resolveRequestToken } from './console-auth.js';
 import { compactModelMessage } from './qq-model-view.js';
 import { safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
 import { AUDIO_EXTS, cleanupTemp, describeAudio, formatBytes, formatDuration, inspectAudio, listAudioFiles, parseTargetKey, processAudioVolume, resolveAudioProcessing, resolveAudioSource, safeJoinLibrary } from './send-voice-lib.js';
@@ -3348,10 +3349,23 @@ async function main() {
         sendJson({ ok: false, error: `Host 头不被允许（${hostHeader || '缺失'}）：控制台只接受本机回环访问` }, 403);
         return;
       }
-      // 控制台鉴权：所有请求需带 x-console-token 或 ?token=
+      // 控制台鉴权：所有请求需带 x-console-token、?token=，或（仅页面 GET）会话 cookie。
       // 定长比较：`!==` 会在第一个不同的字符处短路，理论上可被本机进程用响应时延逐字节试探。
       // 令牌是 192 bit 随机值且只监听回环，所以这是纵深防御而非在野漏洞。
-      const suppliedToken = String(url.searchParams.get('token') ?? req.headers['x-console-token'] ?? '');
+      //
+      // 令牌来源判定抽在 src/console-auth.js：优先级 url > header > cookie，且 **cookie 只在
+      // `GET /` 与 `GET /demo` 上参与**，以 `/api/` 开头的路径与一切非 GET 请求永远只认 url/header。
+      // 这条边界是安全性的**第一层**（接口根本不看 cookie），SameSite=Strict 只是第二层：
+      // 一旦接口认 cookie，攻击面就从"猜 192 bit 随机值"变成"让本机浏览器自动带上 cookie"。
+      // scripts/test-console-auth.mjs 里有静态守卫盯着这里，不要绕开 resolveRequestToken 自己解析。
+      const supplied = resolveRequestToken({
+        method: req.method,
+        pathname: url.pathname,
+        urlToken: url.searchParams.get('token'),
+        headerToken: req.headers['x-console-token'],
+        cookieHeader: req.headers.cookie,
+      });
+      const suppliedToken = supplied.token;
       const tokenMatches = (() => {
         if (!consoleToken) return false; // 上面已拒绝空令牌；真出现也只许失败关闭，绝不 return true
         const a = Buffer.from(suppliedToken, 'utf8');
@@ -3359,6 +3373,13 @@ async function main() {
         if (a.length !== b.length) return false;
         return crypto.timingSafeEqual(a, b);
       })();
+      if (consoleToken && tokenMatches && supplied.source !== 'cookie'
+        && req.method === 'GET' && isPagePath(url.pathname)) {
+        // 令牌这次是从 url/header 带进来的，说明人刚在 401 页（或地址栏）里输过一次；
+        // 顺手种一个会话 cookie，之后刷新这一页、或从 /demo 点回 / ，都不用再弹 prompt。
+        // 只在"来源不是 cookie"时下发：从 cookie 认可的不重复刷 Set-Cookie，省一次无用头。
+        res.setHeader('set-cookie', buildSessionCookie(suppliedToken));
+      }
       if (consoleToken && !tokenMatches) {
         // `/` 和 `/demo` 都是人直接在地址栏打开的 HTML 页面，给它们一支自带 prompt() 的 401 页
         // 比回 JSON 有用；其余路径仍回 JSON。回跳地址只在这两个**固定字面量**里取，不拼接请求里的
@@ -3513,6 +3534,23 @@ async function main() {
             // 与上面的上游健康同权限 —— 属于排障信息，只给操作者，不进会话级智能体视图。
             watchdog: stallWatchdog.snapshot()
           });
+          return;
+        }
+        // ── 看门狗运行时开关（控制台「开关」页） ────────────────────────────────
+        // 只切"硬清理"这一个动作：软告警、suspects 观测、/api/status 的 watchdog 字段都不受影响，
+        // 关掉之后卡死的会话只是不再被自动取消，人还能在控制台里看到它挂着。
+        // 开关只存内存（不落盘）：桥接重启回到默认开——逃生开关不该在没人看着的时候一直关着。
+        if (req.method === 'POST' && url.pathname === '/api/watchdog') {
+          const body = await readBody();
+          if (typeof body.enabled !== 'boolean') {
+            sendJson({ ok: false, error: 'enabled 必须是布尔值' }, 400);
+            return;
+          }
+          // 只有真发生变化才记一行：反复点同一个值不该把日志刷满。
+          if (stallWatchdog.setEnabled(body.enabled)) {
+            log(`[watchdog] 控制台：自动硬清理已 ${body.enabled ? '启用' : '关闭'}`);
+          }
+          sendJson({ ok: true, enabled: stallWatchdog.snapshot().enabled, running: stallWatchdog.isRunning() });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/presets') {

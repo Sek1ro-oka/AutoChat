@@ -29,6 +29,9 @@ const tests = [
   'test-voice-gui.mjs',
   // 控制台静态契约（跑不了 Playwright 的环境下的替代回归）
   'test-console-static.mjs',
+  // 控制台令牌来源判定与 cookie 边界（纯函数）：以 `/api/` 开头的路径与一切非 GET 永不读 cookie，
+  // cookie 只在 `GET /`、`GET /demo` 上参与，且只在"人是拿 url/header 令牌进来的"时才下发。
+  'test-console-auth.mjs',
   // 语音系统整体结构检查（入口/依赖/端点/开关/文档一致性）
   'test-voice-system.mjs',
   // SnowLuma 账号/token 自发现（换 QQ 账号后 token 会变，写死的工具会 401）

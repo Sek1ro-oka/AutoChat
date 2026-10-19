@@ -98,5 +98,29 @@ ok(gateAt > -1 && routeAt > gateAt && bridge.slice(gateAt, routeAt).includes("'/
 ok(/id="demoLink"[^>]*href="\/demo"/.test(html), '控制台存在指向 /demo 的入口链接');
 ok(/const saved = localStorage\.getItem\('consoleToken'\)/.test(html) && /demoLink\.href = saved \? '\/demo\?token='/.test(html), '入口按已有令牌拼 /demo?token=（不写死令牌）');
 
+console.log('## 开关页（看门狗自动硬清理）');
+ok(/data-view="switches"/.test(html) && /data-page="switches"/.test(html), '侧栏入口与新视图都在', 'data-view + data-page');
+ok(html.indexOf('data-view="switches"') > 0
+  && html.indexOf('data-view="switches"') < html.indexOf('id="demoLink"'), '新入口在侧栏里、位于 demoLink 之前（demoLink 本任务不动）');
+for (const id of ['wdBadge', 'wdRunBadge', 'wdStats', 'wdLastKill', 'wdThresholds', 'wdSuspects', 'wdSuspectCount', 'wdToggle', 'wdMsg']) {
+  const n = (html.match(new RegExp(`id="${id}"`, 'g')) ?? []).length;
+  ok(n === 1, `开关页元素 ${id}`, `${n} 处`);
+}
+ok(/getElementById\('wdToggle'\)\.addEventListener\('click', toggleWatchdog\)/.test(html), '开关按钮已绑定 toggleWatchdog');
+ok(/api\('\/api\/watchdog', 'POST', \{ enabled: !current \}\)/.test(html), '开关按钮调 POST /api/watchdog');
+ok(html.includes('关闭后卡死的会话不会再被自动清理，确定？')
+  && html.includes('启用后卡死超过 30 分钟的会话会被自动清理，确定？'), '确认文案写清「会失去什么」');
+// 阈值只能从上报的毫秒数换算：任何一天改了阈值，写死的中文就会变成谎话。
+ok(/wdSpan\(wd\.softMs, 60000\)/.test(html) && /wdSpan\(wd\.hardMs, 60000\)/.test(html)
+  && /wdSpan\(wd\.scanMs, 1000\)/.test(html) && /wd\.confirmRounds/.test(html), '阈值由 softMs/hardMs/scanMs/confirmRounds 换算');
+ok(!/软 15 分钟/.test(html), '没有写死「软 15 分钟」');
+ok(/currentConsolePage === 'switches'\) renderWatchdog\(lastWatchdog\)/.test(html), 'refresh() 仅在开关页渲染看门狗');
+ok(/if \(page === 'switches'\) renderWatchdog\(lastWatchdog\)/.test(html), 'setConsolePage 切页时用缓存快照即时渲染');
+ok(/switches: \['开关'/.test(html), 'consolePages 里注册了 switches（切页标题/哈希路由才认它）');
+ok(html.includes('当前没有疑似僵死') && html.includes('>0 条<'), '空表占位与 0 条计数都在');
+ok(html.includes('说说功能尚未接入，等 T-006。'), '说说占位一行在（等 T-006，不在本任务实现）');
+ok(/history\.replaceState\(/.test(html), 'URL 里的 ?token= 读完后用 replaceState 抹掉');
+ok(!/演示/.test(html), '页面仍无「演示」字样');
+
 console.log(bad === 0 ? '\n全部通过' : `\n${bad} 项失败`);
 if (bad > 0) process.exit(1);

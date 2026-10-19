@@ -1765,6 +1765,7 @@ button:active:not(:disabled) {
     <div class="nav-label">工作空间</div>
     <nav id="mainNav">
       <button data-view="overview" class="nav-item active" aria-current="page"><span class="nav-icon" aria-hidden="true">◫</span>运行总览</button>
+      <button data-view="switches" class="nav-item"><span class="nav-icon" aria-hidden="true">◑</span>开关</button>
       <button data-view="sessions" class="nav-item"><span class="nav-icon" aria-hidden="true">☷</span>会话与审批<span class="nav-count" id="pendingCount">—</span></button>
       <button data-view="persona" class="nav-item"><span class="nav-icon" aria-hidden="true">◉</span>人格与角色</button>
       <div class="nav-label">聊天行为</div>
@@ -2534,6 +2535,36 @@ button:active:not(:disabled) {
         <span class="meta" id="aiNotifyMsg"></span>
       </div>
     </section>
+<section id="section-switches" data-page="switches" class="card span-all">
+      <h2 data-note="每 3 秒随状态轮询刷新">开关与状态</h2>
+      <div class="meta">这里的开关只影响桥接运行时，随时可以再点回来。状态取自 <code>/api/status</code> 的 <code>watchdog</code> 字段，跟着现有 3 秒轮询走，<b>不额外发请求</b>。</div>
+
+      <h3 class="layer-heading">会话永久繁忙看门狗<span class="meta">ISS-001：会话永久繁忙时的自愈开关</span></h3>
+      <div class="row" style="margin-top:10px">
+        <span class="pill" id="wdBadge">自动硬清理 读取中…</span>
+        <span class="pill" id="wdRunBadge">扫描 —</span>
+        <span class="meta" id="wdStats">扫描 — 次 · 软告警 — 次 · 硬清理 — 次</span>
+      </div>
+      <div class="meta" id="wdLastKill">上次硬清理：—</div>
+      <div class="meta" id="wdThresholds">阈值读取中…</div>
+      <div class="row" style="margin-top:10px">
+        <button id="wdToggle" class="danger" type="button" disabled>关闭自动硬清理</button>
+        <span class="meta" id="wdMsg"></span>
+      </div>
+      <div class="meta">关掉之后，卡死超过硬线的会话不再被自动清理，但<b>软告警与下面的观测照常</b>。开关只存在内存里，桥接重启会回到默认的「开」。</div>
+
+      <h3 class="layer-heading">疑似僵死</h3>
+      <div id="wdSuspects">
+        <div class="meta" id="wdSuspectCount">0 条</div>
+        <table>
+          <thead><tr><th>会话</th><th>空闲</th><th>主导锚点</th><th>首次软告警</th></tr></thead>
+          <tbody><tr><td colspan="4">当前没有疑似僵死</td></tr></tbody>
+        </table>
+      </div>
+
+      <h3 class="layer-heading">说说<span class="meta">T-006</span></h3>
+      <div class="meta">说说功能尚未接入，等 T-006。</div>
+    </section>
 <section id="section-usage" data-page="usage" class="card span-all">
       <h2 data-note="每 3 秒自动同步">令牌与花费</h2>
       <div class="meta">数据来源是 DSH 会话事件里的 provider usage。<b>累计总量</b>取 <code>tokenUsage</code> 投影（整条会话日志的权威累计，含桥接启动前的历史）；<b>逐轮明细</b>由 <code>assistant/message</code> 的 usage 折叠而来，能追溯到多深取决于会话开场快照带回的历史条数。金额按 DeepSeek 官方价目表折算，区分高峰 / 空闲时段（高峰单价为空闲的 2 倍）。</div>
@@ -2723,11 +2754,106 @@ async function refresh() {
     document.getElementById('roleModeText').textContent = s.roleMode === 'silent' ? '静默' : '正常';
     const modeLabel = s.mode === 'reserved' ? '一代仿真模式' : s.mode === 'reserved2' ? '二代仿真模式' : s.mode === 'closed-agent' ? '封闭 Agent' : '聊天模式';
     updateOverview(s, modeLabel);
+    // 看门狗快照跟着这一趟 /api/status 一起回来，缓存住；开关页就在同一份数据上渲染，
+    // 不再单发请求。undefined = 还没拿到过，null = 桥接没上报这个字段（版本不一致）。
+    lastWatchdog = s.watchdog === undefined ? null : s.watchdog;
+    if (currentConsolePage === 'switches') renderWatchdog(lastWatchdog);
     document.getElementById('activity').textContent = s.activity || '（空）';
     const presetSel = document.getElementById('closedPreset');
     if (presetSel && document.activeElement !== presetSel) presetSel.value = s.closedAgentPreset || '';
   } catch (e) { document.getElementById('statusText').textContent = '连接中断 · 请检查桥接服务'; setConnectionError(e); }
 }
+
+// ── 开关页：看门狗自动硬清理 ────────────────────────────────────────────────
+// 数据全部来自 refresh() 已经拉到的 /api/status.watchdog，这一页自己**不发请求**；
+// 只有点开关才 POST /api/watchdog，成功后立刻 refresh() 一次（不等 3 秒轮询，
+// 否则按钮会跟真实状态错开整整一拍）。
+let lastWatchdog;
+// 毫秒 → 人话单位。阈值一律从上报的毫秒数换算，写死「15 分钟」迟早会说谎。
+function wdSpan(ms, unitMs) {
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value <= 0) return '—';
+  const n = value / unitMs;
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+function fmtMinuteStamp(ms) {
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value <= 0) return '';
+  const d = new Date(value);
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+function renderWatchdog(wd) {
+  const badge = document.getElementById('wdBadge');
+  const runBadge = document.getElementById('wdRunBadge');
+  const toggle = document.getElementById('wdToggle');
+  if (wd !== undefined && wd !== null) {
+    const enabled = wd.enabled === true;
+    badge.className = 'pill ' + (enabled ? 'g' : 'r');
+    badge.textContent = '自动硬清理 ' + (enabled ? '开' : '关');
+    runBadge.className = 'pill ' + (wd.running ? 'b' : '');
+    runBadge.textContent = wd.running ? '扫描 运行中' : '扫描 已停';
+    const stats = wd.stats || {};
+    document.getElementById('wdStats').textContent = '扫描 ' + Number(wd.scans || 0) + ' 次 · 软告警 '
+      + Number(stats.softHits || 0) + ' 次 · 硬清理 ' + Number(stats.hardKills || 0) + ' 次';
+    const killedAt = Number(stats.lastKillAt) || 0;
+    document.getElementById('wdLastKill').textContent = killedAt > 0
+      ? '上次硬清理：' + fmtMinuteStamp(killedAt) + (stats.lastKillKey ? '（' + stats.lastKillKey + '）' : '')
+      : '上次硬清理：还没有';
+    document.getElementById('wdThresholds').textContent = '软 ' + wdSpan(wd.softMs, 60000) + ' 分钟 · 硬 '
+      + wdSpan(wd.hardMs, 60000) + ' 分钟 · 每 ' + wdSpan(wd.scanMs, 1000) + ' 秒扫描 · 连续 '
+      + (Number.isFinite(Number(wd.confirmRounds)) ? Number(wd.confirmRounds) : '—') + ' 轮确认';
+    toggle.disabled = false;
+    toggle.className = enabled ? 'danger' : 'primary';
+    toggle.textContent = enabled ? '关闭自动硬清理' : '启用自动硬清理';
+    const suspects = Array.isArray(wd.suspects) ? wd.suspects : [];
+    document.getElementById('wdSuspectCount').textContent = suspects.length + ' 条';
+    document.querySelector('#wdSuspects tbody').innerHTML = suspects.length === 0
+      ? '<tr><td colspan="4">当前没有疑似僵死</td></tr>'
+      : suspects.map((item) => '<tr><td>' + esc(item.key)
+        + (item.sessionId ? '<br><span class="meta">' + esc(item.sessionId) + '</span>' : '') + '</td><td>'
+        + (Number.isFinite(Number(item.idleMinutes)) ? Number(item.idleMinutes) + ' 分钟' : '—') + '</td><td>'
+        + esc(item.dominant || '—') + '</td><td>' + (fmtMinuteStamp(item.since) || '—') + '</td></tr>').join('');
+    return;
+  }
+  // 观测不到就不装：按钮按灰、阈值写清楚是哪儿不对，绝不显示一个假的「开」或「关」。
+  badge.className = 'pill';
+  badge.textContent = wd === null ? '自动硬清理 未知' : '自动硬清理 读取中…';
+  runBadge.className = 'pill';
+  runBadge.textContent = '扫描 —';
+  document.getElementById('wdStats').textContent = '扫描 — 次 · 软告警 — 次 · 硬清理 — 次';
+  document.getElementById('wdLastKill').textContent = '上次硬清理：—';
+  document.getElementById('wdThresholds').textContent = wd === null
+    ? '这个桥接没有上报 watchdog 字段（控制台与桥接版本不一致？）'
+    : '阈值读取中…';
+  toggle.disabled = true;
+  toggle.textContent = '关闭自动硬清理';
+}
+async function toggleWatchdog() {
+  const button = document.getElementById('wdToggle');
+  const msg = document.getElementById('wdMsg');
+  const current = lastWatchdog !== null && lastWatchdog !== undefined && lastWatchdog.enabled === true;
+  // 可逆开关，一次确认就够；文案只说「你会失去什么」。
+  if (!confirm(current
+    ? '关闭后卡死的会话不会再被自动清理，确定？'
+    : '启用后卡死超过 30 分钟的会话会被自动清理，确定？')) return;
+  button.disabled = true;
+  msg.className = 'meta';
+  msg.textContent = '正在提交…';
+  try {
+    const r = await api('/api/watchdog', 'POST', { enabled: !current });
+    if (!r || r.ok !== true) throw new Error((r && r.error) || '桥接拒绝了这次改动');
+    msg.className = 'ok';
+    msg.textContent = current ? '已关闭自动硬清理（只软不硬）' : '已启用自动硬清理';
+    await refresh();
+  } catch (error) {
+    msg.className = 'err';
+    msg.textContent = '操作失败：' + (error && error.message ? error.message : error);
+  } finally {
+    button.disabled = false;
+  }
+}
+document.getElementById('wdToggle').addEventListener('click', toggleWatchdog);
 
 async function refreshPresets() {
   try {
@@ -4332,7 +4458,8 @@ const consolePages = {
   usage: ['令牌与花费', '每一次思考，都算得清楚。', '实时查看 AI 的 token 消耗与花费，可下钻到每个群、每个好友、每一轮对话。'],
   access: ['访问与安全', '明确边界，安心连接。', '管理允许对话的对象、管理员权限与控制台访问凭证。'],
   operations: ['调试与运维', '让桥接，始终井然有序。', '测试消息、引导 AI，或维护桥接进程与会话工作区。'],
-  reference: ['工具参考', '每一种能力，都清晰可见。', '查看桥接提供给 DSH 的 MCP 工具与用途。']
+  reference: ['工具参考', '每一种能力，都清晰可见。', '查看桥接提供给 DSH 的 MCP 工具与用途。'],
+  switches: ['开关', '该开的开，该关的关。', '运行时开关与观测：看门狗自动硬清理的开与关，以及疑似僵死的实时状态。']
 };
 let currentConsolePage = 'overview';
 let toastTimer;
@@ -4346,6 +4473,9 @@ function showConsoleToast(message) {
 function setConsolePage(page, { updateHash = true, focus = false, target = '' } = {}) {
   if (!Object.hasOwn(consolePages, page)) page = 'overview';
   currentConsolePage = page;
+  // 进「开关」页先拿最近一次 /api/status 的快照画一遍（最多旧 3 秒），不额外发请求；
+  // 之后由 refresh() 的轮询继续更新。首屏直接开在 #switches 时这里是「读取中…」。
+  if (page === 'switches') renderWatchdog(lastWatchdog);
   document.querySelectorAll('[data-page]').forEach(el => { el.hidden = el.dataset.page !== page; });
   document.querySelectorAll('#mainNav [data-view]').forEach(button => {
     const selected = button.dataset.view === page;

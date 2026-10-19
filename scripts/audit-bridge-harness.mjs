@@ -22,6 +22,10 @@ import * as stateAcl from '../src/state-acl.mjs';
 // 看门狗是纯逻辑模块（零依赖、零 I/O、时钟可注入），整份导出直接展开进 VM context：
 // bridge.js 的顶层 import 会被下面的「剥 import」逻辑删掉，这里补上同名绑定，两边行为一致。
 import * as stall from '../src/stall-watchdog.js';
+// 控制台令牌判定同样是纯函数模块（零依赖、零 I/O），整份导出展开进 context。
+// bridge.js 里 `resolveRequestToken` / `buildSessionCookie` / `isPagePath` 是直接引用的
+// 顶层绑定（不做 typeof 兜底），少了这一行 VM 里就是 ReferenceError，全部 HTTP 用例瞬间红。
+import * as consoleAuth from '../src/console-auth.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -135,7 +139,7 @@ export async function bridgeHarness({ config = {}, savedState, globals = {} } = 
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
-    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...stall,
+    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...stall, ...consoleAuth,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),

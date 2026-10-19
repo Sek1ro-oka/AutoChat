@@ -411,6 +411,62 @@ test('⑦ 清理后账本清空，重算 idle 不再命中，新投递可以重�
   assert.equal(watchdog.snapshot().stats.hardKills, 1, '刚清理过的会话不会被立刻二次清理');
 });
 
+// ── ⑧ 运行时开关 setEnabled（控制台「开关」页） ──────────────────────────
+test('⑧ setEnabled 关掉后只软不硬，重新打开立刻恢复（确认计数不重置）', async () => {
+  const state = makeFakeBridge();
+  const clock = { at: BASE + 31 * MIN };
+  state.promptQueues.set(KEY, { queue: [], running: true, inFlight: null });
+  state.lastEventAt.set(SID, BASE);
+  state.v2TurnStartAt.set(SID, BASE);
+  const { watchdog, logs, kills } = makeWatchdog(state, clock);
+
+  assert.equal(watchdog.snapshot().enabled, true, '默认开');
+  await watchdog.scan();                       // 越硬线第 1 轮：只确认
+  assert.equal(kills.length, 0);
+
+  // 关掉：返回值语义 = 是否发生变化
+  const logsBefore = logs.length;
+  assert.equal(watchdog.setEnabled(false), true, '开 → 关 返回 true');
+  assert.equal(logs.length, logsBefore, 'setEnabled 自己不许打日志（模块保持零 I/O）');
+  assert.equal(watchdog.snapshot().enabled, false, 'snapshot 必须反映关掉');
+  assert.equal(watchdog.setEnabled(false), false, '重复关 返回 false');
+
+  // 关掉之后 scan 照跑：软告警与 suspects 观测都在，只是不 kill
+  clock.at += STALL_SCAN_INTERVAL_MS;
+  await watchdog.scan();
+  assert.equal(kills.length, 0, '关掉后不许硬清理');
+  assert.equal(watchdog.snapshot().suspects.length, 1, '软告警照常，suspects 仍可见');
+  assert.ok(watchdog.snapshot().stats.softHits >= 1, '软告警计数照常累加');
+  clock.at += STALL_SCAN_INTERVAL_MS;
+  await watchdog.scan();
+  assert.equal(kills.length, 0, '一直关着就一直不清理');
+  assert.equal(watchdog.isRunning(), false, '开关不负责启停扫描定时器（本次没 start）');
+  assert.equal(watchdog.stop(), false, '没启动过就没什么可停的');
+
+  // 重新打开：会话仍越硬线，累计确认计数没被重置 → 下一轮就清
+  assert.equal(watchdog.setEnabled(true), true, '关 → 开 返回 true');
+  assert.equal(watchdog.snapshot().enabled, true);
+  await watchdog.scan();
+  assert.equal(kills.length, 1, '重新打开后仍卡着 → 立刻清理（不重置确认计数）');
+  assert.equal(kills[0].key, KEY);
+  assert.equal(watchdog.snapshot().stats.hardKills, 1);
+});
+
+test('⑧ setEnabled 只认 true：1 / 字符串 / 对象 / 空值一律当关', () => {
+  const state = makeFakeBridge();
+  const clock = { at: BASE };
+  const { watchdog, logs } = makeWatchdog(state, clock);
+  for (const value of [0, 1, 'true', 'false', {}, [], null, undefined, NaN]) {
+    watchdog.setEnabled(true);                 // 先复位成开，好让返回值有意义
+    assert.equal(watchdog.setEnabled(value), true, `setEnabled(${String(value)}) 应当关掉并返回 true`);
+    assert.equal(watchdog.snapshot().enabled, false, `只有布尔 true 才算开，${String(value)} 必须当关`);
+  }
+  assert.equal(logs.length, 0, '全程不打日志');
+  watchdog.setEnabled(false);
+  assert.equal(watchdog.setEnabled(true), true);
+  assert.equal(watchdog.snapshot().enabled, true, '真布尔 true 才打开');
+});
+
 // ── 工具函数 ────────────────────────────────────────────────────────────
 test('工具函数：分钟数向上取整、错误码两种拼写都识别', () => {
   assert.equal(stallMinutes(0), 0);

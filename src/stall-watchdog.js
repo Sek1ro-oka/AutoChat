@@ -292,7 +292,8 @@ export async function cleanZombieSession(record = {}, deps = {}) {
  *   now/log/setIntervalFn/clearIntervalFn  注入点（单测传假时钟、假 interval）
  *   softMs/hardMs/scanMs/confirmRounds/enabled  阈值与逃生开关
  *
- * 返回 { scan, start, stop, snapshot, isRunning }。
+ * 返回 { scan, start, stop, isRunning, snapshot, setEnabled }。
+ * setEnabled 是运行时逃生开关（控制台「开关」页用），只切硬清理，不动扫描本身。
  * scan() 可 await：单测用它推进假时钟，生产由 interval 触发（不 await，异常只记日志）。
  */
 export function createStallWatchdog(options = {}) {
@@ -306,7 +307,9 @@ export function createStallWatchdog(options = {}) {
   const hardMs = Math.max(softMs, Number.isFinite(Number(options.hardMs)) ? Number(options.hardMs) : STALL_HARD_MS);
   const scanMs = Math.max(1000, Number(options.scanMs) || STALL_SCAN_INTERVAL_MS);
   const confirmRounds = Math.max(1, Math.round(Number(options.confirmRounds) || STALL_CONFIRM_ROUNDS));
-  const enabled = options.enabled !== false;
+  // 硬清理的开关：初始值来自 QQ_BRIDGE_WATCHDOG，之后可由控制台运行时切换（setEnabled）。
+  // 只门控 kill（见 judge），扫描、软告警、suspects 观测一律照常——关掉开关不等于停掉监视。
+  let enabled = options.enabled !== false;
 
   const suspects = new Map();   // key -> 软告警记录（/api/status 的 suspects 就是它）
   const confirms = new Map();   // key -> 连续越硬线的轮数
@@ -444,8 +447,10 @@ export function createStallWatchdog(options = {}) {
       safeLog(`[watchdog] 启动失败（不影响主链路）：${error?.message ?? error}`);
       return false;
     }
+    // 这里不再指名 QQ_BRIDGE_WATCHDOG：开关的初始值来自那个环境变量，但运行中还能被
+    // 控制台改（setEnabled），定时器若被 stop/start 重建，指名环境变量就会说错话。
     safeLog(`[watchdog] 已启动：每 ${Math.round(scanMs / 1000)} 秒扫描一次，软 ${stallMinutes(softMs)} 分钟，`
-      + `硬 ${stallMinutes(hardMs)} 分钟 × ${confirmRounds} 轮${enabled ? '' : '（QQ_BRIDGE_WATCHDOG=off：只软不硬）'}`);
+      + `硬 ${stallMinutes(hardMs)} 分钟 × ${confirmRounds} 轮${enabled ? '' : '（自动硬清理已关闭：只软不硬）'}`);
     return true;
   }
 
@@ -459,6 +464,24 @@ export function createStallWatchdog(options = {}) {
 
   function isRunning() {
     return !!timer;
+  }
+
+  /**
+   * 运行时切换「自动硬清理」开关，返回**是否发生了状态变化**（宿主用它决定要不要记日志）。
+   *
+   * 三条纪律：
+   *   1. 只认 `next === true`：`'true'`、`1`、`{}` 一律当 false —— 调用方必须给真布尔值，
+   *      免得一个拼错的字符串悄悄把逃生开关关掉。
+   *   2. 这里**不打日志**（本模块零 I/O）：要记就由宿主按返回值记。
+   *   3. 不动扫描、不动 confirms/软告警。所以关掉再打开，之前累计的确认轮数还在：
+   *      会话若仍越硬线，重新打开后的下一轮就会清理——这正是"还卡着就清掉"的期望语义。
+   * @param {boolean} next
+   * @returns {boolean} 状态是否变化
+   */
+  function setEnabled(next) {
+    const previous = enabled;
+    enabled = next === true;
+    return previous !== enabled;
   }
 
   /** /api/status 的 watchdog 字段：suspects 只带 key/时长/忙的原因，不带消息内容。 */
@@ -484,5 +507,5 @@ export function createStallWatchdog(options = {}) {
     };
   }
 
-  return { scan, start, stop, isRunning, snapshot };
+  return { scan, start, stop, isRunning, snapshot, setEnabled };
 }
