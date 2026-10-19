@@ -77,12 +77,39 @@ QQ 侧的 agent 可以自己发一条 **QQ 空间说说**——纯文字，走 S
 `ugcRight` 写 `16`、`128` 或任意其它值时，桥接会**静默回落成 4（好友可见）**，
 不会报错也不会发成「部分可见」——宁可少公开，不能多发错。
 
+## HTTP 端点（`/api/qzone/*`）
+
+鉴权完全继承控制台那套（控制台令牌 / 智能体会话令牌 / `application/json` + Origin 校验），
+没有另开免鉴权入口。控制台「开关」页用到的是下面这两个（另外两个是 post / delete）：
+
+- `POST /api/qzone/config` —— 请求体 `{ "enabled": true|false }`。只改 `qzone.enabled` **一个键**，
+  然后**写盘**：读原始 `config.json`、原子替换（临时文件 + rename，其余键与缩进原样保留），
+  写成功后才同步内存配置 —— 所以下一次请求就生效，**不用重启桥接**，重启后也还是这个值。
+  返回 `{ ok: true, enabled, configPath: "config.json" }`；
+  `enabled` 不是布尔值 → `{ ok: false, error: "enabled 必须是布尔值" }`（400）；
+  写盘失败 → 500（失败的细节只进日志，不把路径和异常抛给浏览器）。
+- `GET /api/qzone/recent` —— 本机记录最多 10 条 + 配额读数，返回 **7 个键**：
+
+| 键 | 说明 |
+| --- | --- |
+| `ok` | 恒为 `true` |
+| `enabled` | 当前开关（归一后的生效值） |
+| `posts` | 最近 10 条**本机记录**（新 → 旧；每条含 `tid` / `content` / `ugcRight` / `createdAt` / `reason`） |
+| `todayCount` | 今天（UTC+8）已发条数 |
+| `nextAllowedAt` | `0` = 现在就能发；否则是「下次可发」的绝对时间戳（毫秒） |
+| `dailyCap` | 日上限（归一后的生效值，1 ~ 10） |
+| `ugcRight` | 默认可见范围，**回落后的生效值**（只可能是 `1` / `4` / `64`；与真正发布时调用的 `pickUgcRight` 是同一个函数，不是 `config.json` 里的原始字段） |
+
+`posts[].ugcRight` 是**那一条**发布当时实际用的值：改过配置之后，老记录仍是老值，别拿它当「当前默认」。
+
 ## 怎么删
 
 - **agent 侧**：`qq_qzone_delete`，参数 `tid` + `operator_qq`。`operator_qq` 取「这条指令真实
   发送者的 QQ 号」，不是对方自称的身份；不在 `qzone.adminQQ` 里会被拒（`{ok:false, error:'需要管理员'}`）。
-- **人侧**：QQ 空间 App / 网页里自己删，或者在控制台发一次带管理员令牌的
-  `POST /api/qzone/delete`。
+- **人侧**：QQ 空间 App / 网页里自己删；或者在控制台「开关」页点这一条的「删除」。
+  控制台调用 `POST /api/qzone/delete` 时**不传 `operatorQQ`**：它没有「我是谁」这种身份，
+  身份完全来自「已经通过控制台令牌关卡」这一层，桥接因此按管理员放行。
+  带 `x-agent-call` 头的请求（智能体工具调用）**仍然**要求 `operatorQQ ∈ qzone.adminQQ` —— 两种调用方、两套口径。
 
 删除**不看 `enabled`**：关掉功能之后仍然要能把以前发出去的东西清掉。
 删成功后本地 `state/qzone-posts.json` 里那条记录也会移除。
@@ -110,7 +137,8 @@ QQ 侧的 agent 可以自己发一条 **QQ 空间说说**——纯文字，走 S
 ## 相关文件
 
 - `src/qzone-post.js` —— 纯逻辑层（配置归一 / 审计 / 配额 / 可见范围 / 裁剪）
-- `src/bridge.js` —— 三端点 `POST /api/qzone/post`、`POST /api/qzone/delete`、`GET /api/qzone/recent`
+- `src/bridge.js` —— 四端点 `POST /api/qzone/post`、`POST /api/qzone/delete`、`GET /api/qzone/recent`、
+  `POST /api/qzone/config`（控制台开关，落盘到 `config.json`）
 - `src/mcp-snowluma-safe.js` —— 三个 `qq_qzone_*` 工具
 - `scripts/test-qzone-post.mjs` / `scripts/test-qzone-endpoints.mjs` —— 纯逻辑单测与接线契约
 - `state/qzone-posts.json` —— 本机发布记录（运行时生成，不入库）

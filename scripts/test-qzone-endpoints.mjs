@@ -7,12 +7,13 @@
 //   ① 读源码文本，断言「端点在哪、闸门顺序如何、鉴权关卡是否在前面」（结构契约）；
 //   ② import 阶段一的纯逻辑模块，用真函数跑端到端组合（行为契约）。
 //
-// 覆盖任务书 §五 要求的五组：
+// 覆盖任务书 §五 要求的五组（组六是 T-007b 追加的控制台开关部分）：
 //   组一 三个路径字面量存在，且都在令牌关卡之后（继承鉴权，没另写一套）
 //   组二 闸门顺序 disabled → audit → quota → OneBot（源码顺序）
 //   组三 oneBotActionNested 的调用点带 send_qzone_msg / delete_qzone_msg
 //   组四 MCP 三工具都注册了，且每条描述都含「不代发」红线
 //   组五 纯函数端到端：审计优先于配额、ugcRight 只可能 1/4/64、缺省配置永远 disabled
+//   组六 控制台开关端点：位置/类型闸门/写盘口径、删除的 x-agent-call 分流、recent 的两个新读数
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -207,6 +208,57 @@ check('prunePosts 按时间倒序且默认保留 50 条', (() => {
   const out = prunePosts(many);
   return out.length === 50 && out[0].tid === 't59';
 })());
+
+console.log('\n── 组六：控制台开关端点与 recent 读数（T-007b）──────────────');
+// ① 开关端点本身：位置在令牌关卡之后、同一个 try 块里 —— 否则就是另开了一个免鉴权入口。
+const configLines = allLinesOf(bridge, "'/api/qzone/config'");
+check('存在端点字面量 /api/qzone/config', configLines.length > 0, `出现 ${configLines.length} 次`);
+check('  /api/qzone/config 位于令牌关卡之后（继承鉴权）', configLines.length > 0 && configLines.every((n) => n > tokenLine), `端点行 ${configLines.join(',')} / 关卡行 ${tokenLine}`);
+check('  /api/qzone/config 与另外三个端点在同一个 try 块里', configLines.length > 0 && configLines.every((n) => n > tryLine));
+const configBlock = (() => {
+  const start = bridge.indexOf("url.pathname === '/api/qzone/config'");
+  const end = bridge.indexOf("url.pathname === '/api/presets'", start);
+  return start < 0 || end < 0 ? '' : bridge.slice(start, end);
+})();
+check('能定位到开关端点整块', configBlock.length > 0, `${configBlock.length} 字符`);
+// ② 类型闸门：只认真布尔，且错误文案与控制台约定一致（400 而不是 500）。
+check('非布尔值一律拒绝（typeof !== boolean）', /typeof body\.enabled !== 'boolean'/.test(configBlock));
+check('  错误文案是「enabled 必须是布尔值」且带 400', /enabled 必须是布尔值/.test(configBlock) && /, 400\)/.test(configBlock));
+// ③ 写盘口径：读原始 config.json 再改一个键，且走 atomicWriteJson（临时文件 + rename）。
+check('读原始 config.json（readConfigObject），不把归一化 cfg 整份写回', /readConfigObject\(configFile\)/.test(configBlock) && !/atomicWriteJson\(configFile, cfg\)/.test(configBlock));
+check('  只改 qzone.enabled 一个键', /file\.qzone = \{ \.\.\.\(file\.qzone \?\? \{\}\), enabled \}/.test(configBlock));
+check('  写盘走 atomicWriteJson（临时文件 + rename）', /atomicWriteJson\(configFile, file\)/.test(configBlock));
+check('  写盘成功之后才同步内存 cfg.qzone', (() => {
+  const writeAt = configBlock.indexOf('atomicWriteJson(configFile, file)');
+  const memAt = configBlock.indexOf('cfg.qzone = { ...(cfg.qzone ?? {}), enabled }');
+  return writeAt > 0 && memAt > writeAt;
+})());
+check('  写盘失败返回 500 而不是谎报成功', /写入 config\.json 失败[\s\S]{0,40}?500\)/.test(configBlock));
+check('  成功返回 enabled 与 configPath', /sendJson\(\{ ok: true, enabled, configPath: 'config\.json' \}\)/.test(configBlock));
+check('  只有真变化才记一行日志', configBlock.includes('if (before !== enabled) log(`[qzone] 控制台：说说功能已'));
+// ④ 删除的放行口径：带 x-agent-call 的是智能体（严格），不带的是控制台（已过令牌关卡）。
+const deleteHandler = (() => {
+  const start = bridge.indexOf("url.pathname === '/api/qzone/delete'");
+  const end = bridge.indexOf("url.pathname === '/api/qzone/recent'", start);
+  return start < 0 || end < 0 ? '' : bridge.slice(start, end);
+})();
+check('能定位到删除端点整块', deleteHandler.length > 0, `${deleteHandler.length} 字符`);
+check('删除按 x-agent-call 分流（智能体调用 vs 管理端）', /req\.headers\['x-agent-call'\] !== undefined/.test(deleteHandler));
+check('  智能体分支仍然校验 operatorQQ ∈ adminQQ', /agentCall\s*\?\s*Number\.isSafeInteger\(operatorQQ\)[\s\S]{0,120}?adminQQ\.includes\(operatorQQ\)/.test(deleteHandler));
+check('  管理端分支直接放行（三元的 else 是 true）', /: true;/.test(deleteHandler));
+check('  拒绝语气没变：需要管理员 + 403', /需要管理员[\s\S]{0,40}?403\)/.test(deleteHandler));
+check('  管理端放行不等于不鉴权：删除仍在令牌关卡之后', lineOf(bridge, "url.pathname === '/api/qzone/delete'") > tokenLine);
+// ⑤ recent 的两个新读数：只追加、不改名，且 ugcRight 必须是回落后的生效值。
+const recentHandler = (() => {
+  const start = bridge.indexOf("url.pathname === '/api/qzone/recent'");
+  const end = bridge.indexOf("url.pathname === '/api/qzone/config'", start);
+  return start < 0 || end < 0 ? '' : bridge.slice(start, end);
+})();
+check('能定位到 recent 端点整块', recentHandler.length > 0, `${recentHandler.length} 字符`);
+check('recent 追加了 dailyCap', /dailyCap: qz\.dailyCap/.test(recentHandler));
+check('recent 追加的 ugcRight 是 pickUgcRight 的回落值（不是 normalizeQzoneConfig 的原始字段）', /ugcRight: pickUgcRight\(qz\)/.test(recentHandler) && !/ugcRight: qz\.ugcRight/.test(recentHandler));
+check('recent 原有五个键一个都没改名或换语义', ['ok: true', 'enabled: qz.enabled', 'posts: prunePosts(state.posts, 10)', 'todayCount: quota.todayCount', 'nextAllowedAt:'].every((key) => recentHandler.includes(key)));
+check('recent 的 nextAllowedAt 仍是数字（0 或时间戳），没被改成对象', !/nextAllowedAt: \{/.test(recentHandler));
 
 const total = passed + failures.length;
 console.log(`\n结果：${passed}/${total} passed`);

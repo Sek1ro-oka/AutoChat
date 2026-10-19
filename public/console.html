@@ -2821,7 +2821,7 @@ button:active:not(:disabled) {
     </section>
 <section id="section-switches" data-page="switches" class="card span-all">
       <h2 data-note="每 3 秒随状态轮询刷新">开关与状态</h2>
-      <div class="meta">这里的开关只影响桥接运行时，随时可以再点回来。状态取自 <code>/api/status</code> 的 <code>watchdog</code> 字段，跟着现有 3 秒轮询走，<b>不额外发请求</b>。</div>
+      <div class="meta"><b>这一页两个开关的持久性不一样，别混着看：</b>看门狗那个只改内存，桥接重启就回到默认的「开」，随时可以再点回来；说说那个会写进 <code>config.json</code>，重启后仍然是你设的状态。看门狗状态取自 <code>/api/status</code> 的 <code>watchdog</code> 字段，跟着现有 3 秒轮询走，<b>不额外发请求</b>；说说读数来自 <code>/api/qzone/recent</code>，只有停在这一页才拉。</div>
 
       <h3 class="layer-heading">会话永久繁忙看门狗<span class="meta">ISS-001：会话永久繁忙时的自愈开关</span></h3>
       <div class="row" style="margin-top:10px">
@@ -2846,8 +2846,26 @@ button:active:not(:disabled) {
         </table>
       </div>
 
-      <h3 class="layer-heading">说说<span class="meta">T-006</span></h3>
-      <div class="meta">说说功能尚未接入，等 T-006。</div>
+      <h3 class="layer-heading">说说<span class="meta">QQ 空间动态：开关落盘持久，删除会连空间里那条一起删</span></h3>
+      <div class="row" style="margin-top:10px">
+        <span class="pill" id="qzBadge">说说 读取中…</span>
+        <span class="meta" id="qzStats">今日已发 —</span>
+        <span class="meta" id="qzNext">距下次可发 —</span>
+        <span class="meta" id="qzScope">默认可见范围 —</span>
+        <span class="meta" id="qzLatest">最近一次 —</span>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="qzToggle" class="danger" type="button" disabled>关闭说说</button>
+        <span class="meta" id="qzMsg"></span>
+      </div>
+      <div class="meta">可见范围由 <code>config.json</code> 的 <code>qzone.ugcRight</code> 决定（控制台只读）。下面这张表是<b>本机记录</b>（<code>state/qzone-posts.json</code>），不代表空间里的真实状态：在 QQ 空间那边手动删掉的条目，这里仍会留着。</div>
+      <div id="qzList">
+        <div class="meta" id="qzEmpty">还没有发过说说。</div>
+        <table id="qzTable" hidden>
+          <thead><tr><th>时间</th><th>内容</th><th>可见范围</th><th>操作</th></tr></thead>
+          <tbody id="qzBody"></tbody>
+        </table>
+      </div>
     </section>
 <section class="card" id="sandbox" data-page="sandbox">
 <div class="wrap">
@@ -3099,6 +3117,9 @@ async function refresh() {
     lastWatchdog = s.watchdog === undefined ? null : s.watchdog;
     if (currentConsolePage === 'switches') renderWatchdog(lastWatchdog);
     document.getElementById('activity').textContent = s.activity || '（空）';
+    // 说说读数不在 /api/status 里（那边没有这个字段），只有停在这一页才去拉；
+    // 10 秒内的重复调用只重绘不重拉，倒计时是本地按 nextAllowedAt 现算的。
+    if (currentConsolePage === 'switches') await refreshQzone();
     const presetSel = document.getElementById('closedPreset');
     if (presetSel && document.activeElement !== presetSel) presetSel.value = s.closedAgentPreset || '';
   } catch (e) { document.getElementById('statusText').textContent = '连接中断 · 请检查桥接服务'; setConnectionError(e); }
@@ -3194,6 +3215,147 @@ async function toggleWatchdog() {
   }
 }
 document.getElementById('wdToggle').addEventListener('click', toggleWatchdog);
+
+// ── 开关页：说说（QQ 空间动态）──────────────────────────────────────────────
+// 数据来自 GET /api/qzone/recent（本机流水 + 配额读数），只有停在这一页才拉；
+// 开关写的是 config.json 的 qzone.enabled（写盘持久），删除走 POST /api/qzone/delete。
+// 「本机记录」四个字是认真的：在 QQ 空间那边手动删掉的条目，这张表里仍然会留着。
+let lastQzone;
+let qzoneFetchedAt = 0;
+const QZONE_RIGHT_LABELS = Object.freeze({ 1: '所有人可见', 4: '好友可见', 64: '仅自己可见' });
+function qzoneRightLabel(value) {
+  const key = Number(value);
+  return Object.prototype.hasOwnProperty.call(QZONE_RIGHT_LABELS, key)
+    ? QZONE_RIGHT_LABELS[key]
+    : '未知（' + (Number.isFinite(key) ? key : '—') + '）';
+}
+// 倒计时只报到分钟：它本来就是大概数，秒级跳动除了让人焦虑没有别的作用。
+function fmtQzoneWait(nextAt) {
+  const value = Number(nextAt);
+  if (!Number.isFinite(value) || value <= Date.now()) return '现在可以发';
+  const minutes = Math.ceil((value - Date.now()) / 60000);
+  if (minutes < 60) return minutes + ' 分钟后';
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? hours + ' 小时后' : hours + ' 小时 ' + rest + ' 分钟后';
+}
+function renderQzone(qz) {
+  const badge = document.getElementById('qzBadge');
+  const toggle = document.getElementById('qzToggle');
+  const empty = document.getElementById('qzEmpty');
+  const table = document.getElementById('qzTable');
+  const body = document.getElementById('qzBody');
+  if (qz !== undefined && qz !== null) {
+    const enabled = qz.enabled === true;
+    badge.className = 'pill ' + (enabled ? 'g' : 'r');
+    badge.textContent = enabled ? '说说 已开启' : '说说 已关闭';
+    const cap = Number(qz.dailyCap);
+    document.getElementById('qzStats').textContent = '今日已发 ' + (Number(qz.todayCount) || 0)
+      + (Number.isFinite(cap) && cap > 0 ? '/' + cap : ' 条（上限未上报）');
+    document.getElementById('qzNext').textContent = '距下次可发 ' + fmtQzoneWait(qz.nextAllowedAt);
+    document.getElementById('qzScope').textContent = '默认可见范围 ' + qzoneRightLabel(qz.ugcRight);
+    const posts = Array.isArray(qz.posts) ? qz.posts : [];
+    document.getElementById('qzLatest').textContent = '最近一次 '
+      + (posts.length > 0 ? (fmtMinuteStamp(posts[0].createdAt) || '—') : '还没发过');
+    toggle.disabled = false;
+    toggle.className = enabled ? 'danger' : 'primary';
+    toggle.textContent = enabled ? '关闭说说' : '开启说说';
+    // 空表文案每次都要写回：首帧是「读取中…」，若不再写一次，删到最后一条之后会一直挂着「读取中…」。
+    empty.textContent = '还没有发过说说。';
+    empty.hidden = posts.length > 0;
+    table.hidden = posts.length === 0;
+    body.innerHTML = posts.map((post) => {
+      // 正文按 40 字截断：这张表是「最近发了什么」的索引，不是阅读器；全文在日志和空间里。
+      const text = String(post.content ?? '').replace(/\s+/g, ' ').trim();
+      const shown = text.length > 40 ? text.slice(0, 40) + '…' : text;
+      return '<tr><td>' + (fmtMinuteStamp(post.createdAt) || '—') + '</td><td>' + esc(shown || '（空）')
+        + (post.reason ? '<br><span class="meta">' + esc(post.reason) + '</span>' : '') + '</td><td>'
+        + esc(qzoneRightLabel(post.ugcRight)) + '</td><td>'
+        + '<button class="danger" type="button" data-tid="' + esc(String(post.tid ?? '')) + '">删除</button>'
+        + '</td></tr>';
+    }).join('');
+    return;
+  }
+  // 读不到就说读不到：按钮按灰、每个读数写「—」，不摆一个假的「已关闭」或「0/2」。
+  badge.className = 'pill';
+  badge.textContent = qz === null ? '说说 状态未知' : '说说 读取中…';
+  document.getElementById('qzStats').textContent = '今日已发 —';
+  document.getElementById('qzNext').textContent = '距下次可发 —';
+  document.getElementById('qzScope').textContent = '默认可见范围 —';
+  document.getElementById('qzLatest').textContent = '最近一次 —';
+  toggle.disabled = true;
+  toggle.className = 'danger';
+  toggle.textContent = '关闭说说';
+  empty.hidden = false;
+  empty.textContent = qz === null ? '读不到说说状态（桥接版本不一致或接口出错）。' : '读取中…';
+  table.hidden = true;
+  body.innerHTML = '';
+}
+// 3 秒轮询会把同一份流水拉 20 次/分钟，没必要：10 秒内只重绘（倒计时本地现算，照样走字）。
+// 注意这里**不碰** #qzMsg —— 那是开关/删除的操作回执，重绘不该把刚写上去的结果擦掉。
+async function refreshQzone(force = false) {
+  if (!force && qzoneFetchedAt > 0 && Date.now() - qzoneFetchedAt < 10000) {
+    renderQzone(lastQzone);
+    return;
+  }
+  try {
+    const r = await api('/api/qzone/recent');
+    lastQzone = r && r.ok === true ? r : null;
+  } catch {
+    lastQzone = null;
+  }
+  qzoneFetchedAt = Date.now();
+  renderQzone(lastQzone);
+}
+async function toggleQzone() {
+  const button = document.getElementById('qzToggle');
+  const msg = document.getElementById('qzMsg');
+  const current = lastQzone !== null && lastQzone !== undefined && lastQzone.enabled === true;
+  // 可逆开关，一次确认就够；文案只说代价。
+  if (!confirm(current
+    ? '关闭后机器人不能再发说说，确定？'
+    : '开启后机器人可以自己发空间动态，确定？')) return;
+  button.disabled = true;
+  msg.className = 'meta';
+  msg.textContent = '正在提交…';
+  try {
+    const r = await api('/api/qzone/config', 'POST', { enabled: !current });
+    if (!r || r.ok !== true) throw new Error((r && r.error) || '桥接拒绝了这次改动');
+    // 「已写盘」必须说出来：用户有权知道它和上面那个只存内存的看门狗开关不一样。
+    msg.className = 'ok';
+    msg.textContent = r.enabled === true ? '已开启说说（已写盘，重启后仍然生效）' : '已关闭说说（已写盘，重启后仍然生效）';
+    await refreshQzone(true);
+  } catch (error) {
+    msg.className = 'err';
+    msg.textContent = '操作失败：' + (error && error.message ? error.message : error);
+  } finally {
+    button.disabled = false;
+  }
+}
+async function deleteQzone(tid) {
+  const msg = document.getElementById('qzMsg');
+  // 不可逆（空间里那条一起没），文案要把代价说全，也不留「再试一次」的错觉。
+  if (!confirm('删除这条说说？QQ 空间里也会一起删掉，确定？')) return;
+  msg.className = 'meta';
+  msg.textContent = '正在删除…';
+  try {
+    const r = await api('/api/qzone/delete', 'POST', { tid });
+    if (!r || r.ok !== true) throw new Error((r && r.error) || '桥接拒绝了这次删除');
+    msg.className = 'ok';
+    msg.textContent = '已删除 tid=' + tid;
+    await refreshQzone(true);
+  } catch (error) {
+    msg.className = 'err';
+    msg.textContent = '删除失败：' + (error && error.message ? error.message : error);
+  }
+}
+document.getElementById('qzToggle').addEventListener('click', toggleQzone);
+// 行是动态渲染的，监听器挂在容器上（事件委托），重绘后不用重新绑。
+document.getElementById('qzList').addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-tid]');
+  if (!button) return;
+  deleteQzone(button.dataset.tid);
+});
 
 async function refreshPresets() {
   try {
@@ -4831,6 +4993,7 @@ function setConsolePage(page, { updateHash = true, focus = false, target = '' } 
   // 进「开关」页先拿最近一次 /api/status 的快照画一遍（最多旧 3 秒），不额外发请求；
   // 之后由 refresh() 的轮询继续更新。首屏直接开在 #switches 时这里是「读取中…」。
   if (page === 'switches') renderWatchdog(lastWatchdog);
+  if (page === 'switches') { renderQzone(lastQzone); refreshQzone(); }
   document.querySelectorAll('[data-page]').forEach(el => { el.hidden = el.dataset.page !== page; });
   // 视图已经可见，再让沙盘脚本开始跑（它只会在第一次进入时真正插入一次）。
   if (page === 'sandbox') initSandbox();

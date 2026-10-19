@@ -3674,13 +3674,21 @@ async function main() {
           return;
         }
         // 删除：body {tid, operatorQQ}。不看 enabled —— 关掉功能之后仍然要能把以前发出去的清掉。
-        // 管理员口径照 mcp-mc-console 的 requireAdmin：必须是数字且在 qzone.adminQQ 里
-        // （字符串 '12345' 不算，避免"看起来一样、类型不对"的绕过）。
+        // 智能体调用的管理员口径照 mcp-mc-console 的 requireAdmin：必须是数字且在 qzone.adminQQ 里
+        // （字符串 '12345' 不算，避免"看起来一样、类型不对"的绕过）；控制台那侧见下面的两套身份。
         if (req.method === 'POST' && url.pathname === '/api/qzone/delete') {
           const body = await readBody();
           const qz = normalizeQzoneConfig(cfg.qzone);
+          // 两种调用方，两套身份：
+          //   带 x-agent-call 头的是智能体工具调用 —— 必须自报 operatorQQ 且落在 adminQQ 里；
+          //     只认数字（字符串 '12345' 不放行），避免"看起来一样、类型不对"的绕过；
+          //   不带这个头的是管理端（控制台）—— 网页这边没有「我是谁」，身份完全来自「已经通过
+          //     令牌关卡」这一层，所以直接按管理员放行。否则从控制台删一条还得先手填自己的 QQ 号。
+          const agentCall = req.headers['x-agent-call'] !== undefined;
           const operatorQQ = Number(body.operatorQQ);
-          const isAdmin = Number.isSafeInteger(operatorQQ) && operatorQQ > 0 && qz.adminQQ.includes(operatorQQ);
+          const isAdmin = agentCall
+            ? Number.isSafeInteger(operatorQQ) && operatorQQ > 0 && qz.adminQQ.includes(operatorQQ)
+            : true;
           if (!isAdmin) {
             sendJson({ ok: false, error: '需要管理员' }, 403);
             return;
@@ -3726,9 +3734,43 @@ async function main() {
             enabled: qz.enabled,
             posts: prunePosts(state.posts, 10),
             todayCount: quota.todayCount,
+            // 控制台读数行要这两个数（今日上限、默认可见范围）：它们只活在归一化后的配置里，
+            // 不吐出来的话网页端只能猜或者干脆不显示 —— 那等于让「配置」在 UI 上不可见。
+            dailyCap: qz.dailyCap,
+            ugcRight: pickUgcRight(qz),
             // 0 = 现在就能发；否则是一个绝对时间戳（调用方自己决定怎么显示）。
             nextAllowedAt: quota.ok ? 0 : now + quota.retryAfterMs
           });
+          return;
+        }
+        // 开关：POST body { enabled: boolean }。
+        // 写的是 config.json 里的 qzone.enabled —— 这是运行配置，不是运行时状态：只改内存的话，
+        // 重启一次就回到文件里的旧值，控制台上那个开关会「自己弹回去」。
+        if (req.method === 'POST' && url.pathname === '/api/qzone/config') {
+          const body = await readBody();
+          if (typeof body.enabled !== 'boolean') {
+            sendJson({ ok: false, error: 'enabled 必须是布尔值' }, 400);
+            return;
+          }
+          const enabled = body.enabled;
+          const before = normalizeQzoneConfig(cfg.qzone).enabled;
+          const configFile = path.join(ROOT, 'config.json');
+          // 读原始文件、只换一个键：loadConfig() 返回的是归一化后的 cfg，写回会把默认值一起
+          // materialize、还会丢未知键 —— 等于把用户的 config.json 整份重写。
+          const file = readConfigObject(configFile);
+          file.qzone = { ...(file.qzone ?? {}), enabled };
+          try {
+            // 临时文件 + rename（atomicWriteJson）：写到一半断电不会留下半个 config.json。
+            atomicWriteJson(configFile, file);
+          } catch (error) {
+            log(`[qzone] 控制台：开关写盘失败: ${error?.message ?? error}`);
+            sendJson({ ok: false, error: '写入 config.json 失败，已记日志' }, 500);
+            return;
+          }
+          // 落盘成功之后才改内存：反过来的话会出现「文件没改成、进程内却是新值」，重启后行为莫名回滚。
+          cfg.qzone = { ...(cfg.qzone ?? {}), enabled };
+          if (before !== enabled) log(`[qzone] 控制台：说说功能已 ${enabled ? '开启' : '关闭'}`);
+          sendJson({ ok: true, enabled, configPath: 'config.json' });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/presets') {

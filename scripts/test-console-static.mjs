@@ -150,7 +150,37 @@ ok(/currentConsolePage === 'switches'\) renderWatchdog\(lastWatchdog\)/.test(htm
 ok(/if \(page === 'switches'\) renderWatchdog\(lastWatchdog\)/.test(html), 'setConsolePage 切页时用缓存快照即时渲染');
 ok(/switches: \['开关'/.test(html), 'consolePages 里注册了 switches（切页标题/哈希路由才认它）');
 ok(html.includes('当前没有疑似僵死') && html.includes('>0 条<'), '空表占位与 0 条计数都在');
-ok(html.includes('说说功能尚未接入，等 T-006。'), '说说占位一行在（等 T-006，不在本任务实现）');
+
+// ── 说说卡（T-007b）：占位换成真卡片，id 全部 qz 前缀，不碰 wd* ──
+console.log('## 开关页（说说）');
+for (const id of ['qzBadge', 'qzStats', 'qzNext', 'qzScope', 'qzLatest', 'qzToggle', 'qzMsg', 'qzList', 'qzEmpty', 'qzBody']) {
+  const n = (html.match(new RegExp(`id="${id}"`, 'g')) ?? []).length;
+  ok(n === 1, `说说卡元素 ${id}`, `${n} 处`);
+}
+ok(/getElementById\('qzToggle'\)\.addEventListener\('click', toggleQzone\)/.test(html), '开关按钮已绑定 toggleQzone');
+ok(/api\('\/api\/qzone\/config', 'POST', \{ enabled: !current \}\)/.test(html), '开关按钮调 POST /api/qzone/config');
+// 两句确认文案必须逐字在：开关是可逆的，但「关掉之后不能发」这件事要说在点下去之前。
+ok(html.includes('开启后机器人可以自己发空间动态，确定？')
+  && html.includes('关闭后机器人不能再发说说，确定？'), '开关的两句确认文案逐字在（开/关各一句）');
+ok(/api\('\/api\/qzone\/delete', 'POST', \{ tid \}\)/.test(html), '删除按钮调 POST /api/qzone/delete');
+ok(html.includes('删除这条说说？QQ 空间里也会一起删掉，确定？'), '删除确认文案逐字在（不可逆要说清代价）');
+ok(/api\('\/api\/qzone\/recent'\)/.test(html), '读数来自 GET /api/qzone/recent（/api/status 没有这个字段）');
+ok(/currentConsolePage === 'switches'\) await refreshQzone\(\)/.test(html), 'refresh() 仅在开关页拉说说读数');
+ok(/if \(page === 'switches'\) \{ renderQzone\(lastQzone\); refreshQzone\(\); \}/.test(html), 'setConsolePage 切到开关页时先渲染缓存再拉');
+ok(html.includes("'今日已发 '") && html.includes("'/' + cap"), '读数行显示 今日已发 N/上限（上限来自接口，不写死）');
+ok(html.includes('距下次可发 ') && html.includes('默认可见范围 ') && html.includes('最近一次 '), '四项读数标题都在');
+ok(!/软 15 分钟/.test(html) && html.includes('现在可以发'), '倒计时用接口给的 nextAllowedAt 现算');
+ok(/QZONE_RIGHT_LABELS = Object\.freeze\(\{ 1: '所有人可见', 4: '好友可见', 64: '仅自己可见' \}\)/.test(html), '可见范围三档与 QZONE_UGC_RIGHTS 语义一致');
+ok(html.includes('还没有发过说说。'), '空表占位在');
+// 空表文案必须每次渲染都写回：首帧是「读取中…」，不写回去的话删到最后一条以后会一直停在「读取中…」。
+ok(/empty\.textContent = '还没有发过说说。';/.test(html), '空表文案在有数据的分支里也写回（不会卡在「读取中…」）');
+ok(html.includes('本机记录') && html.includes('不代表空间里的真实状态'), '说清「本机记录」不等于空间里的真实状态');
+ok(html.includes('qzone.ugcRight') && html.includes('控制台只读'), '可见范围标注为只读（由 config.json 决定）');
+ok(html.includes('已写盘'), '界面明确说了「写盘持久」，不跟只存内存的看门狗开关混着讲');
+ok(!/立即发布|马上发一条/.test(html), '没有「立即发一条」之类的按钮');
+ok(!html.includes('说说功能尚未接入'), '旧的「尚未接入」占位已删除');
+ok(!/<span class="meta">T-006<\/span>/.test(html), 'T-006 角标已摘掉');
+ok(!html.includes('这里的开关只影响桥接运行时'), '「开关只影响运行时」这句两义说明已拆开');
 ok(/history\.replaceState\(/.test(html), 'URL 里的 ?token= 读完后用 replaceState 抹掉');
 ok(!/演示/.test(html), '页面仍无「演示」字样');
 
