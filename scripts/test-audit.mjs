@@ -52,6 +52,12 @@ const tests = [
   //   · 静默检测不得冒充 hook 检测（心跳是 SnowLuma 本地定时器无条件发的）；
   //   · 客户端库版本不得低于 bot_status 出现的版本。
   'test-snowluma-upstream-health.mjs',
+  // 会话永久繁忙看门狗（ISS-001）：事件流半开挂住时 turn 永远不结束，
+  // isConversationBusyV2() 就会永久为真、该会话永远拒收投递。这里用假时钟钉住三件事：
+  //   · 计龄按「最近活动」的四个锚点取 max（合法的 10 分钟长轮询不得被判僵尸）；
+  //   · 软 15 分钟只告警，硬 30 分钟要连续 2 轮确认才动手（QQ_BRIDGE_WATCHDOG=off 只软不硬）；
+  //   · 清理顺序：先打僵尸标记 → 再 session.cancel → 最后清本地账本（队列条目必须整条删）。
+  'test-stall-watchdog.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

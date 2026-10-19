@@ -20,6 +20,11 @@ import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken } fr
 import { mdToPlain, splitForQQ, truncateText, truncateTextTail } from './md-to-plain.js';
 import { SENSITIVE_RE } from './sensitive.js';
 import { looksLikeUnfinished } from './v2-wait.js';
+import {
+  createStallWatchdog, cleanZombieSession, parseWatchdogEnabled,
+  STALL_SOFT_MS, STALL_HARD_MS, STALL_SCAN_INTERVAL_MS, STALL_CONFIRM_ROUNDS,
+  STALL_CANCEL_TIMEOUT_MS, STALL_ZOMBIE_MARK_TTL_MS
+} from './stall-watchdog.js';
 import { compactModelMessage } from './qq-model-view.js';
 import { safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
 import { AUDIO_EXTS, cleanupTemp, describeAudio, formatBytes, formatDuration, inspectAudio, listAudioFiles, parseTargetKey, processAudioVolume, resolveAudioProcessing, resolveAudioSource, safeJoinLibrary } from './send-voice-lib.js';
@@ -2446,6 +2451,84 @@ async function main() {
   const sessionPromises = new Map(); // key -> create promise（防并发重复创建）
   const promptQueues = new Map(); // key -> { queue: [], running: false }：每个 QQ 会话串行投递 DSH prompt，保证 turn 顺序
 
+  // ── 僵尸会话看门狗（ISS-001）：按「最近活动」计龄，越硬线且连续确认才动手 ──────
+  // 故障形态：事件流断开（或半开挂住）时若还有 turn 在飞，deliverPromptNow 里的
+  // `await api.sessions.prompt(...)` 永不 settle，promptQueues 条目的 running 就恒为 true
+  // → isConversationBusyV2() 恒真 → 该会话永久拒收新投递，QQ 上表现为「@ 了没反应」。
+  // 事件流 finally 里的 drainAllPromptQueues 只 reject **排队**项，在飞项与
+  // v2TurnStartAt/collectors/pendingWakeKeys 都清不掉，所以只能靠外部计龄兜底。
+  // 四个锚点取 max（任务书 §3.1），任何一个在近期动过就说明这条链路还活着：
+  //   lastEventAt          事件流每处理一帧就刷新（pumpMux 里打点）
+  //   turnStartAt          直接复用既有 v2TurnStartAt（turn/start 时刷新）
+  //   activeWaitStartedAt  qq_wait_for_messages 开始等待的时刻：合法静默的主因，
+  //                        默认要等 10 分钟且整个静默期内 DSH 一帧都不发
+  //   pendingWakeArmAt     唤醒租约 arm 的时刻（租约本身 30 分钟，见 armPendingWakeLease）
+  const lastEventAt = new Map(); // sessionId -> timestamp：事件流最后一次处理到该会话帧的时间
+  const activeWaitStartedAt = new Map(); // key -> timestamp：长轮询开始等待的时刻（与 activeWaits 同步维护）
+  const pendingWakeArmAt = new Map(); // key -> timestamp：唤醒租约 arm 的时刻
+  const zombieKilledAt = new Map(); // sessionId -> timestamp：看门狗刚取消过该回合，用来吞掉迟到的 turn/end
+  // 看门狗的绑定来自 ./stall-watchdog.js 的顶层 import。审计用的 VM
+  // （scripts/audit-bridge-harness.mjs）会剥掉 bridge.js 的顶层 import，但那边已把同一模块
+  // 整份展开进 context（`...stall`），所以这里可以正常创建、不做 typeof 降级 ——
+  // 降级会让「看门狗根本没启用」这种故障在测试里永远看不见，代价比守卫本身大。
+  const stallWatchdog = createStallWatchdog({
+    enabled: parseWatchdogEnabled(process.env.QQ_BRIDGE_WATCHDOG),
+    softMs: STALL_SOFT_MS,
+    hardMs: STALL_HARD_MS,
+    scanMs: STALL_SCAN_INTERVAL_MS,
+    confirmRounds: STALL_CONFIRM_ROUNDS,
+    log: (...args) => log(...args),
+    // 只遍历已持久化的 QQ 会话（有界的 key→sessionId 全集）；纯读、无 await：
+    // 扫描绝不能阻塞事件流主流程。
+    collect: () => {
+      const list = [];
+      for (const [key, sessionId] of Object.entries(state.sessions)) {
+        if (!key || !sessionId) continue;
+        const q = promptQueues.get(key);
+        const busy = [];
+        if (q?.running) busy.push('在飞投递');
+        if (q?.queue?.length) busy.push(`排队${q.queue.length}条`);
+        if (v2TurnStartAt.has(sessionId) || collectors.has(sessionId)) busy.push('turn');
+        if (pendingWakeKeys.has(key) || pendingWakeLeaseTimers.has(key)) busy.push('唤醒租约');
+        if (activeWaits.has(key)) busy.push('长轮询等待');
+        if (busy.length === 0) continue; // 不 busy 的会话完全不参与判定，看门狗不碰闲置会话
+        list.push({
+          key,
+          sessionId,
+          busy,
+          anchors: {
+            lastEventAt: lastEventAt.get(sessionId) ?? 0,
+            turnStartAt: v2TurnStartAt.get(sessionId) ?? 0,
+            activeWaitStartedAt: activeWaitStartedAt.get(key) ?? 0,
+            pendingWakeArmAt: pendingWakeArmAt.get(key) ?? 0
+          }
+        });
+      }
+      return list;
+    },
+    // 硬清理：真取消 DSH 回合 + 清掉所有会让会话「永久繁忙」的本地账本（顺序见 stall-watchdog.js）。
+    onHard: (record) => cleanZombieSession(record, {
+      api,
+      promptQueues,
+      v2TurnStartAt,
+      collectors,
+      lastEventAt,
+      activeWaitStartedAt,
+      pendingWakeKeys,
+      pendingWakeArmAt,
+      disarmPendingWakeLease,
+      activeWaits,
+      sendToolSucceededSessions,
+      pendingSendToolCalls,
+      toolCallNames,
+      silentTurns: social.silentTurns,
+      zombieKilledAt,
+      hardMs: STALL_HARD_MS,
+      cancelTimeoutMs: STALL_CANCEL_TIMEOUT_MS,
+      log: (...args) => log(...args)
+    })
+  });
+
   // ── Token 用量账本（控制台「令牌与花费」） ───────────────────────────────
   // 权威总量取 DSH 的 tokenUsage 投影（整条会话日志累计，含桥接启动前的历史），
   // 逐轮明细由 assistant/message 的 usage 折叠而来；花费在读取时按价目表折算。
@@ -2555,16 +2638,19 @@ async function main() {
   // 唤醒“防卡死”租约：正常应在 turn/end 时删除 pendingWakeKeys；若 DSH 接受了但一直没回合结束，
   // 30 分钟后强制解除 busy 标记，避免该会话永久无法被唤醒。
   function armPendingWakeLease(key) {
+    pendingWakeArmAt.set(key, Date.now()); // 看门狗计龄锚点：租约刚 arm，说明这条链路还在推进
     const old = pendingWakeLeaseTimers.get(key);
     if (old) clearTimeout(old);
     const timer = setTimeout(() => {
       pendingWakeKeys.delete(key);
+      pendingWakeArmAt.delete(key);
       pendingWakeLeaseTimers.delete(key);
     }, 30 * 60 * 1000);
     timer.unref?.();
     pendingWakeLeaseTimers.set(key, timer);
   }
   function disarmPendingWakeLease(key) {
+    pendingWakeArmAt.delete(key);
     const old = pendingWakeLeaseTimers.get(key);
     if (old) clearTimeout(old);
     pendingWakeLeaseTimers.delete(key);
@@ -3405,7 +3491,10 @@ async function main() {
             // 上游健康只给操作者看：它包含网关诊断信息（good/hint），
             // 属于管理侧观测，不该进 QQ 会话里那个受限的智能体视图。
             snowluma: snowlumaHealthSnapshot(),
-            activity: readActivityTail(100)
+            activity: readActivityTail(100),
+            // 会话永久繁忙看门狗的观测视图：suspect 会话的 key、已静默多久、当前为什么忙。
+            // 与上面的上游健康同权限 —— 属于排障信息，只给操作者，不进会话级智能体视图。
+            watchdog: stallWatchdog.snapshot()
           });
           return;
         }
@@ -5923,7 +6012,13 @@ async function main() {
             return;
           }
           activeWaits.set(key, Date.now());
-          const finishWait = () => activeWaits.delete(key);
+          // 看门狗计龄锚点：长轮询是**合法静默**（默认等 10 分钟，静默期内 DSH 一帧都没有），
+          // 少了这个锚点，正常的 qq_wait_for_messages 会被误判成僵尸回合。
+          activeWaitStartedAt.set(key, Date.now());
+          const finishWait = () => {
+            activeWaits.delete(key);
+            activeWaitStartedAt.delete(key);
+          };
           req.on('close', finishWait);
           const minQuietAfterNewMs = Number.isFinite(Number(waitCfg.minQuietAfterNewMs)) ? Math.max(0, Number(waitCfg.minQuietAfterNewMs)) : 10000;
           const suggestedQuietMs = Math.max(suggestQuietMsV2(st), minQuietAfterNewMs);
@@ -8671,12 +8766,16 @@ async function main() {
       return;
     }
     entry.running = true;
+    // 在飞项平时只存在于局部变量 item 里，看门狗清理时拿不到它：
+    // 挂上去，让硬清理能 reject 这个永远不会 settle 的 Promise（否则会话会一直被判 busy）。
+    entry.inFlight = item;
     try {
       const result = await deliverPromptNow(key, item.promptText, item.opts);
       item.resolve(result);
     } catch (error) {
       item.reject(error);
     } finally {
+      entry.inFlight = null;
       entry.running = false;
       if (promptQueues.get(key) === entry) {
         if (entry.queue.length) processPromptQueue(key);
@@ -10557,6 +10656,9 @@ async function main() {
             }
             // 追踪当前 turn 是否成功调用过 MCP 发送类工具：
             if (!isCurrentSession(key, frame.sessionId)) continue;
+            // 看门狗计龄锚点：事件流每处理一帧就刷一次，代表这条会话最近确实在动。
+            // 放在 isCurrentSession 之后：被 /reset 顶掉的旧会话的帧不该算作「还活着」。
+            lastEventAt.set(frame.sessionId, Date.now());
             // 只有“发送成功”才跳过自动转发；如果工具调用失败，仍允许 AI 的文本正常发出。
             if (frame.event.type === 'turn/start') {
               sendToolSucceededSessions.delete(frame.sessionId);
@@ -10616,6 +10718,22 @@ async function main() {
             collectors.set(frame.sessionId, collector);
             const ended = collector.push(frame.event);
             if (ended) {
+              // 看门狗刚取消过这个回合（session.cancel 之后迟到的 turn/end）：
+              // 若让它继续走正常收尾，会给用户补发一条回复、或补一次积压唤醒，
+              // 等于「杀僵尸」的动作把用户已经放弃的那一轮又发出去。只清账本，不发出任何东西。
+              // 标记带 TTL：没有 turn/end 的僵尸会让标记永久驻留，
+              // 那样会吞掉**下一个正常回合**的收尾，所以过期标记必须先删掉。
+              const killedZombieAt = zombieKilledAt.get(frame.sessionId);
+              if (killedZombieAt) {
+                zombieKilledAt.delete(frame.sessionId);
+                if (Date.now() - killedZombieAt < STALL_ZOMBIE_MARK_TTL_MS) {
+                  v2TurnStartAt.delete(frame.sessionId);
+                  collectors.delete(frame.sessionId);
+                  lastEventAt.delete(frame.sessionId);
+                  log(`[watchdog] 已忽略看门狗取消后迟到的 turn/end（${key} / ${frame.sessionId}）`);
+                  continue;
+                }
+              }
               // reserved2 无行动兜底：普通唤醒回合若既没发消息、也没 mark_read / set_wake_config，
               // 则累计 noActionCount；达到阈值后自动重置 WakeConfig，避免 AI 卡死。
               const silentQueueNow = social.silentTurns.get(frame.sessionId) ?? [];
@@ -10962,6 +11080,13 @@ async function main() {
         // 长轮询（qq_wait_for_messages）的租约也要清：它的 req.on('close') 在事件流
         // 断开时不一定触发，残留租约会用 429 卡住该会话最长 15 分钟的等待工具。
         activeWaits.clear();
+        // 看门狗的计龄锚点同样随事件流重置：重连后旧帧的时间戳没有意义，
+        // 留着只会让「最近活动」显得比实际更旧。看门狗本身**不在这里停** ——
+        // 事件流半开挂住时这个 finally 根本不会执行，那正是它需要盯的场景。
+        lastEventAt.clear();
+        activeWaitStartedAt.clear();
+        pendingWakeArmAt.clear();
+        zombieKilledAt.clear();
       }
       await sleep(3000);
     }
@@ -11172,6 +11297,9 @@ async function main() {
   }
   startDshWatch();
   startSnowlumaWatch();
+  // 僵尸会话看门狗：60 秒一轮；软 15 分钟只记日志 + /api/status 标 suspect，
+  // 硬 30 分钟且连续 2 轮确认才取消回合并清账本。QQ_BRIDGE_WATCHDOG=off 时只软不硬。
+  stallWatchdog.start();
   startConsoleServer();
 
   await pumpMux();
