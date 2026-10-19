@@ -19,6 +19,9 @@ import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
 import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken } from './dsh-client.js';
 import { mdToPlain, splitForQQ, truncateText, truncateTextTail } from './md-to-plain.js';
 import { SENSITIVE_RE } from './sensitive.js';
+// QQ 空间（说说）：审计/配额/可见范围/记录裁剪全是纯逻辑 + 零 I/O，放在独立模块里。
+// 时钟也不由它读：now 一律由这一层（I/O 层）传 Date.now() 进去，纯模块才好测。
+import { auditContent, checkQuota, normalizeQzoneConfig, pickUgcRight, prunePosts } from './qzone-post.js';
 import { looksLikeUnfinished } from './v2-wait.js';
 import {
   createStallWatchdog, cleanZombieSession, parseWatchdogEnabled,
@@ -932,6 +935,11 @@ function loadConfig() {
     cfg.dsh.reasoningEffort = REASONING_EFFORT_DEFAULT;
   }
 
+  // QQ 空间（说说）配置：归一全交给 src/qzone-post.js —— 它对脏值不抛错，缺省就是
+  // enabled:false。所以「config.json 里没有 qzone 段」= 功能关着，而不是 undefined
+  // 一路传到端点里被当成"没配置所以随便发"。
+  cfg.qzone = normalizeQzoneConfig(file.qzone);
+
   // 人格卡注入上限（字符）。历史硬编码 6000，现在可配：每条约 4~6k token 的成本护栏。
   cfg.role = { maxInjectChars: ROLE_INJECT_MAX_CHARS_DEFAULT, ...(file.role ?? {}) };
   roleInjectMaxChars = applyRoleInjectLimit(cfg.role.maxInjectChars);
@@ -1333,6 +1341,51 @@ async function oneBotActionNested(cfg, action, params, timeoutMs = 120000) {
   });
   const body = await res.json().catch(() => ({}));
   return { res, body, data: body?.data ?? {} };
+}
+
+// ── QQ 空间（说说）：状态文件与 OneBot 调用的薄封装 ─────────────────────────
+// 判定逻辑（内容审计 / 日限与间隔 / 可见范围 / 记录裁剪）全在 src/qzone-post.js，
+// 那个模块零 I/O 零依赖。这里只做三件事：读写 state/qzone-posts.json、
+// 判「这次失败值不值得重试」、把请求交给 OneBot。
+const QZONE_STATE_FILE = path.join(STATE_DIR, 'qzone-posts.json');
+
+// 每次请求现读一次，不做进程内缓存：手动删记录、或另一个进程改了文件都要立刻生效。
+// 文件损坏/形状不对时回落成空列表 —— 宁可少算配额，也不能让整个端点 500。
+function readQzoneState() {
+  const raw = readJsonSafe(QZONE_STATE_FILE, { version: 1, posts: [] });
+  return { version: 1, posts: Array.isArray(raw?.posts) ? raw.posts : [] };
+}
+
+// atomicWriteJson 自带 mkdir + 临时文件 + rename，不用自己写；
+// 统一走 prunePosts(50) 兜一层，避免别处塞进过长的数组。
+function writeQzoneState(posts) {
+  atomicWriteJson(QZONE_STATE_FILE, { version: 1, posts: prunePosts(posts, 50) });
+}
+
+// 只有「请求根本没送到 / 没能等到回话」才值得重试一次。SnowLuma 用 retcode 表达的业务性
+// 拒绝（被限流、tid 不存在、权限不足…）重试还是同一个结果，只会多打一次空间接口——
+// 对平台来说那是额外的可疑流量，不重试反而更安全。
+function qzoneRetryableError(error) {
+  if (error?.code) return true;
+  const name = String(error?.name ?? '');
+  if (name === 'TimeoutError' || name === 'AbortError') return true;
+  return /timeout|timed out|ECONN|ENOTFOUND|EAI_AGAIN|EPIPE|socket|fetch failed/i.test(String(error?.message ?? ''));
+}
+
+// 返回 { ok:true, response } 或 { ok:false, error }：调用方不必关心重试细节，
+// 但必须自己判「返回体里的 tid 在不在」——那条 line 才是真的发出去了。
+async function qzoneCall(run, label) {
+  try {
+    return { ok: true, response: await run() };
+  } catch (error) {
+    if (!qzoneRetryableError(error)) return { ok: false, error };
+    log(`[qzone] ${label} 网络错误，重试一次：${error?.message ?? error}`);
+    try {
+      return { ok: true, response: await run() };
+    } catch (retryError) {
+      return { ok: false, error: retryError };
+    }
+  }
 }
 
 async function fetchIncomingFileBytes(meta, cfg, ctx = {}) {
@@ -3436,12 +3489,12 @@ async function main() {
           return;
         }
         // 暂停二代 AI 时，所有带 agent token 的 v2 工具调用一律拒绝
-        if (socialV2.paused && req.headers['x-agent-token'] && (url.pathname.startsWith('/api/socialV2/') || url.pathname.startsWith('/api/send/') || url.pathname.startsWith('/api/images/'))) {
+        if (socialV2.paused && req.headers['x-agent-token'] && (url.pathname.startsWith('/api/socialV2/') || url.pathname.startsWith('/api/send/') || url.pathname.startsWith('/api/images/') || url.pathname.startsWith('/api/qzone/'))) {
           sendJson({ ok: false, error: 'AI 已暂停，当前不允许执行 v2 工具' }, 403);
           return;
         }
         // 二代模式总开关：关闭后 agent token 调用的 v2 工具全部拒绝（控制台仍可管理）
-        if (cfg.socialV2?.enabled === false && req.headers['x-agent-token'] && (url.pathname.startsWith('/api/socialV2/') || url.pathname.startsWith('/api/send/') || url.pathname.startsWith('/api/images/'))) {
+        if (cfg.socialV2?.enabled === false && req.headers['x-agent-token'] && (url.pathname.startsWith('/api/socialV2/') || url.pathname.startsWith('/api/send/') || url.pathname.startsWith('/api/images/') || url.pathname.startsWith('/api/qzone/'))) {
           sendJson({ ok: false, error: '二代模式已关闭，当前不允许执行 v2 工具' }, 403);
           return;
         }
@@ -3469,6 +3522,10 @@ async function main() {
             || url.pathname.startsWith('/api/socialV2/')
             || url.pathname.startsWith('/api/send/')
             || url.pathname.startsWith('/api/images/')
+            // 说说三端点（/api/qzone/post|delete|recent）也放行给带 agent token 的调用：
+            // 它们本身就是给 AI 用的，真正的闸门是 qzone.enabled + 审计 + 配额 + 管理员校验，
+            // 不靠"AI 摸不到这个路径"来保安全。
+            || url.pathname.startsWith('/api/qzone/')
             || url.pathname === '/api/authorize/read';
           if (!agentAllowed) {
             sendJson({ ok: false, error: '该接口仅控制台可用' }, 403);
@@ -3551,6 +3608,132 @@ async function main() {
             log(`[watchdog] 控制台：自动硬清理已 ${body.enabled ? '启用' : '关闭'}`);
           }
           sendJson({ ok: true, enabled: stallWatchdog.snapshot().enabled, running: stallWatchdog.isRunning() });
+          return;
+        }
+        // ── QQ 空间说说（T-006）────────────────────────────────────────────────
+        // 四道闸门的顺序是硬性的：disabled → audit → quota → OneBot。
+        // 任何一道不过就立刻返回，绝不碰下一道（尤其：审计不过时连 OneBot 都不碰）。
+        // 这三条端点全部落在令牌关卡 / x-agent-call 关卡 / application/json+Origin 关卡
+        // 之后，所以鉴权与 CSRF 完全继承控制台那一套，这里不另写一套。
+        //
+        // 发布：body {content, reason?}
+        if (req.method === 'POST' && url.pathname === '/api/qzone/post') {
+          const body = await readBody();
+          // ① 开关闸门：normalizeQzoneConfig 对缺失/脏值一律给 enabled:false，
+          //    所以「没配置」= 功能关着，不是「没配置所以随便发」。
+          const qz = normalizeQzoneConfig(cfg.qzone);
+          if (!qz.enabled) {
+            sendJson({ ok: false, layer: 'disabled', error: '说说功能未启用' });
+            return;
+          }
+          const content = typeof body.content === 'string' ? body.content : '';
+          const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+          // ② 内容闸门：auditContent 收集全部命中而不是短路，模型改一轮就能全改掉。
+          //    reasons 原样回传（code→人话的映射在 MCP 层，桥接只如实转述）。
+          const audit = auditContent(content, { maxChars: qz.maxChars });
+          if (!audit.ok) {
+            sendJson({ ok: false, layer: 'audit', error: '内容未通过审计', reasons: audit.reasons, hits: audit.hits });
+            return;
+          }
+          // ③ 频率闸门：现读状态文件（不缓存），日上限与最小间隔都由纯函数判定；
+          //    retryAfterMs 也从判定结果里取，不在这里另算一个数字。
+          const state = readQzoneState();
+          const now = Date.now();
+          const quota = checkQuota({ now, posts: state.posts, cfg: qz });
+          if (!quota.ok) {
+            sendJson({
+              ok: false,
+              layer: 'quota',
+              error: quota.reason === 'daily_cap' ? '今天的额度用完了' : '离上一条太近，再等等',
+              reason: quota.reason,
+              retryAfterMs: quota.retryAfterMs,
+              todayCount: quota.todayCount
+            });
+            return;
+          }
+          // ④ OneBot 闸门：成不成功以「拿到 tid」为准 —— HTTP 200 + retcode 0 却没有 tid 不算发出，
+          //    否则状态文件会记下一条根本没落地的说说，还白吃掉一次配额。
+          //    ugc_right 只可能是 1/4/64（pickUgcRight 保证），16/128 需要 target_uins，v1 不支持。
+          const ugcRight = pickUgcRight(qz);
+          const sent = await qzoneCall(() => oneBotActionNested(cfg, 'send_qzone_msg', { content: content.trim(), ugc_right: ugcRight }, 30000), 'send_qzone_msg');
+          const data = sent.ok ? sent.response?.data : null;
+          const tid = data?.tid ?? data?.data?.tid;
+          if (!sent.ok || tid === undefined || tid === null || String(tid).trim() === '') {
+            const detail = sent.ok
+              ? `返回里没有 tid：${JSON.stringify(sent.response?.body ?? {}).slice(0, 200)}`
+              : String(sent.error?.message ?? sent.error);
+            log(`[qzone] 发布失败: ${detail}`);
+            sendJson({ ok: false, layer: 'onebot', error: '发送失败，已记日志' });
+            return;
+          }
+          const record = { tid: String(tid), content: content.trim(), ugcRight, createdAt: now, reason };
+          const todayCount = quota.todayCount + 1;
+          try {
+            writeQzoneState([record, ...state.posts]);
+          } catch (error) {
+            // 已经发出去了：落盘失败不能反过来说「没发成功」，如实记日志但把 tid 交给调用方。
+            log(`[qzone] 记录落盘失败: ${error?.message ?? error}`);
+          }
+          log(`[qzone] 已发布 tid=${record.tid} ugcRight=${ugcRight} todayCount=${todayCount}`);
+          sendJson({ ok: true, tid: record.tid, record, todayCount });
+          return;
+        }
+        // 删除：body {tid, operatorQQ}。不看 enabled —— 关掉功能之后仍然要能把以前发出去的清掉。
+        // 管理员口径照 mcp-mc-console 的 requireAdmin：必须是数字且在 qzone.adminQQ 里
+        // （字符串 '12345' 不算，避免"看起来一样、类型不对"的绕过）。
+        if (req.method === 'POST' && url.pathname === '/api/qzone/delete') {
+          const body = await readBody();
+          const qz = normalizeQzoneConfig(cfg.qzone);
+          const operatorQQ = Number(body.operatorQQ);
+          const isAdmin = Number.isSafeInteger(operatorQQ) && operatorQQ > 0 && qz.adminQQ.includes(operatorQQ);
+          if (!isAdmin) {
+            sendJson({ ok: false, error: '需要管理员' }, 403);
+            return;
+          }
+          const tid = body.tid === undefined || body.tid === null ? '' : String(body.tid).trim();
+          if (!tid) {
+            sendJson({ ok: false, error: '缺少 tid' }, 400);
+            return;
+          }
+          const sent = await qzoneCall(() => oneBotActionNested(cfg, 'delete_qzone_msg', { tid }, 30000), 'delete_qzone_msg');
+          // oneBotActionNested 不检查 retcode（它只负责发请求/解 JSON），所以这里自己看：
+          // 删除没有 tid 可判，retcode 非 0 就是「没删掉」——不能因为 HTTP 200 就把本地记录抹了。
+          const retcode = sent.ok ? sent.response?.body?.retcode : undefined;
+          if (!sent.ok || (retcode !== undefined && retcode !== 0)) {
+            const detail = sent.ok
+              ? `retcode=${retcode} ${sent.response?.body?.wording ?? ''}`.trim()
+              : String(sent.error?.message ?? sent.error);
+            log(`[qzone] 删除失败 tid=${tid}: ${detail}`);
+            sendJson({ ok: false, layer: 'onebot', error: '删除失败，已记日志' });
+            return;
+          }
+          const state = readQzoneState();
+          const kept = state.posts.filter((post) => String(post?.tid ?? '') !== tid);
+          try {
+            writeQzoneState(kept);
+          } catch (error) {
+            log(`[qzone] 删除后落盘失败: ${error?.message ?? error}`);
+          }
+          log(`[qzone] 已删除 tid=${tid}（本机剩余记录 ${kept.length} 条）`);
+          sendJson({ ok: true, tid });
+          return;
+        }
+        // 最近记录：GET，只读本机 state/qzone-posts.json。
+        // 这是「本机流水」，**不代表空间里的真实状态**：v1 不解析空间 HTML、也不回读线上列表
+        // （维持登录态 + 翻页的收益远不如风险）。线上被删的记录仍会出现在这里。
+        if (req.method === 'GET' && url.pathname === '/api/qzone/recent') {
+          const qz = normalizeQzoneConfig(cfg.qzone);
+          const state = readQzoneState();
+          const now = Date.now();
+          const quota = checkQuota({ now, posts: state.posts, cfg: qz });
+          sendJson({
+            ok: true,
+            enabled: qz.enabled,
+            posts: prunePosts(state.posts, 10),
+            todayCount: quota.todayCount,
+            // 0 = 现在就能发；否则是一个绝对时间戳（调用方自己决定怎么显示）。
+            nextAllowedAt: quota.ok ? 0 : now + quota.retryAfterMs
+          });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/presets') {

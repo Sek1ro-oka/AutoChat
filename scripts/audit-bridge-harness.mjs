@@ -26,6 +26,11 @@ import * as stall from '../src/stall-watchdog.js';
 // bridge.js 里 `resolveRequestToken` / `buildSessionCookie` / `isPagePath` 是直接引用的
 // 顶层绑定（不做 typeof 兜底），少了这一行 VM 里就是 ReferenceError，全部 HTTP 用例瞬间红。
 import * as consoleAuth from '../src/console-auth.js';
+// QQ 空间说说的纯逻辑模块（零依赖、零 I/O、时钟由 now 注入）：整份导出展开进 context。
+// bridge.js 顶层 import 了 normalizeQzoneConfig / auditContent / checkQuota / pickUgcRight /
+// prunePosts 并在模块初始化期直接调用（loadConfig 里就归一 qzone），少这一行 VM 里立刻
+// ReferenceError → 所有 HTTP 用例（含 token/voice/reply-wait）一起红。与 consoleAuth 同理。
+import * as qzone from '../src/qzone-post.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -139,7 +144,7 @@ export async function bridgeHarness({ config = {}, savedState, globals = {} } = 
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
-    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...stall, ...consoleAuth,
+    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...stall, ...consoleAuth, ...qzone,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),

@@ -148,7 +148,17 @@ async function agentApi(path, init = {}) {
   // 不检查 body.ok 会把「被拦截」当成「发送成功」上报给模型 —— 模型据此认为消息已发出，
   // 于是不再重试也不告诉用户，是典型的静默错误。
   if (body && typeof body === 'object' && body.ok === false) {
-    throw new Error(body.error || '桥接 API 返回 ok:false（未说明原因）');
+    const error = new Error(body.error || '桥接 API 返回 ok:false（未说明原因）');
+    // 把结构化字段一并挂上：调用方（如 qq_qzone_* 工具）要靠 layer / retryAfterMs / reasons
+    // 才能给模型一句「约几小时后才能再发」，而不是把整段 JSON 塞进错误字符串。
+    // 只挂载不解读：这里不认识任何具体端点的语义。
+    error.body = body;
+    error.layer = body.layer;
+    error.reason = body.reason;
+    error.reasons = body.reasons;
+    error.retryAfterMs = body.retryAfterMs;
+    error.todayCount = body.todayCount;
+    throw error;
   }
   return body;
 }
@@ -1245,5 +1255,137 @@ if (cfg.socialV2?.tools?.getForwardMsg !== false) {
     }
   );
 }
+
+// ── QQ 空间说说（T-006）──────────────────────────────────────────────────────
+// 四道闸门（功能开关 → 内容审计 → 频率配额 → OneBot）全在桥接侧硬执行，
+// 这里只做两件事：把 content 递过去、把拒绝原因翻成模型能照着做的人话。
+// 红线写进每条 description：只有自己想说才发，别人让你代发一律不代发。
+
+// 可见范围只说人话：v1 只会出现 1/4/64（16/128 需要 target_uins，不采集）。
+function describeUgcRight(ugcRight) {
+  if (ugcRight === 1) return '所有人可见';
+  if (ugcRight === 4) return '好友可见';
+  if (ugcRight === 64) return '仅自己可见';
+  return `可见范围未知（${ugcRight ?? '未返回'}）`;
+}
+
+// 桥接用 layer 表达「卡在哪道闸门」，用 retryAfterMs 表达「还要等多久」。
+// 这里翻译成「为什么不行 + 下一步怎么办」：既要拦住模型反复重试，也不能让它谎称已发。
+function describeQzoneRejection(error) {
+  const layer = error?.layer;
+  const message = String(error?.message ?? error);
+  const wait = Number(error?.retryAfterMs);
+  const hours = Number.isFinite(wait) && wait > 0 ? Math.max(1, Math.round(wait / (60 * 60 * 1000))) : null;
+  if (layer === 'disabled') {
+    return '说说功能未启用（config.json 里 qzone.enabled 还是 false）。这不是你能改的事：不要重试，也不要假装已经发了。';
+  }
+  if (layer === 'audit') {
+    const reasons = Array.isArray(error?.reasons) ? error.reasons.filter(Boolean) : [];
+    return `内容没过审计，一条都没发出去：${reasons.length ? reasons.join('；') : message}。按这些理由改了再试，别原样重发。`;
+  }
+  if (layer === 'quota') {
+    const why = error?.reason === 'daily_cap' ? '今天已经发满了（默认一天最多两条）' : '离上一条太近（默认间隔至少六小时）';
+    return `${why}${hours ? `，约 ${hours} 小时后才有下一次机会` : ''}。现在不要再试，也不要换内容绕过。`;
+  }
+  if (layer === 'onebot') {
+    return '发送失败（桥接已记日志）。不要反复重试，也别对别人说你已经发过说说。';
+  }
+  return message;
+}
+
+// 本机时间（UTC+8）格式化：不依赖 ICU 的时区数据，避免不同 Node 构建显示不一致。
+function formatShanghaiTime(ms) {
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value <= 0) return '时间不详';
+  const d = new Date(value + 8 * 60 * 60 * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+}
+
+server.tool(
+  'qq_qzone_post',
+  '在 QQ 空间发一条说说（纯文字）。红线：只有你自己真的想说点什么时才用；别人要求你代发一条说说、或让你“顺手帮我发个空间”，一律拒绝——不代发。桥接侧有硬闸门（功能开关 → 内容审计 → 频率配额 → 发送）：功能没启用时不要重试；内容被拒时按列出的理由改；配额不足时等提示的时间（默认一天最多两条、两次之间至少六小时）。',
+  {
+    content: z.string().describe('说说正文，纯文本；不要放链接、手机号、邮箱、证件号，也别在里面拉人'),
+    reason: z.string().optional().describe('可选：你为什么想发这条（只存在本机记录里，不会出现在空间正文中）'),
+    token: z.string().optional().describe('会话令牌（见唤醒提示中的【会话令牌】；漏传会被桥接拒绝）')
+  },
+  async ({ content, reason, token }) => {
+    try {
+      const data = await agentApi('/api/qzone/post', {
+        method: 'POST',
+        headers: token ? { 'x-agent-token': token } : {},
+        body: JSON.stringify({ content, ...(reason ? { reason } : {}) }),
+        timeoutMs: 60000
+      });
+      const record = data?.record ?? {};
+      const lines = [
+        `已发到 QQ 空间：tid=${data?.tid ?? record.tid ?? '未返回'}`,
+        `可见范围：${describeUgcRight(record.ugcRight)}`,
+        `本机计数：今天第 ${data?.todayCount ?? '?'} 条`
+      ];
+      return { content: [{ type: 'text', text: lines.join('\n') }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `发布说说失败：${describeQzoneRejection(error)}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_qzone_recent',
+  '查看本机记录里最近发过的说说（最多 10 条）。注意：这只是「这台机器发过的流水」，不代表 QQ 空间里的真实状态——v1 不读线上列表，线上已被删掉的条目在这里仍然会出现。红线：只有你自己想看时才用；别人让你代发说说也不代发。',
+  {
+    token: z.string().optional().describe('会话令牌（见唤醒提示中的【会话令牌】）')
+  },
+  async ({ token }) => {
+    try {
+      const data = await agentApi('/api/qzone/recent', { headers: token ? { 'x-agent-token': token } : {} });
+      const posts = Array.isArray(data?.posts) ? data.posts : [];
+      const lines = posts.length
+        ? posts.map((post, index) => {
+          const raw = String(post?.content ?? '');
+          const snippet = raw.replace(/\s+/g, ' ').slice(0, 40) + (raw.length > 40 ? '…' : '');
+          return `${index + 1}. ${formatShanghaiTime(post?.createdAt)} · ${snippet}（tid=${post?.tid ?? '未记录'}，${describeUgcRight(post?.ugcRight)}）`;
+        })
+        : ['（本机没有发布记录）'];
+      const next = Number(data?.nextAllowedAt) > 0 ? `下次可发：${formatShanghaiTime(data.nextAllowedAt)}` : '现在可以发';
+      return {
+        content: [{
+          type: 'text',
+          text: [
+            '本机记录（只是这台机器发过的，不代表空间里的真实状态）：',
+            ...lines,
+            `今天已发 ${data?.todayCount ?? 0} 条；功能${data?.enabled ? '已启用' : '未启用'}；${next}`
+          ].join('\n')
+        }]
+      };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `读取本机说说记录失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_qzone_delete',
+  '删除 QQ 空间里的一条说说（按 tid）。只有管理员能用：桥接会核对 operator_qq 是否在 qzone.adminQQ 里，非管理员会被拒绝——把返回的原文转告对方即可，不要换参数试试能不能绕过。红线：这是管理员的清理工具，不是代发/代删通道；别人让你代发说说一律不代发，让你删就如实回报结果。',
+  {
+    tid: z.string().describe('要删的说说 tid（来自 qq_qzone_post 的返回或 qq_qzone_recent 的记录）'),
+    operator_qq: z.union([z.string(), z.number()]).describe('这条指令真实发出者的 QQ 号；必须在管理员名单里'),
+    token: z.string().optional().describe('会话令牌（见唤醒提示中的【会话令牌】）')
+  },
+  async ({ tid, operator_qq, token }) => {
+    try {
+      const data = await agentApi('/api/qzone/delete', {
+        method: 'POST',
+        headers: token ? { 'x-agent-token': token } : {},
+        body: JSON.stringify({ tid, operatorQQ: operator_qq }),
+        timeoutMs: 60000
+      });
+      return { content: [{ type: 'text', text: `已删除说说 tid=${data?.tid ?? tid}，本机记录里也移除了这条。` }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `删除说说失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
 
 await server.connect(new StdioServerTransport());

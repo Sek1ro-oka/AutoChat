@@ -61,6 +61,13 @@ const tests = [
   //   · 软 15 分钟只告警，硬 30 分钟要连续 2 轮确认才动手（QQ_BRIDGE_WATCHDOG=off 只软不硬）；
   //   · 清理顺序：先打僵尸标记 → 再 session.cancel → 最后清本地账本（队列条目必须整条删）。
   'test-stall-watchdog.mjs',
+  // QQ 空间说说（T-006）的纯逻辑模块：配置归一 / 内容审计 / 日限与间隔 / 可见范围 / 记录裁剪。
+  // 模块零依赖零 I/O、时钟由 now 注入，所以这里能钉死六条审计规则的正反例与 clamp 边界。
+  'test-qzone-post.mjs',
+  // 同一条链路的接线契约（纯静态读源码，不 import bridge.js —— import 会真起服务）：
+  // 三端点是否落在令牌关卡之后、闸门顺序是否 disabled → audit → quota → OneBot、
+  // MCP 三工具是否都注册且描述里带「不代发」红线。
+  'test-qzone-endpoints.mjs',
 ];
 let failed = 0;
 for (const test of tests) {
