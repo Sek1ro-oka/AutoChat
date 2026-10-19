@@ -12,17 +12,21 @@
 //   组二 闸门顺序 disabled → audit → quota → OneBot（源码顺序）
 //   组三 oneBotActionNested 的调用点带 send_qzone_msg / delete_qzone_msg
 //   组四 MCP 三工具都注册了，且每条描述都含「不代发」红线
-//   组五 纯函数端到端：审计优先于配额、ugcRight 只可能 1/4/64、缺省配置永远 disabled
-//   组六 控制台开关端点：位置/类型闸门/写盘口径、删除的 x-agent-call 分流、recent 的两个新读数
+//   组五 纯函数端到端：审计优先于配额、ugcRight 只可能 1/4/64、缺省配置永远 disabled、
+//        滑动窗口（windowHours / windowCap）与两个 0 的语义
+//   组六 控制台开关端点：位置/类型闸门/写盘口径、删除的 x-agent-call 分流、recent 的读数，
+//        以及出厂样例 config.example.json 的口径（新键齐全、legacy 键不写进样例）
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  applyQzoneConfigUpdate,
   auditContent,
   checkQuota,
   normalizeQzoneConfig,
   pickUgcRight,
-  prunePosts
+  prunePosts,
+  QZONE_DEFAULTS
 } from '../src/qzone-post.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -60,6 +64,7 @@ function allLinesOf(text, needle) {
 
 const bridge = read('src/bridge.js');
 const mcp = read('src/mcp-snowluma-safe.js');
+const qzonePure = read('src/qzone-post.js');
 
 console.log('── 组一：路径字面量与鉴权顺序 ──────────────────────────────');
 // 令牌关卡：所有 /api 请求都必须先过它。端点行号在它之后 = 静默继承了整套鉴权，
@@ -93,9 +98,14 @@ check('quota 在 OneBot 调用之前', quotaLine > 0 && quotaLine < sendLine, `$
 // 空 enabled 时不可能走到审计：disabled 分支必须 return。
 check('disabled 分支立即 return（不落到审计）', /layer: 'disabled'[\s\S]{0,200}?return;/.test(bridge));
 check('audit 分支立即 return（不落到配额/发送）', /layer: 'audit'[\s\S]{0,200}?return;/.test(bridge));
-check('quota 分支立即 return（不落到发送）', /layer: 'quota'[\s\S]{0,400}?return;/.test(bridge));
+// T-008 之后这一段多回传了 windowCount / windowCap，窗口从 400 放宽到 700；
+// 语义没变：配额分支必须在 OneBot 调用之前 return（下面还有 quotaLine < sendLine 的行号断言兜底）。
+check('quota 分支立即 return（不落到发送）', /layer: 'quota'[\s\S]{0,700}?return;/.test(bridge));
 // 配额被拒时必须如实回传函数算出来的 retryAfterMs，不能自己编一个数字。
 check('quota 拒绝时回传 checkQuota 的 retryAfterMs', /retryAfterMs: quota\.retryAfterMs/.test(bridge));
+check('配额拒绝时一并回传 windowCount（窗口内条数）', /windowCount: quota\.windowCount/.test(bridge));
+check('配额拒绝时一并回传 windowCap（区分「发满」与「暂停」）', /windowCount: quota\.windowCount[\s\S]{0,120}?windowCap: qz\.windowCap/.test(bridge));
+check('暂停时用一句话说明，不套「等一会儿」的口径', /说说已暂停（windowCap 为 0）/.test(bridge));
 check('桥接把 now 显式注入 checkQuota（时钟由 I/O 层给）', /const now = Date\.now\(\);\s*[\s\S]{0,220}?checkQuota\(\{ now,/.test(bridge));
 check('审计用配置里的 maxChars', /auditContent\(content, \{ maxChars: qz\.maxChars \}\)/.test(bridge));
 check('可见范围只来自 pickUgcRight', /ugc_right: ugcRight/.test(bridge) && /const ugcRight = pickUgcRight\(qz\)/.test(bridge));
@@ -119,10 +129,16 @@ check('非管理员删除返回「需要管理员」', /需要管理员/.test(br
 check('删除看 retcode：非 0 也算失败（不能白抹本地记录）', /retcode !== undefined && retcode !== 0/.test(bridge));
 check('删除失败的分支在写状态之前（失败不抹本地记录）', (() => {
   const failAt = bridge.indexOf("error: '删除失败，已记日志'");
-  const writeAt = bridge.indexOf('writeQzoneState(kept)');
+  const writeAt = bridge.indexOf('writeQzoneState(kept, qz.windowCap)');
   return failAt > 0 && writeAt > failAt;
 })());
 check('loadConfig 把 qzone 归一进 cfg', /cfg\.qzone = normalizeQzoneConfig\(file\.qzone\)/.test(bridge));
+// 状态文件保留条数必须跟着 windowCap 走：写死 50 的话，windowCap > 50 时窗口计数永远到不了上限。
+check('保留条数按 windowCap 计算：max(50, windowCap + 20)', /function qzoneKeepPosts\(windowCap\)[\s\S]{0,220}?Math\.max\(50, cap \+ 20\)/.test(bridge));
+check('  bridge 里没有 prunePosts(..., 50) 这种写死调用', !/prunePosts\([^()]*,\s*50\)/.test(bridge));
+check('  写状态时把 windowCap 一并传进裁剪（两条路径都传）', /writeQzoneState\(\[record, \.\.\.state\.posts\], qz\.windowCap\)/.test(bridge) && /writeQzoneState\(kept, qz\.windowCap\)/.test(bridge));
+// 老配置迁移：没有 windowCap 但有 dailyCap 时打一条 [qzone] 日志（迁移本身在纯函数里）。
+check('loadConfig 对老配置打一条迁移日志', /usesLegacyDailyCap\(file\.qzone\)[\s\S]{0,400}?log\(`\[qzone\] 老配置迁移/.test(bridge));
 
 console.log('\n── 组四：MCP 三个工具 + 「不代发」红线 ──────────────────────');
 function toolBlock(name) {
@@ -150,6 +166,11 @@ check('qq_qzone_delete 打到 /api/qzone/delete', deleteBlock.includes("agentApi
 check('qq_qzone_delete 传 operatorQQ', /operatorQQ: operator_qq/.test(deleteBlock));
 check('拒绝原因被翻译成可执行的人话（disabled/audit/quota/onebot 四支）', ['disabled', 'audit', 'quota', 'onebot'].every((layer) => mcp.includes(`layer === '${layer}'`)));
 check('agentApi 把结构化拒绝字段挂到 error 上（layer/retryAfterMs/reasons）', /error\.layer = body\.layer/.test(mcp) && /error\.retryAfterMs = body\.retryAfterMs/.test(mcp));
+// T-008：窗口时长与条数只有桥接知道，MCP 层不再自己套「一天两条 / 六小时」的旧口径——
+// 否则 windowCap: 0（暂停）会被翻译成「等一会儿就有额度」，把模型引向反复重试。
+check('MCP 的配额提示直接采用桥接给的原因', mcp.includes("const why = message && message !== '[object Object]' ? message : '发布额度用完了'"));
+check('MCP 不再写死旧口径（一天两条 / 六小时间隔）', !mcp.includes('一天最多两条') && !mcp.includes('至少六小时'));
+check('qq_qzone_post 的描述改说「24 小时内最多 2 条」', postBlock.includes('最近 24 小时内最多 2 条'));
 
 console.log('\n── 组五：纯函数端到端（闸门顺序与取值边界）─────────────────');
 const cfg = normalizeQzoneConfig({ enabled: true, dailyCap: 2, minIntervalMs: 6 * 60 * 60 * 1000, maxChars: 300, ugcRight: 4 });
@@ -209,6 +230,52 @@ check('prunePosts 按时间倒序且默认保留 50 条', (() => {
   return out.length === 50 && out[0].tid === 't59';
 })());
 
+// 滑动窗口（T-008 起唯一的限流口径）：最近 windowHours 小时内最多 windowCap 条。
+const windowCfg = normalizeQzoneConfig({ enabled: true, windowHours: 24, windowCap: 3 });
+const fullWindow = checkQuota({
+  now: at,
+  posts: [
+    { tid: 'c', createdAt: at - 1 * hour },
+    { tid: 'b', createdAt: at - 5 * hour },
+    { tid: 'a', createdAt: at - 20 * hour }
+  ],
+  cfg: windowCfg
+});
+check('滑动窗口：24h 内 3 条、cap 3 → 拒绝', fullWindow.ok === false && fullWindow.reason === 'daily_cap' && fullWindow.windowCount === 3, JSON.stringify(fullWindow));
+check('  拒绝的 retryAfterMs 是最早一条滑出窗口的时刻（20h 前 → 4h）', fullWindow.retryAfterMs === 4 * hour, String(fullWindow.retryAfterMs));
+const oneSlidOut = checkQuota({
+  now: at,
+  posts: [
+    { tid: 'c', createdAt: at - 1 * hour },
+    { tid: 'b', createdAt: at - 5 * hour },
+    { tid: 'a', createdAt: at - 25 * hour }
+  ],
+  cfg: windowCfg
+});
+check('滑动窗口：最早那条滑出 24h 就放行（不是等自然日归零）', oneSlidOut.ok === true && oneSlidOut.windowCount === 2, JSON.stringify(oneSlidOut));
+
+const pausedCfg = normalizeQzoneConfig({ enabled: true, windowCap: 0 });
+const pausedQuota = checkQuota({ now: at, posts: [], cfg: pausedCfg });
+check('windowCap=0 → 暂停：窗口空着也拒、retryAfterMs=0', pausedQuota.ok === false && pausedQuota.reason === 'daily_cap' && pausedQuota.retryAfterMs === 0, JSON.stringify(pausedQuota));
+const dayCfg = normalizeQzoneConfig({ enabled: true, windowHours: 0, windowCap: 2 });
+const dayQuota = checkQuota({ now: at, posts: [{ createdAt: at - 40 * 1000 }, { createdAt: at - 3 * hour }], cfg: dayCfg });
+check('windowHours=0 → 退回北京自然日计数（上限仍是 windowCap）', dayQuota.ok === false && dayQuota.windowCount === 2 && dayQuota.todayCount === 2, JSON.stringify(dayQuota));
+check('两个 0 不会被「Number(v) || 默认值」吞掉', normalizeQzoneConfig({ windowHours: 0, windowCap: 0 }).windowHours === 0 && normalizeQzoneConfig({ windowHours: 0, windowCap: 0 }).windowCap === 0);
+
+const migratedCfg = normalizeQzoneConfig({ enabled: true, dailyCap: 2 });
+check('老配置 dailyCap:2 迁移成「24 小时 2 条」并真的参与判定', migratedCfg.windowCap === 2 && migratedCfg.windowHours === 24 && checkQuota({ now: at, posts: flooded, cfg: migratedCfg }).reason === 'daily_cap');
+check('控制台部分更新：只改 windowCap 不重置别的键', (() => {
+  const base = normalizeQzoneConfig({ enabled: true, windowHours: 6, windowCap: 2, ugcRight: 1 });
+  const r = applyQzoneConfigUpdate(base, { windowCap: 9 });
+  return r.ok === true && r.qzone.windowCap === 9 && r.qzone.windowHours === 6 && r.qzone.ugcRight === 1;
+})());
+check('控制台部分更新：未知键 / 越界值都有确定结果', (() => {
+  const base = normalizeQzoneConfig({ enabled: true });
+  const unknown = applyQzoneConfigUpdate(base, { dailyCap: 5 });
+  const clamped = applyQzoneConfigUpdate(base, { windowCap: 999 });
+  return unknown.ok === false && clamped.ok === true && clamped.qzone.windowCap === 100 && clamped.clamped.includes('windowCap');
+})());
+
 console.log('\n── 组六：控制台开关端点与 recent 读数（T-007b）──────────────');
 // ① 开关端点本身：位置在令牌关卡之后、同一个 try 块里 —— 否则就是另开了一个免鉴权入口。
 const configLines = allLinesOf(bridge, "'/api/qzone/config'");
@@ -221,21 +288,26 @@ const configBlock = (() => {
   return start < 0 || end < 0 ? '' : bridge.slice(start, end);
 })();
 check('能定位到开关端点整块', configBlock.length > 0, `${configBlock.length} 字符`);
-// ② 类型闸门：只认真布尔，且错误文案与控制台约定一致（400 而不是 500）。
-check('非布尔值一律拒绝（typeof !== boolean）', /typeof body\.enabled !== 'boolean'/.test(configBlock));
-check('  错误文案是「enabled 必须是布尔值」且带 400', /enabled 必须是布尔值/.test(configBlock) && /, 400\)/.test(configBlock));
-// ③ 写盘口径：读原始 config.json 再改一个键，且走 atomicWriteJson（临时文件 + rename）。
+// ② 校验口径（T-008 起是部分更新）：桥接不再手写范围/类型判断，全部交给
+//    applyQzoneConfigUpdate → normalizeQzoneConfig 这一套；类型闸门本身在纯模块里钉。
+check('配置端点走 applyQzoneConfigUpdate（单一校验源）', /const patch = applyQzoneConfigUpdate\(before, body\)/.test(configBlock));
+check('  桥接里没有第二份手写范围判断', !/windowCap\s*[<>]=?\s*100/.test(configBlock) && !/windowHours\s*[<>]=?\s*24/.test(configBlock) && !/typeof body\.enabled/.test(configBlock));
+check('  enabled 类型闸门只在纯模块里（enabled 必须是布尔值 + 400 语义）', /typeof value !== 'boolean'[\s\S]{0,80}?enabled 必须是布尔值/.test(qzonePure));
+check('  校验失败直接 400（不写盘）', /if \(!patch\.ok\) \{[\s\S]{0,100}?sendJson\(\{ ok: false, error: patch\.error \}, 400\)/.test(configBlock));
+check('  以内存当前生效值为基线（部分更新不重置其他键）', /const before = normalizeQzoneConfig\(cfg\.qzone\)/.test(configBlock));
+// ③ 写盘口径：读原始 config.json、只合并四个白名单键，且走 atomicWriteJson（临时文件 + rename）。
 check('读原始 config.json（readConfigObject），不把归一化 cfg 整份写回', /readConfigObject\(configFile\)/.test(configBlock) && !/atomicWriteJson\(configFile, cfg\)/.test(configBlock));
-check('  只改 qzone.enabled 一个键', /file\.qzone = \{ \.\.\.\(file\.qzone \?\? \{\}\), enabled \}/.test(configBlock));
+check('  只合并 enabled / windowHours / windowCap / ugcRight 四个键', /enabled: patch\.qzone\.enabled,[\s\S]{0,160}?ugcRight: patch\.qzone\.ugcRight/.test(configBlock) && /file\.qzone = \{ \.\.\.\(file\.qzone \?\? \{\}\), \.\.\.next \}/.test(configBlock));
+check('  legacy 键原样留在 config.json（不删 dailyCap / minIntervalMs）', !/delete file\.qzone/.test(configBlock) && !/dailyCap: undefined/.test(configBlock));
 check('  写盘走 atomicWriteJson（临时文件 + rename）', /atomicWriteJson\(configFile, file\)/.test(configBlock));
-check('  写盘成功之后才同步内存 cfg.qzone', (() => {
+check('  写盘成功之后才同步内存 cfg.qzone（顺序不可反）', (() => {
   const writeAt = configBlock.indexOf('atomicWriteJson(configFile, file)');
-  const memAt = configBlock.indexOf('cfg.qzone = { ...(cfg.qzone ?? {}), enabled }');
+  const memAt = configBlock.indexOf('cfg.qzone = { ...(cfg.qzone ?? {}), ...next }');
   return writeAt > 0 && memAt > writeAt;
 })());
-check('  写盘失败返回 500 而不是谎报成功', /写入 config\.json 失败[\s\S]{0,40}?500\)/.test(configBlock));
-check('  成功返回 enabled 与 configPath', /sendJson\(\{ ok: true, enabled, configPath: 'config\.json' \}\)/.test(configBlock));
-check('  只有真变化才记一行日志', configBlock.includes('if (before !== enabled) log(`[qzone] 控制台：说说功能已'));
+check('  写盘失败返回 500 而不是谎报成功', /读写 config\.json 失败[\s\S]{0,40}?500\)/.test(configBlock));
+check('  成功返回归一化后的值（qzone + clamped + configPath）', /sendJson\(\{ ok: true, configPath: 'config\.json', enabled: next\.enabled, qzone: next, clamped: patch\.clamped \}\)/.test(configBlock));
+check('  只有真变化才记日志', configBlock.includes('if (before.enabled !== next.enabled) log(`[qzone] 控制台：说说功能已') && /if \(tuned\.length > 0\) log\(/.test(configBlock));
 // ④ 删除的放行口径：带 x-agent-call 的是智能体（严格），不带的是控制台（已过令牌关卡）。
 const deleteHandler = (() => {
   const start = bridge.indexOf("url.pathname === '/api/qzone/delete'");
@@ -256,9 +328,17 @@ const recentHandler = (() => {
 })();
 check('能定位到 recent 端点整块', recentHandler.length > 0, `${recentHandler.length} 字符`);
 check('recent 追加了 dailyCap', /dailyCap: qz\.dailyCap/.test(recentHandler));
+check('recent 追加了 windowHours / windowCap / windowCount', /windowHours: qz\.windowHours/.test(recentHandler) && /windowCap: qz\.windowCap/.test(recentHandler) && /windowCount: quota\.windowCount/.test(recentHandler));
+check('  windowCount 来自 checkQuota（不是控制台自己数 posts）', /windowCount: quota\.windowCount/.test(recentHandler));
+check('  暂停（windowCap=0）时 nextAllowedAt 给 0，不编一个未来时间', /quota\.ok \|\| qz\.windowCap <= 0 \? 0 : now \+ quota\.retryAfterMs/.test(recentHandler));
 check('recent 追加的 ugcRight 是 pickUgcRight 的回落值（不是 normalizeQzoneConfig 的原始字段）', /ugcRight: pickUgcRight\(qz\)/.test(recentHandler) && !/ugcRight: qz\.ugcRight/.test(recentHandler));
 check('recent 原有五个键一个都没改名或换语义', ['ok: true', 'enabled: qz.enabled', 'posts: prunePosts(state.posts, 10)', 'todayCount: quota.todayCount', 'nextAllowedAt:'].every((key) => recentHandler.includes(key)));
 check('recent 的 nextAllowedAt 仍是数字（0 或时间戳），没被改成对象', !/nextAllowedAt: \{/.test(recentHandler));
+// ⑥ 出厂样例：新键齐全、legacy 键不写进样例（免得新人照抄旧口径）、取值跟 QZONE_DEFAULTS 一致。
+const exampleQzone = JSON.parse(read('config.example.json')).qzone;
+check('config.example.json 的 qzone 就是新口径六键', JSON.stringify(Object.keys(exampleQzone)) === '["enabled","adminQQ","windowHours","windowCap","ugcRight","maxChars"]', JSON.stringify(Object.keys(exampleQzone)));
+check('  样例的 windowHours / windowCap 与 QZONE_DEFAULTS 一致', exampleQzone.windowHours === QZONE_DEFAULTS.windowHours && exampleQzone.windowCap === QZONE_DEFAULTS.windowCap, JSON.stringify({ windowHours: exampleQzone.windowHours, windowCap: exampleQzone.windowCap }));
+check('  样例里不再出现 dailyCap / minIntervalMs', !('dailyCap' in exampleQzone) && !('minIntervalMs' in exampleQzone));
 
 const total = passed + failures.length;
 console.log(`\n结果：${passed}/${total} passed`);

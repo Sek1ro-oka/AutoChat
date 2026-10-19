@@ -167,7 +167,7 @@ ok(html.includes('删除这条说说？QQ 空间里也会一起删掉，确定�
 ok(/api\('\/api\/qzone\/recent'\)/.test(html), '读数来自 GET /api/qzone/recent（/api/status 没有这个字段）');
 ok(/currentConsolePage === 'switches'\) await refreshQzone\(\)/.test(html), 'refresh() 仅在开关页拉说说读数');
 ok(/if \(page === 'switches'\) \{ renderQzone\(lastQzone\); refreshQzone\(\); \}/.test(html), 'setConsolePage 切到开关页时先渲染缓存再拉');
-ok(html.includes("'今日已发 '") && html.includes("'/' + cap"), '读数行显示 今日已发 N/上限（上限来自接口，不写死）');
+ok(html.includes("'今日已发 '") && html.includes("' 条'"), '读数行显示 今日已发 N 条（不写死上限）');
 ok(html.includes('距下次可发 ') && html.includes('默认可见范围 ') && html.includes('最近一次 '), '四项读数标题都在');
 ok(!/软 15 分钟/.test(html) && html.includes('现在可以发'), '倒计时用接口给的 nextAllowedAt 现算');
 ok(/QZONE_RIGHT_LABELS = Object\.freeze\(\{ 1: '所有人可见', 4: '好友可见', 64: '仅自己可见' \}\)/.test(html), '可见范围三档与 QZONE_UGC_RIGHTS 语义一致');

@@ -53,8 +53,8 @@
   "qzone": {
     "enabled": false,
     "adminQQ": [],
-    "minIntervalMs": 21600000,
-    "dailyCap": 2,
+    "windowHours": 24,
+    "windowCap": 2,
     "ugcRight": 4,
     "maxChars": 300
   },

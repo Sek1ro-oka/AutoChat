@@ -1755,6 +1755,37 @@ button:active:not(:disabled) {
 #section-usage .usage-legend i.off { background:var(--accent) }
 #section-usage .usage-legend i.mixed { background:var(--accent-hover) }
 
+/* ===== 说说：频率与可见范围（T-008）=====
+   这一段只服务说说卡里的新增参数行，作用域统一挂在 #section-switches 下，
+   免得影响别的页面上同名的 input/select 规则。 */
+#section-switches .qz-sentence { display:flex; align-items:center; gap:8px; flex-wrap:wrap }
+#section-switches .qz-txt { font-size:13px; color:var(--text-secondary); white-space:nowrap }
+/* 两个数字框是同一句话里的两个「空」，所以定宽居中。
+   选择器必须压过本页的 input[type=number]{width:100%;max-width:100%}（权重 1,1,1 > 0,1,1），否则框会被撑满整行。 */
+#section-switches input.qz-num {
+  width:4.6em; min-width:4.6em; max-width:4.6em; flex:0 0 auto;
+  text-align:center; padding:7px 6px
+}
+#section-switches select.qz-select { width:132px; min-width:132px; flex:0 0 auto; padding:7px 8px }
+#section-switches .qz-hint { margin:0; font-size:11px; color:var(--muted-soft); white-space:nowrap }
+#section-switches .qz-perday { margin:0; font-size:12px; color:var(--muted) }
+/* 回执区空着的时候不要占那 8px：它平时是空的，只在保存后出现一行字。 */
+#section-switches #qzParamsMsg:empty { margin-top:0 }
+/* 危险区与 0 上限提示共用一套 warn 配色，深色主题跟着已有的变量一起走。 */
+#section-switches .qz-warn {
+  display:flex; align-items:center; gap:9px; flex-wrap:wrap;
+  margin-top:10px; padding:12px 14px; border-radius:10px;
+  background:var(--warn-bg); border:1px solid var(--warn-border);
+  color:var(--warn-fg); font-size:12px; line-height:1.7
+}
+#section-switches .qz-warn-icon { flex:0 0 auto; font-size:13px; line-height:1 }
+#section-switches .qz-warn b { color:var(--warn-fg-strong); font-weight:600 }
+/* 「我已知晓」贴着右边缘：它是这一行的门槛，不该混在正文里被一眼扫过去。 */
+#section-switches .qz-ack {
+  display:flex; align-items:center; gap:7px; margin:0 0 0 auto;
+  cursor:pointer; white-space:nowrap; font-size:12px
+}
+
 </style>
 <style id="sandboxStyle">
 /* ===== 决策沙盘（内联自原来的看门狗 Demo 页；样式已机械作用域化到 #sandbox）=====
@@ -2846,10 +2877,11 @@ button:active:not(:disabled) {
         </table>
       </div>
 
-      <h3 class="layer-heading">说说<span class="meta">QQ 空间动态：开关落盘持久，删除会连空间里那条一起删</span></h3>
+      <h3 class="layer-heading">说说<span class="meta">QQ 空间动态：开关与频率都落盘持久，删除会连空间里那条一起删</span></h3>
       <div class="row" style="margin-top:10px">
         <span class="pill" id="qzBadge">说说 读取中…</span>
         <span class="meta" id="qzStats">今日已发 —</span>
+        <span class="meta" id="qzWindowCount">窗口 —</span>
         <span class="meta" id="qzNext">距下次可发 —</span>
         <span class="meta" id="qzScope">默认可见范围 —</span>
         <span class="meta" id="qzLatest">最近一次 —</span>
@@ -2858,7 +2890,38 @@ button:active:not(:disabled) {
         <button id="qzToggle" class="danger" type="button" disabled>关闭说说</button>
         <span class="meta" id="qzMsg"></span>
       </div>
-      <div class="meta">可见范围由 <code>config.json</code> 的 <code>qzone.ugcRight</code> 决定（控制台只读）。下面这张表是<b>本机记录</b>（<code>state/qzone-posts.json</code>），不代表空间里的真实状态：在 QQ 空间那边手动删掉的条目，这里仍会留着。</div>
+
+      <div class="row" style="margin-top:14px">
+        <span class="qz-sentence">
+          <span class="qz-txt">每</span>
+          <input type="number" class="qz-num" id="qzWindowHours" min="0" max="24" step="1" inputmode="numeric" autocomplete="off" aria-label="时间窗，0 到 24 小时" value="24" disabled>
+          <span class="qz-hint" id="qzZeroWindow" hidden>0 = 不限时间窗，按自然日算</span>
+          <span class="qz-txt">小时内最多</span>
+          <input type="number" class="qz-num" id="qzWindowCap" min="0" max="100" step="1" inputmode="numeric" autocomplete="off" aria-label="时间窗内最多几条，0 到 100" value="2" disabled>
+          <span class="qz-txt">条</span>
+        </span>
+        <span class="qz-perday" id="qzPerDay">≈ 每天 —</span>
+        <label class="qz-txt" for="qzUgcRight">可见范围</label>
+        <select id="qzUgcRight" class="qz-select" aria-label="可见范围" disabled>
+          <option value="1">所有人可见</option>
+          <option value="4" selected>好友可见</option>
+          <option value="64">仅自己可见</option>
+        </select>
+        <button id="qzSaveParams" class="primary" type="button" disabled>保存参数</button>
+      </div>
+      <div class="meta" id="qzParamsMsg" role="status"></div>
+      <div class="qz-warn" id="qzZeroWarn" hidden>
+        <span class="qz-warn-icon" aria-hidden="true">⚠</span>
+        <span>上限为 <b>0</b>，发说说的通道会保持关闭</span>
+      </div>
+      <div class="qz-warn" id="qzPublicWarn" hidden>
+        <span class="qz-warn-icon" aria-hidden="true">⚠</span>
+        <span>之后发的说说对全网可见，已经发出的不会被改回。</span>
+        <label class="qz-ack" for="qzAckPublic"><input type="checkbox" id="qzAckPublic"><span>我已知晓</span></label>
+      </div>
+
+      <div class="meta">可见范围由 <code>config.json</code> 的 <code>qzone.ugcRight</code> 决定（<b>就在上面这行参数里改，保存后不重启即生效</b>）；记录表里每条写的是<b>发布当时的可见范围</b>，控制台只读。</div>
+      <div class="meta">下面这张表是<b>本机记录</b>（<code>state/qzone-posts.json</code>），不代表空间里的真实状态：在 QQ 空间那边手动删掉的条目，这里仍会留着。</div>
       <div id="qzList">
         <div class="meta" id="qzEmpty">还没有发过说说。</div>
         <table id="qzTable" hidden>
@@ -3230,14 +3293,38 @@ function qzoneRightLabel(value) {
     : '未知（' + (Number.isFinite(key) ? key : '—') + '）';
 }
 // 倒计时只报到分钟：它本来就是大概数，秒级跳动除了让人焦虑没有别的作用。
+// 语义：窗口没满就给 0；满了给「窗口内最早一条滑出窗口」的时刻。前端只负责把它说人话。
 function fmtQzoneWait(nextAt) {
   const value = Number(nextAt);
   if (!Number.isFinite(value) || value <= Date.now()) return '现在可以发';
   const minutes = Math.ceil((value - Date.now()) / 60000);
-  if (minutes < 60) return minutes + ' 分钟后';
-  const hours = Math.floor(minutes / 60);
-  const rest = minutes % 60;
-  return rest === 0 ? hours + ' 小时后' : hours + ' 小时 ' + rest + ' 分钟后';
+  return minutes < 60 ? '还需 ' + minutes + ' 分钟' : '还需 ' + Math.ceil(minutes / 60) + ' 小时';
+}
+// 数字字段一律走这里：Number(null) 是 0，而 0 在这张卡里是「没时间窗 / 通道关着」的实义值。
+// 旧版桥接缺字段时可能给 null，直接 Number 会把「没上报」读成「设成 0」，读数就全错了。
+function qzNum(value) {
+  if (value === null || value === undefined || value === '') return NaN;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : NaN;
+}
+// 「能不能发」直接按窗口判定：windowCount < windowCap 就是能发，否则才去看 nextAllowedAt。
+// 不要用「上次发布 + 窗口 ÷ 上限」那种均分公式——滑动窗口不是均分，那样算会把还能发说成不能发。
+function qzNextText(qz) {
+  const cap = qzNum(qz.windowCap);
+  const count = qzNum(qz.windowCount);
+  // windowCap = 0 是「通道关着」，不是「今天发够了」：不判在前面就会被说成「现在可以发」。
+  if (Number.isFinite(cap) && cap === 0) return '已暂停';
+  if (Number.isFinite(cap) && Number.isFinite(count) && count < cap) return '现在可以发';
+  return fmtQzoneWait(qz.nextAllowedAt);
+}
+// 窗口读数：windowHours = 0 时后端按自然日算，标题就得跟着改，不能还写「0h 内」。
+function qzWindowText(qz) {
+  const hours = qzNum(qz.windowHours);
+  const cap = qzNum(qz.windowCap);
+  const count = qzNum(qz.windowCount);
+  if (!Number.isFinite(hours) || !Number.isFinite(count)) return '窗口 —';
+  const used = count + (Number.isFinite(cap) && cap > 0 ? '/' + cap : ' 条');
+  return (hours > 0 ? '窗口 ' + hours + 'h 内 ' : '窗口 按自然日 ') + used;
 }
 function renderQzone(qz) {
   const badge = document.getElementById('qzBadge');
@@ -3249,10 +3336,11 @@ function renderQzone(qz) {
     const enabled = qz.enabled === true;
     badge.className = 'pill ' + (enabled ? 'g' : 'r');
     badge.textContent = enabled ? '说说 已开启' : '说说 已关闭';
-    const cap = Number(qz.dailyCap);
-    document.getElementById('qzStats').textContent = '今日已发 ' + (Number(qz.todayCount) || 0)
-      + (Number.isFinite(cap) && cap > 0 ? '/' + cap : ' 条（上限未上报）');
-    document.getElementById('qzNext').textContent = '距下次可发 ' + fmtQzoneWait(qz.nextAllowedAt);
+    // 只报条数，不带分母：T-008 之后生效的上限只有 windowCap，分母的唯一出处在下一格「窗口 24h 内 1/5」。
+    // 这里的 todayCount 按 Asia/Shanghai 自然日算，跟滑动窗口不是一回事，写「x/2」会让同一张卡出现两个上限。
+    document.getElementById('qzStats').textContent = '今日已发 ' + (Number(qz.todayCount) || 0) + ' 条';
+    document.getElementById('qzWindowCount').textContent = qzWindowText(qz);
+    document.getElementById('qzNext').textContent = '距下次可发 ' + qzNextText(qz);
     document.getElementById('qzScope').textContent = '默认可见范围 ' + qzoneRightLabel(qz.ugcRight);
     const posts = Array.isArray(qz.posts) ? qz.posts : [];
     document.getElementById('qzLatest').textContent = '最近一次 '
@@ -3274,12 +3362,14 @@ function renderQzone(qz) {
         + '<button class="danger" type="button" data-tid="' + esc(String(post.tid ?? '')) + '">删除</button>'
         + '</td></tr>';
     }).join('');
+    renderQzoneParams(qz);
     return;
   }
   // 读不到就说读不到：按钮按灰、每个读数写「—」，不摆一个假的「已关闭」或「0/2」。
   badge.className = 'pill';
   badge.textContent = qz === null ? '说说 状态未知' : '说说 读取中…';
   document.getElementById('qzStats').textContent = '今日已发 —';
+  document.getElementById('qzWindowCount').textContent = '窗口 —';
   document.getElementById('qzNext').textContent = '距下次可发 —';
   document.getElementById('qzScope').textContent = '默认可见范围 —';
   document.getElementById('qzLatest').textContent = '最近一次 —';
@@ -3290,9 +3380,202 @@ function renderQzone(qz) {
   empty.textContent = qz === null ? '读不到说说状态（桥接版本不一致或接口出错）。' : '读取中…';
   table.hidden = true;
   body.innerHTML = '';
+  // 状态都没有，参数就没法回填：控件按灰，别留一个「看起来能改」的假象。
+  renderQzoneParams(null);
 }
+// ── 参数行：每 N 小时内最多 M 条 + 可见范围 ──────────────────────────────────
+// 两个数字框是「输入」，「≈ 每天 X 条」是「回显」：回显按框里当下的数字现算，本身不落盘。
+// 初值来自 GET /api/qzone/recent 的 windowHours / windowCap —— 那就是 config.json 里正在生效的值。
+let qzoneWindowReported = false;  // 桥接有没有上报频率参数（旧版没有这两个键）
+let qzoneSaving = false;          // 保存进行中：按钮与文案都按这个状态走，防连点
+let qzoneParamsDirty = false;     // 用户动过参数行：在保存（或自己改回去）之前，轮询回填一律让路
+const QZONE_WINDOW_FALLBACK = Object.freeze({ hours: 24, cap: 2 });
+const QZONE_WINDOW_LIMITS = Object.freeze({ hoursMin: 0, hoursMax: 24, capMin: 0, capMax: 100 });
+const QZONE_NO_WINDOW_NOTE = '桥接没有上报频率参数（windowHours / windowCap），这里先显示 24 小时 / 2 条，保存已禁用。';
+
+function qzPerDayText(hours, cap) {
+  if (!Number.isFinite(hours) || !Number.isFinite(cap)) return '≈ 每天 —';
+  // 时间窗 0 是「不限窗口」，此时每天几条就等于上限本身，不能拿 0 去做除法。
+  if (hours <= 0) return '按自然日算';
+  if (cap <= 0) return '≈ 每天 0 条（已暂停）';
+  const per = Math.round(cap * 24 / hours * 10) / 10;
+  return '≈ 每天 ' + (Number.isInteger(per) ? String(per) : per.toFixed(1)) + ' 条';
+}
+function setQzoneParamsMsg(text, kind) {
+  const msg = document.getElementById('qzParamsMsg');
+  msg.className = kind ? 'meta ' + kind : 'meta';
+  msg.textContent = text;
+}
+// 回显与两个提示都跟着输入框走：改数字立刻能看到「≈ 每天几条」「0 上限会怎样」，不用等保存。
+function syncQzoneEchoes() {
+  const hoursInput = document.getElementById('qzWindowHours');
+  const capInput = document.getElementById('qzWindowCap');
+  // 空串必须按「还没填」处理：Number('') 是 0，直接算会把它当成合法的「0 小时」写进回显。
+  const hours = hoursInput.value.trim() === '' ? NaN : Number(hoursInput.value);
+  const cap = capInput.value.trim() === '' ? NaN : Number(capInput.value);
+  document.getElementById('qzZeroWindow').hidden = hours !== 0;
+  document.getElementById('qzZeroWarn').hidden = cap !== 0;
+  document.getElementById('qzPerDay').textContent = qzPerDayText(hours, cap);
+}
+function qzPublicSelected() {
+  return document.getElementById('qzUgcRight').value === '1';
+}
+function qzParamsReady() {
+  return qzoneWindowReported && lastQzone !== null && lastQzone !== undefined;
+}
+function syncQzoneSaveButton() {
+  const button = document.getElementById('qzSaveParams');
+  const isPublic = qzPublicSelected();
+  button.textContent = qzoneSaving ? '保存中…' : (isPublic ? '保存并允许所有人可见' : '保存参数');
+  // 能点要三件事同时成立：读到了状态、桥接上报了频率参数、选「所有人可见」时已经勾过「我已知晓」。
+  button.disabled = qzoneSaving || !qzParamsReady()
+    || (isPublic && document.getElementById('qzAckPublic').checked !== true);
+}
+function syncQzoneDanger() {
+  const isPublic = qzPublicSelected();
+  document.getElementById('qzPublicWarn').hidden = !isPublic;
+  // 换回非公开档就撤掉勾选：下次再选「所有人可见」必须重新确认一次，不能靠上一次的勾。
+  if (!isPublic) document.getElementById('qzAckPublic').checked = false;
+  syncQzoneSaveButton();
+}
+function renderQzoneParams(qz) {
+  const hoursInput = document.getElementById('qzWindowHours');
+  const capInput = document.getElementById('qzWindowCap');
+  const ugcSelect = document.getElementById('qzUgcRight');
+  const hours = qzNum(qz && qz.windowHours);
+  const cap = qzNum(qz && qz.windowCap);
+  const reported = Number.isFinite(hours) && Number.isFinite(cap);
+  qzoneWindowReported = reported;
+  // 回填只在「用户没动过 + 控件没拿到焦点」时做：这张卡每几秒重绘一次，
+  // 正在敲的数字不能被自己人抹掉，刚选好的可见范围也不能在点「我已知晓」那一瞬间被改回去。
+  const canFill = !qzoneParamsDirty;
+  if (canFill && document.activeElement !== hoursInput) {
+    hoursInput.value = String(reported ? hours : QZONE_WINDOW_FALLBACK.hours);
+  }
+  if (canFill && document.activeElement !== capInput) {
+    capInput.value = String(reported ? cap : QZONE_WINDOW_FALLBACK.cap);
+  }
+  const right = Number(qz && qz.ugcRight);
+  if (canFill && document.activeElement !== ugcSelect && Object.prototype.hasOwnProperty.call(QZONE_RIGHT_LABELS, right)) {
+    ugcSelect.value = String(right);
+  }
+  const hasState = qz !== null && qz !== undefined;
+  const editable = hasState && reported;
+  hoursInput.disabled = !editable;
+  capInput.disabled = !editable;
+  ugcSelect.disabled = !editable;
+  syncQzoneEchoes();
+  syncQzoneDanger();
+  // 旧版桥接没有这两个键：给一句明话并置灰，免得点出一个 400 让人以为界面坏了。
+  const noteShown = document.getElementById('qzParamsMsg').textContent === QZONE_NO_WINDOW_NOTE;
+  if (hasState && !reported) setQzoneParamsMsg(QZONE_NO_WINDOW_NOTE, '');
+  else if (noteShown) setQzoneParamsMsg('', '');
+}
+// 夹取时记下夹了哪一项：回执要能点名，不能悄悄把 500 改成 100 还说「已保存」。
+function qzClampInput(value, min, max, key, clamped) {
+  const rounded = Math.trunc(value);
+  if (rounded < min) {
+    clamped.push(key);
+    return min;
+  }
+  if (rounded > max) {
+    clamped.push(key);
+    return max;
+  }
+  return rounded;
+}
+// 判空一律显式写：本页 `Number(v) || 默认值` 会把合法的 0 吞成默认值，新代码不学这一手。
+function readQzoneParams() {
+  const hoursInput = document.getElementById('qzWindowHours');
+  const capInput = document.getElementById('qzWindowCap');
+  // valueAsNumber 对空串和乱填都给 NaN：这两种情况一律不发请求，让用户先把框填对。
+  const hoursValue = hoursInput.valueAsNumber;
+  if (!Number.isFinite(hoursValue)) return { ok: false, error: '时间窗要填 0–24 之间的数字' };
+  const capValue = capInput.valueAsNumber;
+  if (!Number.isFinite(capValue)) return { ok: false, error: '上限要填 0–100 之间的数字' };
+  const clamped = [];
+  const windowHours = qzClampInput(hoursValue, QZONE_WINDOW_LIMITS.hoursMin, QZONE_WINDOW_LIMITS.hoursMax, 'windowHours', clamped);
+  const windowCap = qzClampInput(capValue, QZONE_WINDOW_LIMITS.capMin, QZONE_WINDOW_LIMITS.capMax, 'windowCap', clamped);
+  const ugcRight = Number(document.getElementById('qzUgcRight').value);
+  if (!Object.prototype.hasOwnProperty.call(QZONE_RIGHT_LABELS, ugcRight)) {
+    return { ok: false, error: '可见范围只支持 1 / 4 / 64' };
+  }
+  // enabled 带上当前开关态：这个端点是部分更新，漏了也不会被改，但「保存这一行」不该顺手动开关。
+  const enabled = lastQzone !== null && lastQzone !== undefined && lastQzone.enabled === true;
+  return { ok: true, clamped, next: { enabled, windowHours, windowCap, ugcRight } };
+}
+// 回执是逐字定稿的，别顺手改标点：夹取必须点名夹了哪一项，两项都夹按「时间窗 → 上限」，
+// 上限 0 补「已暂停发布」，时间窗 0 把「每 0 小时」换成「按自然日」。
+function qzSavedText(saved, clamped, serverClamped) {
+  const hours = qzNum(saved.windowHours);
+  const cap = qzNum(saved.windowCap);
+  const keys = ['windowHours', 'windowCap'].filter((key) => clamped.includes(key)
+    || (Array.isArray(serverClamped) && serverClamped.includes(key)));
+  const notes = keys.map((key) => (key === 'windowHours'
+    ? '时间窗已夹到 ' + hours + ' 小时'
+    : '上限已夹到 ' + cap));
+  if (cap === 0) notes.push('已暂停发布');
+  const body = hours > 0 ? '每 ' + hours + ' 小时最多 ' + cap + ' 条' : '按自然日最多 ' + cap + ' 条';
+  return '已保存：' + body + (notes.length > 0 ? '（' + notes.join('，') + '）' : '')
+    + '，' + qzoneRightLabel(saved.ugcRight) + '（不重启即生效）';
+}
+async function saveQzoneParams() {
+  if (qzoneSaving || !qzParamsReady()) return;
+  const parsed = readQzoneParams();
+  if (!parsed.ok) {
+    // 本地就不成立（空着、或者不是数字）：不发请求，省得把 400 当成「保存失败」。
+    setQzoneParamsMsg('没有保存：' + parsed.error, 'err');
+    return;
+  }
+  qzoneSaving = true;
+  syncQzoneSaveButton();
+  setQzoneParamsMsg('正在保存…', '');
+  let receipt = '';
+  let legacyBridge = false;
+  try {
+    const r = await api('/api/qzone/config', 'POST', parsed.next);
+    if (!r || r.ok !== true) throw new Error((r && r.error) || '桥接拒绝了这次改动');
+    // 旧版桥接只认 enabled，会把 windowHours/windowCap/ugcRight 当没看见，却照样回 ok：
+    // 没有 qzone 回显就说明这几个参数一个字都没落盘，绝不能出绿字把「没保存」说成「已保存」。
+    const echo = r.qzone && typeof r.qzone === 'object' ? r.qzone : null;
+    if (!echo || !Number.isFinite(qzNum(echo.windowCap))) {
+      legacyBridge = true;
+    } else {
+      // 回执按「实际生效值」写：桥接若又夹了一道，就报它夹完的结果，别报我们本来想写的那份。
+      receipt = qzSavedText({
+        windowHours: Number.isFinite(qzNum(echo.windowHours)) ? qzNum(echo.windowHours) : parsed.next.windowHours,
+        windowCap: Number.isFinite(qzNum(echo.windowCap)) ? qzNum(echo.windowCap) : parsed.next.windowCap,
+        ugcRight: Number.isFinite(qzNum(echo.ugcRight)) ? qzNum(echo.ugcRight) : parsed.next.ugcRight
+      }, parsed.clamped, r.clamped);
+    }
+  } catch {
+    // 契约里失败就这一句（开关失败也是它）：不猜是读盘还是写盘出的问题。
+    setQzoneParamsMsg('写入 config.json 失败，这次没有生效', 'err');
+  } finally {
+    qzoneSaving = false;
+    syncQzoneSaveButton();
+  }
+  // 旧桥接：参数没进去。保留 qzoneParamsDirty 让框里还是用户填的数，也不重拉（拉回来的还是旧值，会把输入框改掉）。
+  if (legacyBridge) {
+    setQzoneParamsMsg('桥接还是旧版本，参数这次没有保存进去；重启桥接后重新保存一次（这次只改了开关）', 'err');
+    return;
+  }
+  // 失败时回执已经写好，别再往下走把红字盖掉。
+  if (receipt === '') return;
+  // 存下了，编辑就不算「未保存」了：这次重拉该把框里改成服务端的实际生效值。
+  qzoneParamsDirty = false;
+  setQzoneParamsMsg(receipt, 'ok');
+  try {
+    // 必须重拉：窗口参数一换，windowCount / nextAllowedAt 全是旧值，不重拉用户会以为没生效。
+    await refreshQzone(true);
+  } catch {
+    // 读数没刷新不影响「已经存下了」这件事：回执保持绿字，刷新页面就能看到新读数。
+  }
+}
+
 // 3 秒轮询会把同一份流水拉 20 次/分钟，没必要：10 秒内只重绘（倒计时本地现算，照样走字）。
 // 注意这里**不碰** #qzMsg —— 那是开关/删除的操作回执，重绘不该把刚写上去的结果擦掉。
+// #qzParamsMsg 同理：只有「桥接缺字段」那句提示会随重绘进退，保存回执不会被盖掉。
 async function refreshQzone(force = false) {
   if (!force && qzoneFetchedAt > 0 && Date.now() - qzoneFetchedAt < 10000) {
     renderQzone(lastQzone);
@@ -3350,6 +3633,22 @@ async function deleteQzone(tid) {
   }
 }
 document.getElementById('qzToggle').addEventListener('click', toggleQzone);
+// 参数行：input 事件现算回显与两个提示，change 事件管危险区，保存自己防连点。
+// 动过就记 dirty：之后的重绘不再回填，免得把还没保存的编辑按上一次拉到的状态改回去。
+document.getElementById('qzWindowHours').addEventListener('input', () => {
+  qzoneParamsDirty = true;
+  syncQzoneEchoes();
+});
+document.getElementById('qzWindowCap').addEventListener('input', () => {
+  qzoneParamsDirty = true;
+  syncQzoneEchoes();
+});
+document.getElementById('qzUgcRight').addEventListener('change', () => {
+  qzoneParamsDirty = true;
+  syncQzoneDanger();
+});
+document.getElementById('qzAckPublic').addEventListener('change', syncQzoneSaveButton);
+document.getElementById('qzSaveParams').addEventListener('click', saveQzoneParams);
 // 行是动态渲染的，监听器挂在容器上（事件委托），重绘后不用重新绑。
 document.getElementById('qzList').addEventListener('click', (event) => {
   const button = event.target.closest('button[data-tid]');

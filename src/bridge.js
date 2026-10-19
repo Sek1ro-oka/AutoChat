@@ -21,7 +21,16 @@ import { mdToPlain, splitForQQ, truncateText, truncateTextTail } from './md-to-p
 import { SENSITIVE_RE } from './sensitive.js';
 // QQ 空间（说说）：审计/配额/可见范围/记录裁剪全是纯逻辑 + 零 I/O，放在独立模块里。
 // 时钟也不由它读：now 一律由这一层（I/O 层）传 Date.now() 进去，纯模块才好测。
-import { auditContent, checkQuota, normalizeQzoneConfig, pickUgcRight, prunePosts } from './qzone-post.js';
+// applyQzoneConfigUpdate 是控制台改配置的**唯一**校验源；usesLegacyDailyCap 只决定要不要打迁移日志。
+import {
+  applyQzoneConfigUpdate,
+  auditContent,
+  checkQuota,
+  normalizeQzoneConfig,
+  pickUgcRight,
+  prunePosts,
+  usesLegacyDailyCap,
+} from './qzone-post.js';
 import { looksLikeUnfinished } from './v2-wait.js';
 import {
   createStallWatchdog, cleanZombieSession, parseWatchdogEnabled,
@@ -939,6 +948,13 @@ function loadConfig() {
   // enabled:false。所以「config.json 里没有 qzone 段」= 功能关着，而不是 undefined
   // 一路传到端点里被当成"没配置所以随便发"。
   cfg.qzone = normalizeQzoneConfig(file.qzone);
+  // 老配置自动迁移（T-008）：没有 windowCap、但有 dailyCap 时，windowCap 取 dailyCap、
+  // windowHours 取出厂 24 —— 原来的「一天 N 条」等价变成「24 小时内 N 条」，用户不用手改。
+  // 迁移只发生在内存里：没人点控制台就不会动用户的 config.json，旧键也不会被删。
+  if (usesLegacyDailyCap(file.qzone)) {
+    const legacyCap = file.qzone?.dailyCap;
+    log(`[qzone] 老配置迁移：没有 windowCap，按 dailyCap=${legacyCap} 换算成「每 ${cfg.qzone.windowHours} 小时最多 ${cfg.qzone.windowCap} 条」；dailyCap / minIntervalMs 已不再参与限流（旧键保留在 config.json 里）`);
+  }
 
   // 人格卡注入上限（字符）。历史硬编码 6000，现在可配：每条约 4~6k token 的成本护栏。
   cfg.role = { maxInjectChars: ROLE_INJECT_MAX_CHARS_DEFAULT, ...(file.role ?? {}) };
@@ -1344,7 +1360,7 @@ async function oneBotActionNested(cfg, action, params, timeoutMs = 120000) {
 }
 
 // ── QQ 空间（说说）：状态文件与 OneBot 调用的薄封装 ─────────────────────────
-// 判定逻辑（内容审计 / 日限与间隔 / 可见范围 / 记录裁剪）全在 src/qzone-post.js，
+// 判定逻辑（内容审计 / 滑动窗口配额 / 可见范围 / 记录裁剪）全在 src/qzone-post.js，
 // 那个模块零 I/O 零依赖。这里只做三件事：读写 state/qzone-posts.json、
 // 判「这次失败值不值得重试」、把请求交给 OneBot。
 const QZONE_STATE_FILE = path.join(STATE_DIR, 'qzone-posts.json');
@@ -1356,10 +1372,17 @@ function readQzoneState() {
   return { version: 1, posts: Array.isArray(raw?.posts) ? raw.posts : [] };
 }
 
-// atomicWriteJson 自带 mkdir + 临时文件 + rename，不用自己写；
-// 统一走 prunePosts(50) 兜一层，避免别处塞进过长的数组。
-function writeQzoneState(posts) {
-  atomicWriteJson(QZONE_STATE_FILE, { version: 1, posts: prunePosts(posts, 50) });
+// 保留条数跟着上限走：写死 50 的话，windowCap > 50 时窗口内计数永远到不了上限、配额被静默穿透。
+// 多留 20 条垫在窗口边缘外，滑动计数和删除操作都还有据可查（windowCap: 0 时 keep 仍是 50）。
+function qzoneKeepPosts(windowCap) {
+  const capRaw = Number(windowCap);
+  const cap = Number.isFinite(capRaw) ? Math.max(0, Math.trunc(capRaw)) : 0;
+  return Math.max(50, cap + 20);
+}
+
+// atomicWriteJson 自带 mkdir + 临时文件 + rename，不用自己写；裁剪统一走 prunePosts。
+function writeQzoneState(posts, windowCap) {
+  atomicWriteJson(QZONE_STATE_FILE, { version: 1, posts: prunePosts(posts, qzoneKeepPosts(windowCap)) });
 }
 
 // 只有「请求根本没送到 / 没能等到回话」才值得重试一次。SnowLuma 用 retcode 表达的业务性
@@ -3630,19 +3653,24 @@ async function main() {
             sendJson({ ok: false, layer: 'audit', error: '内容未通过审计', reasons: audit.reasons, hits: audit.hits });
             return;
           }
-          // ③ 频率闸门：现读状态文件（不缓存），日上限与最小间隔都由纯函数判定；
+          // ③ 频率闸门：现读状态文件（不缓存），滑动窗口（windowHours / windowCap）由纯函数判定；
           //    retryAfterMs 也从判定结果里取，不在这里另算一个数字。
           const state = readQzoneState();
           const now = Date.now();
           const quota = checkQuota({ now, posts: state.posts, cfg: qz });
           if (!quota.ok) {
+            // windowCap 为 0 是用户明确按了暂停：别让模型以为「等一会儿就有额度」。
+            const paused = qz.windowCap <= 0;
             sendJson({
               ok: false,
               layer: 'quota',
-              error: quota.reason === 'daily_cap' ? '今天的额度用完了' : '离上一条太近，再等等',
+              error: paused ? '说说已暂停（windowCap 为 0）' : `最近 ${qz.windowHours} 小时内已发 ${quota.windowCount} 条，额度用完了`,
               reason: quota.reason,
               retryAfterMs: quota.retryAfterMs,
-              todayCount: quota.todayCount
+              todayCount: quota.todayCount,
+              // windowCap 一并回传：调用方据此区分「发满」与「已暂停」，不用解析文案。
+              windowCount: quota.windowCount,
+              windowCap: qz.windowCap
             });
             return;
           }
@@ -3664,7 +3692,7 @@ async function main() {
           const record = { tid: String(tid), content: content.trim(), ugcRight, createdAt: now, reason };
           const todayCount = quota.todayCount + 1;
           try {
-            writeQzoneState([record, ...state.posts]);
+            writeQzoneState([record, ...state.posts], qz.windowCap);
           } catch (error) {
             // 已经发出去了：落盘失败不能反过来说「没发成功」，如实记日志但把 tid 交给调用方。
             log(`[qzone] 记录落盘失败: ${error?.message ?? error}`);
@@ -3713,7 +3741,7 @@ async function main() {
           const state = readQzoneState();
           const kept = state.posts.filter((post) => String(post?.tid ?? '') !== tid);
           try {
-            writeQzoneState(kept);
+            writeQzoneState(kept, qz.windowCap);
           } catch (error) {
             log(`[qzone] 删除后落盘失败: ${error?.message ?? error}`);
           }
@@ -3734,43 +3762,66 @@ async function main() {
             enabled: qz.enabled,
             posts: prunePosts(state.posts, 10),
             todayCount: quota.todayCount,
-            // 控制台读数行要这两个数（今日上限、默认可见范围）：它们只活在归一化后的配置里，
-            // 不吐出来的话网页端只能猜或者干脆不显示 —— 那等于让「配置」在 UI 上不可见。
+            // 控制台读数行要这几个数（窗口时长 / 窗口上限 / 窗口内已发条数 / 默认可见范围）：
+            // 它们只活在归一化后的配置里，不吐出来的话网页端只能猜 —— 那等于让「配置」在 UI 上不可见。
+            windowHours: qz.windowHours,
+            windowCap: qz.windowCap,
+            windowCount: quota.windowCount,
+            // legacy：老控制台与老脚本还在读 dailyCap，删掉会让它们显示成「未配置」。
             dailyCap: qz.dailyCap,
             ugcRight: pickUgcRight(qz),
-            // 0 = 现在就能发；否则是一个绝对时间戳（调用方自己决定怎么显示）。
-            nextAllowedAt: quota.ok ? 0 : now + quota.retryAfterMs
+            // 0 = 现在就能发（含 windowCap 为 0 的「已暂停」：那不是等时间能解决的）；
+            // 否则是一个绝对时间戳（调用方自己决定怎么显示）。
+            nextAllowedAt: quota.ok || qz.windowCap <= 0 ? 0 : now + quota.retryAfterMs
           });
           return;
         }
-        // 开关：POST body { enabled: boolean }。
-        // 写的是 config.json 里的 qzone.enabled —— 这是运行配置，不是运行时状态：只改内存的话，
-        // 重启一次就回到文件里的旧值，控制台上那个开关会「自己弹回去」。
+        // 配置：POST body 支持四键的**部分更新**（enabled / windowHours / windowCap / ugcRight）。
+        // 写的是 config.json 里的 qzone.*：这是运行配置，不是运行时状态 —— 只改内存的话，
+        // 重启一次就回到文件里的旧值，控制台上那些输入框会「自己弹回去」。
+        // 顺序是硬的：校验 → 读原始文件 → 写盘 → 换内存。校验只有一套（applyQzoneConfigUpdate
+        // → normalizeQzoneConfig），这里不再写第二份范围判断，免得「控制台放行、启动时又被夹一次」。
         if (req.method === 'POST' && url.pathname === '/api/qzone/config') {
           const body = await readBody();
-          if (typeof body.enabled !== 'boolean') {
-            sendJson({ ok: false, error: 'enabled 必须是布尔值' }, 400);
+          // 以内存里当前生效的值为基线：只改一个键时，其余三个键必须保持现值，不能回落出厂值。
+          const before = normalizeQzoneConfig(cfg.qzone);
+          const patch = applyQzoneConfigUpdate(before, body);
+          if (!patch.ok) {
+            sendJson({ ok: false, error: patch.error }, 400);
             return;
           }
-          const enabled = body.enabled;
-          const before = normalizeQzoneConfig(cfg.qzone).enabled;
+          // 四个键一起落盘（哪怕这次只改了一个）：老配置的 dailyCap 迁移结果因此会顺手 materialize，
+          // 之后启动就不会再走迁移分支。
+          const next = {
+            enabled: patch.qzone.enabled,
+            windowHours: patch.qzone.windowHours,
+            windowCap: patch.qzone.windowCap,
+            ugcRight: patch.qzone.ugcRight
+          };
           const configFile = path.join(ROOT, 'config.json');
-          // 读原始文件、只换一个键：loadConfig() 返回的是归一化后的 cfg，写回会把默认值一起
-          // materialize、还会丢未知键 —— 等于把用户的 config.json 整份重写。
-          const file = readConfigObject(configFile);
-          file.qzone = { ...(file.qzone ?? {}), enabled };
           try {
-            // 临时文件 + rename（atomicWriteJson）：写到一半断电不会留下半个 config.json。
+            // 读原始文件、只换这四个键：loadConfig() 返回的是归一化后的 cfg，写回会把默认值一起
+            // materialize、还会丢未知键 —— 等于把用户的 config.json 整份重写。dailyCap /
+            // minIntervalMs 这些 legacy 键因此原样留在文件里，回滚旧版本时也不会炸。
+            const file = readConfigObject(configFile);
+            file.qzone = { ...(file.qzone ?? {}), ...next };
+            // 临时文件 + rename（atomicWriteJson）：不会留下半个 config.json（不保证断电场景）。
             atomicWriteJson(configFile, file);
           } catch (error) {
-            log(`[qzone] 控制台：开关写盘失败: ${error?.message ?? error}`);
-            sendJson({ ok: false, error: '写入 config.json 失败，已记日志' }, 500);
+            log(`[qzone] 控制台：写 config.json 失败: ${error?.message ?? error}`);
+            sendJson({ ok: false, error: '读写 config.json 失败，已记日志' }, 500);
             return;
           }
           // 落盘成功之后才改内存：反过来的话会出现「文件没改成、进程内却是新值」，重启后行为莫名回滚。
-          cfg.qzone = { ...(cfg.qzone ?? {}), enabled };
-          if (before !== enabled) log(`[qzone] 控制台：说说功能已 ${enabled ? '开启' : '关闭'}`);
-          sendJson({ ok: true, enabled, configPath: 'config.json' });
+          cfg.qzone = { ...(cfg.qzone ?? {}), ...next };
+          if (before.enabled !== next.enabled) log(`[qzone] 控制台：说说功能已 ${next.enabled ? '开启' : '关闭'}`);
+          const tuned = [];
+          if (before.windowHours !== next.windowHours) tuned.push(`windowHours=${next.windowHours}`);
+          if (before.windowCap !== next.windowCap) tuned.push(`windowCap=${next.windowCap}`);
+          if (before.ugcRight !== next.ugcRight) tuned.push(`ugcRight=${next.ugcRight}`);
+          if (tuned.length > 0) log(`[qzone] 控制台：参数已更新 ${tuned.join(' ')}`);
+          // clamped 是「越界值被夹回边界」的键名，控制台据此提示，而不是谎报原样保存。
+          sendJson({ ok: true, configPath: 'config.json', enabled: next.enabled, qzone: next, clamped: patch.clamped });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/presets') {

@@ -1,12 +1,15 @@
 // QQ 空间说说纯逻辑模块的单测（`node scripts/test-qzone-post.mjs`，成功 exit 0，失败 exit 1）。
 //
 // 覆盖任务书 §四 的五组，每条规则正反例各一：
-//   ① normalizeQzoneConfig：默认值 / clamp 上下界 / ugcRight 收窄 / adminQQ 过滤 / 冻结
+//   ① normalizeQzoneConfig：默认值 / clamp 上下界 / ugcRight 收窄 / adminQQ 过滤 / 冻结 /
+//      新键 windowHours·windowCap（含两个 0）/ 老配置 dailyCap 迁移
 //   ② auditContent：length、url、phone、email、idcard、solicit 六条规则 + 全量收集 + 理由文案
-//   ③ checkQuota：空记录 / 间隔 / 每日上限 / 跨日 / dailyCap=1 边界 / 时钟回拨
+//   ③ checkQuota：滑动窗口（windowHours·windowCap）/ 两个 0 的语义 / 边界与 retryAfterMs /
+//      legacy 键不再参与判定
 //   ④ pickUgcRight：1|4|64 保留，16/128/缺省回落 4
-//   ⑤ prunePosts：截断到 50、按时间倒序、剔除脏数据、不改输入
-// 另加 ⑥ 模块纯净性：源码里没有 import / require / node: 内置模块（零依赖、零 I/O 是硬约束）。
+//   ⑤ prunePosts：截断、按时间倒序、剔除脏数据、不改输入
+// 另加 ⑥ 模块纯净性：源码里没有 import / require / node: 内置模块（零依赖、零 I/O 是硬约束），
+// 以及 ⑦ 控制台配置更新（applyQzoneConfigUpdate）：只认四键、取值校验只有一套、越界夹回。
 //
 // 时间全部用 `Date.parse('...+08:00')` 造出来的假时间戳，不读系统时钟、不碰文件与网络
 // （⑥ 只读本模块自己的源码文本）。
@@ -17,8 +20,12 @@ import { fileURLToPath } from 'node:url';
 import {
   QZONE_DEFAULTS,
   QZONE_UGC_RIGHTS,
+  QZONE_LIMITS,
   QZONE_AUDIT_REASONS,
+  QZONE_CONFIG_KEYS,
   normalizeQzoneConfig,
+  usesLegacyDailyCap,
+  applyQzoneConfigUpdate,
   auditContent,
   checkQuota,
   pickUgcRight,
@@ -92,6 +99,40 @@ check('冻结后赋值无效（严格模式抛错也算）', (() => {
   return frozenCfg.dailyCap === 3;
 })());
 
+// ── ①b 新键 windowHours / windowCap 与老配置迁移 ───────────────────────────
+console.log('①b 新键与老配置迁移');
+
+check('默认 windowHours=24 / windowCap=2', dflt.windowHours === 24 && dflt.windowCap === 2);
+check('QZONE_LIMITS 声明两个新键的区间', JSON.stringify(QZONE_LIMITS.windowHours) === '[0,24]' && JSON.stringify(QZONE_LIMITS.windowCap) === '[0,100]');
+
+check('windowHours=0 存活（不被吞成默认 24）', normalizeQzoneConfig({ windowHours: 0 }).windowHours === 0);
+check('windowCap=0 存活（= 暂停，不被吞成默认 2）', normalizeQzoneConfig({ windowCap: 0 }).windowCap === 0);
+check('windowCap=0 与 windowHours=0 可以同时成立', (() => {
+  const cfg = normalizeQzoneConfig({ windowHours: 0, windowCap: 0 });
+  return cfg.windowHours === 0 && cfg.windowCap === 0;
+})());
+
+check('windowHours 上界：48 → 24', normalizeQzoneConfig({ windowHours: 48 }).windowHours === 24);
+check('windowHours 取整：2.9 → 2', normalizeQzoneConfig({ windowHours: 2.9 }).windowHours === 2);
+check('windowHours 反例：非数字回落 24', normalizeQzoneConfig({ windowHours: 'abc' }).windowHours === 24 && normalizeQzoneConfig({ windowHours: null }).windowHours === 24 && normalizeQzoneConfig({ windowHours: true }).windowHours === 24);
+check('windowHours 接受字符串数字 "6"', normalizeQzoneConfig({ windowHours: '6' }).windowHours === 6);
+
+check('windowCap 上界：999 → 100', normalizeQzoneConfig({ windowCap: 999 }).windowCap === 100);
+check('windowCap 取整：2.9 → 2', normalizeQzoneConfig({ windowCap: 2.9 }).windowCap === 2);
+check('windowCap 反例：非数字回落 2', normalizeQzoneConfig({ windowCap: 'x' }).windowCap === 2 && normalizeQzoneConfig({ windowCap: null }).windowCap === 2);
+check('windowCap 接受字符串数字 "5"', normalizeQzoneConfig({ windowCap: '5' }).windowCap === 5);
+
+check('迁移判定：只有 dailyCap 才算老配置', usesLegacyDailyCap({ dailyCap: 2 }) === true && usesLegacyDailyCap({ windowCap: 2, dailyCap: 2 }) === false && usesLegacyDailyCap({ windowCap: 2 }) === false && usesLegacyDailyCap({}) === false && usesLegacyDailyCap(null) === false);
+
+const legacy = normalizeQzoneConfig({ dailyCap: 5 });
+check('迁移：windowCap ← dailyCap，windowHours ← 24', legacy.windowCap === 5 && legacy.windowHours === 24);
+check('迁移：旧键 dailyCap 仍能被读出', legacy.dailyCap === 5 && legacy.minIntervalMs === 6 * HOUR);
+check('迁移：dailyCap 超出 0–100 时夹到 100', normalizeQzoneConfig({ dailyCap: 999 }).windowCap === 100);
+check('迁移：dailyCap=0 迁移成 windowCap=0（暂停）', normalizeQzoneConfig({ dailyCap: 0 }).windowCap === 0);
+check('新键优先：同时给了 windowCap 与 dailyCap 时不迁移', normalizeQzoneConfig({ dailyCap: 5, windowCap: 3 }).windowCap === 3);
+check('没给 windowCap 也没给 dailyCap → 出厂 2/24（不凭空迁移）', normalizeQzoneConfig({}).windowCap === 2 && normalizeQzoneConfig({ ugcRight: 1 }).windowCap === 2);
+check('迁移不改写 dailyCap 的 legacy 归一（上界仍是 10）', normalizeQzoneConfig({ dailyCap: 99 }).dailyCap === 10);
+
 // ── ② auditContent ─────────────────────────────────────────────────────────
 console.log('② auditContent');
 
@@ -163,45 +204,63 @@ check('ok 等价于「理由为空」', shape.ok === false && shape.ok === (shap
 console.log('③ checkQuota');
 
 const emptyQuota = checkQuota({ now: sh(`${T}T10:00:00`), posts: [], cfg: {} });
-check('空 posts → 放行且 todayCount=0', emptyQuota.ok === true && emptyQuota.reason === null && emptyQuota.retryAfterMs === 0 && emptyQuota.todayCount === 0);
+check('空 posts → 放行且 todayCount/windowCount=0', emptyQuota.ok === true && emptyQuota.reason === null && emptyQuota.retryAfterMs === 0 && emptyQuota.todayCount === 0 && emptyQuota.windowCount === 0);
 check('posts 缺失/脏数据不抛错', checkQuota({ now: sh(`${T}T10:00:00`), posts: undefined }).ok === true && checkQuota({ now: sh(`${T}T10:00:00`), posts: [{ tid: 'x' }, null] }).todayCount === 0);
 
 const now5 = sh(`${T}T10:00:00`);
 const fiveMinAgo = checkQuota({ now: now5, posts: [{ createdAt: now5 - 5 * 60_000 }], cfg: {} });
-check('刚发过 5 分钟 → interval', fiveMinAgo.ok === false && fiveMinAgo.reason === 'interval' && fiveMinAgo.todayCount === 1);
-check('interval 的 retryAfterMs = 6h − 5min', fiveMinAgo.retryAfterMs === 6 * HOUR - 5 * 60_000, String(fiveMinAgo.retryAfterMs));
+check('刚发过 5 分钟但窗口没满 → 放行（最小间隔已取消）', fiveMinAgo.ok === true && fiveMinAgo.reason === null && fiveMinAgo.windowCount === 1 && fiveMinAgo.todayCount === 1);
 
 const nowT = sh(`${T}T10:00:00`);
-const twoToday = checkQuota({ now: nowT, posts: [{ createdAt: nowT - 7 * HOUR }, { createdAt: nowT - 2 * HOUR }], cfg: {} });
-check('今天已 2 条 → daily_cap', twoToday.ok === false && twoToday.reason === 'daily_cap' && twoToday.todayCount === 2);
-check('daily_cap 的 retryAfterMs 落在 (0, 24h]', twoToday.retryAfterMs > 0 && twoToday.retryAfterMs <= DAY, String(twoToday.retryAfterMs));
-check('daily_cap 的 retryAfterMs 正好到次日零点（10:00 → 14h）', twoToday.retryAfterMs === 14 * HOUR, String(twoToday.retryAfterMs));
-const atMidnight = checkQuota({ now: sh(`${T}T00:00:00`), posts: [{ createdAt: sh(`${T}T00:00:00`) }], cfg: { dailyCap: 1 } });
-check('daily_cap 边界：正好零点 → 整 24h', atMidnight.retryAfterMs === DAY, String(atMidnight.retryAfterMs));
+const twoInWindow = checkQuota({ now: nowT, posts: [{ createdAt: nowT - 7 * HOUR }, { createdAt: nowT - 2 * HOUR }], cfg: {} });
+check('24h 窗口内已 2 条 → daily_cap', twoInWindow.ok === false && twoInWindow.reason === 'daily_cap' && twoInWindow.windowCount === 2 && twoInWindow.todayCount === 2);
+check('daily_cap 的 retryAfterMs 落在 (0, 24h]', twoInWindow.retryAfterMs > 0 && twoInWindow.retryAfterMs <= DAY, String(twoInWindow.retryAfterMs));
+check('retryAfterMs = 最早一条滑出窗口的时刻 − now（20h 前 → 4h）', (() => {
+  const at = sh(`${T}T10:00:00`);
+  const quota = checkQuota({ now: at, posts: [{ createdAt: at - 20 * HOUR }, { createdAt: at - HOUR }], cfg: {} });
+  return quota.retryAfterMs === 4 * HOUR;
+})(), String(checkQuota({ now: nowT, posts: [{ createdAt: nowT - 20 * HOUR }, { createdAt: nowT - HOUR }], cfg: {} }).retryAfterMs));
 
-const crossNow = sh(`${T}T00:01:00`);
-const crossPost = sh('2026-10-18T23:59:00');
-const cross = checkQuota({ now: crossNow, posts: [{ createdAt: crossPost }], cfg: {} });
-check('跨日：今日计数归零', cross.todayCount === 0, String(cross.todayCount));
-check('跨日：间隔仍按最近一条算（2 分钟前发过 → interval）', cross.ok === false && cross.reason === 'interval' && cross.retryAfterMs === 6 * HOUR - 2 * 60_000, String(cross.retryAfterMs));
-const crossLater = checkQuota({ now: sh(`${T}T06:30:00`), posts: [{ createdAt: crossPost }], cfg: {} });
-check('跨日 6.5 小时后放行', crossLater.ok === true && crossLater.todayCount === 0 && crossLater.retryAfterMs === 0);
-const utcEdge = checkQuota({ now: sh(`${T}T08:00:00`), posts: [{ createdAt: sh(`${T}T07:00:00`) }], cfg: {} });
-check('日界按 UTC+8 而非 UTC（08:00 与 07:00 同属北京今日）', utcEdge.todayCount === 1, String(utcEdge.todayCount));
+const outsideNow = sh(`${T}T10:00:00`);
+const outside = checkQuota({ now: outsideNow, posts: [{ createdAt: outsideNow - 25 * HOUR }, { createdAt: outsideNow - HOUR }], cfg: {} });
+check('24 小时外的记录不计入 windowCount', outside.ok === true && outside.windowCount === 1 && outside.todayCount === 1);
+const onEdge = checkQuota({ now: outsideNow, posts: [{ createdAt: outsideNow - 24 * HOUR }, { createdAt: outsideNow - HOUR }], cfg: {} });
+check('正好 24 小时前已经滑出窗口（左开区间）', onEdge.ok === true && onEdge.windowCount === 1);
 
-const capNow = sh(`${T}T10:00:00`);
-const cap1 = checkQuota({ now: capNow, posts: [{ createdAt: capNow - 7 * HOUR }], cfg: { dailyCap: 1 } });
-check('dailyCap=1：今天 1 条即 daily_cap', cap1.ok === false && cap1.reason === 'daily_cap' && cap1.todayCount === 1);
-const cap1Free = checkQuota({ now: capNow, posts: [{ createdAt: sh('2026-10-18T09:00:00') }], cfg: { dailyCap: 1 } });
-check('dailyCap=1：今天 0 条且已过间隔 → 放行', cap1Free.ok === true && cap1Free.todayCount === 0);
-check('dailyCap 的 clamp 在 checkQuota 内生效（0 → 1）', checkQuota({ now: capNow, posts: [{ createdAt: capNow - 7 * HOUR }], cfg: { dailyCap: 0 } }).reason === 'daily_cap');
+const hourly = checkQuota({ now: outsideNow, posts: [{ createdAt: outsideNow - 2 * HOUR }, { createdAt: outsideNow - 30 * 60_000 }], cfg: { windowHours: 1 } });
+check('windowHours=1 → 2 小时前那条不算（窗口跟着变短）', hourly.ok === true && hourly.windowCount === 1, String(hourly.windowCount));
 
-check('也接受整个 state 对象（容错）', checkQuota({ now: capNow, posts: { version: 1, posts: [{ createdAt: capNow - 2 * HOUR }] }, cfg: {} }).todayCount === 1);
-const futurePost = checkQuota({ now: capNow, posts: [{ createdAt: capNow + 10 * 60_000 }], cfg: {} });
-check('时钟回拨（未来时间戳）→ interval 且 retry 不为负', futurePost.ok === false && futurePost.reason === 'interval' && futurePost.retryAfterMs >= 6 * HOUR, String(futurePost.retryAfterMs));
-const noNowA = checkQuota({ posts: [{ createdAt: sh(`${T}T10:00:00`) }] });
-const noNowB = checkQuota({ posts: [{ createdAt: sh(`${T}T10:00:00`) }] });
-check('未注入 now → 退化为「最近一条」，两次调用逐字节一致（不读系统时钟）', JSON.stringify(noNowA) === JSON.stringify(noNowB) && noNowA.reason === 'interval' && noNowA.retryAfterMs === 6 * HOUR, JSON.stringify(noNowA));
+const paused = checkQuota({ now: outsideNow, posts: [], cfg: { windowCap: 0 } });
+check('windowCap=0 → 直接拒（已暂停），retryAfterMs=0', paused.ok === false && paused.reason === 'daily_cap' && paused.retryAfterMs === 0 && paused.windowCount === 0);
+const pausedWithPosts = checkQuota({ now: outsideNow, posts: [{ createdAt: outsideNow - HOUR }], cfg: { windowCap: 0 } });
+check('windowCap=0 时即使窗口是空的也拒', pausedWithPosts.ok === false && pausedWithPosts.retryAfterMs === 0);
+
+const dayNow = sh(`${T}T10:00:00`);
+const dayTwo = checkQuota({ now: dayNow, posts: [{ createdAt: sh(`${T}T00:30:00`) }, { createdAt: sh(`${T}T09:00:00`) }], cfg: { windowHours: 0 } });
+check('windowHours=0 → 按北京自然日计数（今日 2 条即 daily_cap）', dayTwo.ok === false && dayTwo.reason === 'daily_cap' && dayTwo.windowCount === 2 && dayTwo.todayCount === 2);
+check('windowHours=0 的 retryAfterMs 到次日零点（10:00 → 14h）', dayTwo.retryAfterMs === 14 * HOUR, String(dayTwo.retryAfterMs));
+const dayCrossNow = sh('2026-10-19T00:01:00');
+const dayCross = checkQuota({ now: dayCrossNow, posts: [{ createdAt: sh('2026-10-18T23:59:00') }], cfg: { windowHours: 0 } });
+check('windowHours=0 跨日 → 计数归零、放行', dayCross.ok === true && dayCross.windowCount === 0 && dayCross.retryAfterMs === 0);
+check('windowHours=0 且正好零点 → 整 24h', checkQuota({ now: sh(`${T}T00:00:00`), posts: [{ createdAt: sh(`${T}T00:00:00`) }], cfg: { windowHours: 0, windowCap: 1 } }).retryAfterMs === DAY);
+check('windowHours=0 的上限仍由 windowCap 决定（cap=1 时今日 1 条就拒）', checkQuota({ now: dayNow, posts: [{ createdAt: sh(`${T}T01:00:00`) }], cfg: { windowHours: 0, windowCap: 1 } }).reason === 'daily_cap');
+check('windowHours=0 但今日 0 条 → 放行', checkQuota({ now: dayNow, posts: [{ createdAt: sh('2026-10-18T09:00:00') }], cfg: { windowHours: 0, windowCap: 1 } }).ok === true);
+
+check('minIntervalMs 已不再参与判定', checkQuota({ now: dayNow, posts: [{ createdAt: dayNow - 60_000 }], cfg: { minIntervalMs: 6 * HOUR } }).ok === true);
+check('dailyCap 已不再参与判定（显式给了 windowCap 时 dailyCap 被无视）', checkQuota({ now: dayNow, posts: [{ createdAt: dayNow - 60_000 }], cfg: { dailyCap: 1, windowCap: 2 } }).ok === true);
+
+const migratedCfg = normalizeQzoneConfig({ dailyCap: 1 });
+check('迁移后的配置真的参与判定（dailyCap:1 → 窗口内 1 条即拒）', migratedCfg.windowCap === 1 && migratedCfg.windowHours === 24 && checkQuota({ now: dayNow, posts: [{ createdAt: dayNow - HOUR }], cfg: migratedCfg }).reason === 'daily_cap');
+check('迁移后的配置：窗口空了就放行', checkQuota({ now: dayNow, posts: [{ createdAt: dayNow - 25 * HOUR }], cfg: migratedCfg }).ok === true);
+
+const futurePost = checkQuota({ now: outsideNow, posts: [{ createdAt: outsideNow + 10 * 60_000 }], cfg: {} });
+check('时钟回拨（未来时间戳）→ 仍计入窗口、retryAfterMs 不为负', futurePost.windowCount === 1 && futurePost.retryAfterMs >= 0, String(futurePost.retryAfterMs));
+
+check('也接受整个 state 对象（容错）', checkQuota({ now: outsideNow, posts: { version: 1, posts: [{ createdAt: outsideNow - 2 * HOUR }] }, cfg: {} }).windowCount === 1);
+
+const noNowA = checkQuota({ posts: [{ createdAt: sh(`${T}T10:00:00`) }, { createdAt: sh(`${T}T11:00:00`) }] });
+const noNowB = checkQuota({ posts: [{ createdAt: sh(`${T}T10:00:00`) }, { createdAt: sh(`${T}T11:00:00`) }] });
+check('未注入 now → 退化为「最近一条的时刻」，两次调用逐字节一致（不读系统时钟）', JSON.stringify(noNowA) === JSON.stringify(noNowB) && noNowA.reason === 'daily_cap' && noNowA.windowCount === 2 && noNowA.retryAfterMs === 23 * HOUR, JSON.stringify(noNowA));
 
 // ── ④ pickUgcRight ─────────────────────────────────────────────────────────
 console.log('④ pickUgcRight');
@@ -236,6 +295,7 @@ check('不改动输入数组', (() => {
 check('keep=0 → 空数组', prunePosts(many, 0).length === 0);
 check('非数组输入 → 空数组', prunePosts(null).length === 0 && prunePosts(undefined, 10).length === 0);
 check('keep 非法值回落 50', prunePosts(many, 'abc').length === 50);
+check('keep 大于 50 时按传入值保留（不写死 50）', prunePosts(many, 55).length === 55);
 
 // ── ⑥ 模块纯净性（零依赖 + 零 I/O） ────────────────────────────────────────
 console.log('⑥ 模块纯净性');
@@ -252,6 +312,40 @@ check('没有 import 语句', !/^\s*import\b/m.test(moduleCode));
 check('没有 require / node: 内置模块', !/\brequire\s*\(/.test(moduleCode) && !/\bnode:/.test(moduleCode));
 check('没有 process / fetch 等宿主或网络依赖', !/\bprocess\b/.test(moduleCode) && !/\bfetch\s*\(/.test(moduleCode) && !/\brequire\./.test(moduleCode));
 check('只用注入的时间戳（不调用 Date.now()、不 new Date() 取当前时刻）', !/\bDate\.now\s*\(/.test(moduleCode) && !/new\s+Date\s*\(\s*\)/.test(moduleCode));
+
+// ── ⑦ applyQzoneConfigUpdate（控制台改配置的唯一校验源） ───────────────────
+console.log('⑦ applyQzoneConfigUpdate');
+
+check('白名单就是四个键', JSON.stringify(QZONE_CONFIG_KEYS) === '["enabled","windowHours","windowCap","ugcRight"]');
+
+const base = normalizeQzoneConfig({ enabled: true, windowHours: 6, windowCap: 3, ugcRight: 1 });
+const onlyCap = applyQzoneConfigUpdate(base, { windowCap: 5 });
+check('部分更新：只改一个键，其余保持现值', onlyCap.ok === true && onlyCap.qzone.windowCap === 5 && onlyCap.qzone.windowHours === 6 && onlyCap.qzone.enabled === true && onlyCap.qzone.ugcRight === 1);
+check('部分更新：返回值被归一化（冻结对象）', onlyCap.ok === true && Object.isFrozen(onlyCap.qzone));
+check('部分更新：0 能存进去（暂停 / 自然日）', applyQzoneConfigUpdate(base, { windowCap: 0 }).qzone.windowCap === 0 && applyQzoneConfigUpdate(base, { windowHours: 0 }).qzone.windowHours === 0);
+
+check('未知键 → 拒绝并点名', (() => {
+  const r = applyQzoneConfigUpdate(base, { windowCap: 5, dailyCap: 9 });
+  return r.ok === false && r.error.includes('dailyCap');
+})());
+check('空 patch → 要求至少改一项', (() => {
+  const r = applyQzoneConfigUpdate(base, {});
+  return r.ok === false && r.error.includes('至少要改一项');
+})());
+check('patch 不是对象 → 要求至少改一项', applyQzoneConfigUpdate(base, null).ok === false && applyQzoneConfigUpdate(base, 'x').ok === false);
+check('值为 null/undefined → 点名该键', applyQzoneConfigUpdate(base, { windowCap: null }).error === 'windowCap 不能为空' && applyQzoneConfigUpdate(base, { windowCap: undefined }).ok === false);
+check('enabled 必须是真布尔', applyQzoneConfigUpdate(base, { enabled: 'true' }).error === 'enabled 必须是布尔值' && applyQzoneConfigUpdate(base, { enabled: 1 }).error === 'enabled 必须是布尔值' && applyQzoneConfigUpdate(base, { enabled: false }).qzone.enabled === false);
+check('ugcRight 只收 1/4/64', applyQzoneConfigUpdate(base, { ugcRight: 16 }).error === 'ugcRight 只支持 1 / 4 / 64' && applyQzoneConfigUpdate(base, { ugcRight: 64 }).qzone.ugcRight === 64);
+check('数字项必须能转成数字', applyQzoneConfigUpdate(base, { windowCap: 'abc' }).error === 'windowCap 必须是数字' && applyQzoneConfigUpdate(base, { windowHours: 'abc' }).error === 'windowHours 必须是数字');
+check('数字字符串收（和手写 config.json 口径一致）', applyQzoneConfigUpdate(base, { windowCap: '7' }).qzone.windowCap === 7);
+
+const clampedCap = applyQzoneConfigUpdate(base, { windowCap: 999 });
+check('越界夹回边界并诚实上报 clamped', clampedCap.ok === true && clampedCap.qzone.windowCap === 100 && clampedCap.clamped.includes('windowCap'));
+const clampedHours = applyQzoneConfigUpdate(base, { windowHours: 48 });
+check('windowHours 越界同样夹回并上报', clampedHours.qzone.windowHours === 24 && clampedHours.clamped.includes('windowHours'));
+const rounded = applyQzoneConfigUpdate(base, { windowCap: 2.9 });
+check('取整不算「被夹」：2.9 → 2 且 clamped 为空', rounded.qzone.windowCap === 2 && rounded.clamped.length === 0);
+check('正常范围内 clamped 为空数组', Array.isArray(applyQzoneConfigUpdate(base, { windowCap: 4 }).clamped) && applyQzoneConfigUpdate(base, { windowCap: 4 }).clamped.length === 0);
 
 // ── 汇总 ───────────────────────────────────────────────────────────────────
 const total = passed + failed;

@@ -16,10 +16,21 @@ const SHANGHAI_OFFSET_MS = 8 * HOUR_MS;
 // 单条命中片段最多回显这么多字：够定位，又不会把整段正文再复制一遍到日志/工具返回里。
 const MAX_HIT_TEXT_CHARS = 40;
 
-/** 出厂默认值：`enabled:false`（不启用）、`ugcRight:4`（好友可见，不是所有人可见）。 */
+/**
+ * 出厂默认值：`enabled:false`（不启用）、`ugcRight:4`（好友可见，不是所有人可见）。
+ *
+ * 发布频率自 T-008 起只有一种口径：**滑动窗口** —— 最近 `windowHours` 小时内最多 `windowCap` 条。
+ * `minIntervalMs` / `dailyCap` 降级为 legacy，只服务两件事：
+ *   ① 老配置迁移（没有 `windowCap` 时按 `dailyCap` 换算，见 `usesLegacyDailyCap`）；
+ *   ② 回滚旧版本时 `config.json` 里还有人读它。
+ * 它们**不再参与任何限流判定**，判定只看 `windowHours` / `windowCap`。
+ */
 export const QZONE_DEFAULTS = Object.freeze({
   enabled: false,
   adminQQ: Object.freeze([]),
+  windowHours: 24,
+  windowCap: 2,
+  // legacy：不参与判定，仅为迁移与回滚保留。
   minIntervalMs: 6 * HOUR_MS,
   dailyCap: 2,
   ugcRight: 4,
@@ -33,10 +44,18 @@ export const QZONE_DEFAULTS = Object.freeze({
  */
 export const QZONE_UGC_RIGHTS = Object.freeze([1, 4, 64]);
 
-/** clamp 区间：`minIntervalMs` 一分钟都不能让用户配到 0（那是「不限频」），最高 7 天。 */
+/**
+ * clamp 区间：
+ * - `windowHours` 是 0~24：`0` 是「按北京自然日计」的显式开关（见 `checkQuota`），不是「不限频」；
+ * - `windowCap` 是 0~100：`0` 是「暂停发布」，所以下限必须是 0 —— 若像 `dailyCap` 那样抬到 1，
+ *   用户就永远关不掉自动发布，只能关整个功能；
+ * - `minIntervalMs` / `dailyCap` 只用于读老配置（legacy），区间保持原样以兼容旧文件。
+ */
 export const QZONE_LIMITS = Object.freeze({
   minIntervalMs: Object.freeze([HOUR_MS, 7 * DAY_MS]),
   dailyCap: Object.freeze([1, 10]),
+  windowHours: Object.freeze([0, 24]),
+  windowCap: Object.freeze([0, 100]),
   maxChars: Object.freeze([50, 1000]),
 });
 
@@ -113,19 +132,90 @@ function normalizeAdminQQ(value) {
 }
 
 /**
+ * 老配置迁移判定：`config.json` 里**没有** `windowCap`、但还留着 `dailyCap`。
+ * 这种情况下 `windowCap` 取 `dailyCap`、`windowHours` 取出厂 24 —— 升级后原来的「一天 N 条」
+ * 自动变成「24 小时内 N 条」，用户不用手改配置。旧键**不删**：回滚旧版本时它还在。
+ * 桥接启动时用它决定要不要打一条 `[qzone]` 迁移日志（本模块不碰 console，也不碰日志）。
+ */
+export function usesLegacyDailyCap(raw) {
+  const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  return !Object.prototype.hasOwnProperty.call(source, 'windowCap')
+    && Object.prototype.hasOwnProperty.call(source, 'dailyCap');
+}
+
+/**
  * 把 `config.json` 里的 `qzone` 块归一化成可直接使用的冻结对象。
  * 任何脏值都不抛错：缺省/非对象 → 全默认；数字类字段 clamp 到 `QZONE_LIMITS`。
+ *
+ * `0` 是有效值（`windowCap: 0` = 暂停、`windowHours: 0` = 按自然日），所以这里一律靠
+ * `Number.isFinite` 判「有没有给」——**不能**写成 `Number(v) || 默认值`，那会把 0 吞成默认值。
  */
 export function normalizeQzoneConfig(raw) {
   const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  // 老配置迁移：windowCap ← dailyCap。迁移源取原始值而不是 clamp 过的 dailyCap，
+  // 这样 dailyCap: 15 会迁成 15，而不是先被 legacy 区间削到 10 再迁。
+  const windowCapSource = usesLegacyDailyCap(source) ? source.dailyCap : source.windowCap;
   return Object.freeze({
     enabled: source.enabled === true,
     adminQQ: normalizeAdminQQ(source.adminQQ),
+    windowHours: clampInt(source.windowHours, QZONE_LIMITS.windowHours, QZONE_DEFAULTS.windowHours),
+    windowCap: clampInt(windowCapSource, QZONE_LIMITS.windowCap, QZONE_DEFAULTS.windowCap),
+    // legacy：仍能被读出（迁移 / 回滚 / 老控制台），但不参与限流判定。
     minIntervalMs: clampNumber(source.minIntervalMs, QZONE_LIMITS.minIntervalMs, QZONE_DEFAULTS.minIntervalMs),
     dailyCap: clampInt(source.dailyCap, QZONE_LIMITS.dailyCap, QZONE_DEFAULTS.dailyCap),
     ugcRight: toUgcRight(source.ugcRight),
     maxChars: clampInt(source.maxChars, QZONE_LIMITS.maxChars, QZONE_DEFAULTS.maxChars),
   });
+}
+
+/** 控制台可以改的键（`POST /api/qzone/config` 的唯一白名单）。顺序就是报错文案里的顺序。 */
+export const QZONE_CONFIG_KEYS = Object.freeze(['enabled', 'windowHours', 'windowCap', 'ugcRight']);
+
+/**
+ * 控制台部分更新的**唯一校验源**：校验形状 + 类型，取值范围全部交给 `normalizeQzoneConfig`。
+ * 返回 `{ ok:true, qzone, clamped }` 或 `{ ok:false, error }`（error 是给人看的中文短句）。
+ *
+ * - 白名单只有 `QZONE_CONFIG_KEYS` 四键；出现别的键一律拒绝 —— 拼错的键静默忽略会让人
+ *   以为改生效了、其实没改，比 400 更坏；
+ * - `enabled` 只认真布尔（`1`、`"true"` 都拒，和 `normalizeQzoneConfig` 的开启口径一致）；
+ *   其余三项必须是数字（数字字符串也收，和手写 `config.json` 的口径一致）；
+ * - `clamped` 只报「给了越界数字、被夹回边界」的键（`2.9 → 2` 这种取整不算），
+ *   控制台据此提示「已按上限保存」，而不是谎报原样保存。
+ *
+ * `rawConfig` 传**内存里当前生效的配置**：只改一个键时，其余三个键必须保持现值 ——
+ * 否则一次开关就会把用户的频率设置重置回出厂值。
+ */
+export function applyQzoneConfigUpdate(rawConfig, patch) {
+  const base = rawConfig && typeof rawConfig === 'object' && !Array.isArray(rawConfig) ? rawConfig : {};
+  const atLeastOne = `至少要改一项（${QZONE_CONFIG_KEYS.join(' / ')}）`;
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return { ok: false, error: atLeastOne };
+
+  const keys = Object.keys(patch);
+  const unknown = keys.filter((key) => !QZONE_CONFIG_KEYS.includes(key));
+  if (unknown.length > 0) return { ok: false, error: `不认识的配置项：${unknown.join(' / ')}` };
+  if (keys.length === 0) return { ok: false, error: atLeastOne };
+
+  for (const key of keys) {
+    const value = patch[key];
+    if (value === undefined || value === null) return { ok: false, error: `${key} 不能为空` };
+    if (key === 'enabled') {
+      if (typeof value !== 'boolean') return { ok: false, error: 'enabled 必须是布尔值' };
+      continue;
+    }
+    if (key === 'ugcRight') {
+      if (!QZONE_UGC_RIGHTS.includes(toFiniteNumber(value))) return { ok: false, error: 'ugcRight 只支持 1 / 4 / 64' };
+      continue;
+    }
+    if (!Number.isFinite(toFiniteNumber(value))) return { ok: false, error: `${key} 必须是数字` };
+  }
+
+  const qzone = normalizeQzoneConfig({ ...base, ...patch });
+  const clamped = [];
+  for (const key of ['windowHours', 'windowCap']) {
+    if (!Object.prototype.hasOwnProperty.call(patch, key)) continue;
+    if (qzone[key] !== Math.trunc(toFiniteNumber(patch[key]))) clamped.push(key);
+  }
+  return { ok: true, qzone, clamped };
 }
 
 // ── 内容审计 ────────────────────────────────────────────────────────────────
@@ -218,6 +308,11 @@ export function auditContent(text, { maxChars } = {}) {
 }
 
 // ── 频率闸门 ────────────────────────────────────────────────────────────────
+// T-008 起只有一条判定：**滑动窗口** —— 最近 `windowHours` 小时内最多 `windowCap` 条。
+// 之前是「自然日上限 + 最小间隔 6 小时」双条件，用户和模型都被绕得很晕（第 2 条几乎总是先被
+// 间隔卡住，看起来像「一天只能发一条」）。两个 0 都是显式语义，不是「不限频」：
+//   windowCap   = 0 → 已暂停，一条都不发（retryAfterMs 也是 0：这不是等时间能解决的）；
+//   windowHours = 0 → 退回北京自然日计数（上限仍是 windowCap），给「就要按日历天算」的人用。
 
 /** 北京时间的自然日键（`YYYY-MM-DD`）：把时间戳平移到 UTC+8 再用 ISO 切片。 */
 function shanghaiDayKey(ms) {
@@ -233,12 +328,24 @@ function msUntilNextShanghaiMidnight(ms) {
 
 /**
  * 发布配额判定（纯计算，不写任何状态）：
- *   ① 今天（Asia/Shanghai 自然日）已发条数 ≥ `dailyCap` → `daily_cap`，`retryAfterMs` 到次日零点；
- *   ② 最近一条距今 < `minIntervalMs` → `interval`，`retryAfterMs` 是还差多少；
- *   ③ 否则放行。
+ *   ① 窗口内已发条数 ≥ `windowCap` → 拒绝（`reason: 'daily_cap'`）；
+ *   ② 否则放行。
  *
- * 注意顺序：先判每日上限再判间隔 —— 两条上限都已打满时，模型该被告知的是「今天没额度」，
- * 而不是「再等 3 小时」，否则它会一直等一个永远不会来的额度。
+ * 窗口是半开区间 `(now - windowHours*3600_000, +∞)`：正好落在起点上的那条**已经滑出去**，
+ * 和「间隔到了就能发」的直觉一致。`windowHours === 0` 时窗口换成北京自然日，
+ * 计数口径与 `todayCount` 相同。
+ *
+ * `reason` 仍沿用 `'daily_cap'`（**不新增** 'window_cap' / 'paused'）：MCP 层、控制台与
+ * 既有测试都按这个值分支，换值等于让所有调用方同时失效。拒绝时另外返回
+ * `windowCount`（窗口内条数）与 `todayCount`（自然日条数），调用方据此解释得更清楚。
+ *
+ * `retryAfterMs`：
+ *   - 滑动窗口：最早那条滑出窗口还差多久（`retryAfterMs` 一定落在 `(0, windowHours]`）；
+ *   - 自然日：到次日北京 00:00；
+ *   - 暂停（`windowCap === 0`）：0 —— 等时间是等不到额度的，得有人去控制台改。
+ *
+ * 时间戳在未来的记录（时钟回拨 / 手工改文件）**算进窗口**：否则把系统时间往前拨一次
+ * 就等于解除配额，比多等一会儿坏得多。
  *
  * `posts` 可以是 `state/qzone-posts.json` 的 `posts` 数组，也可以直接传整个 state 对象（容错）。
  * 脏数据（缺 `createdAt`、非数字）不参与计数，也不会抛错。
@@ -264,18 +371,35 @@ export function checkQuota({ now, posts, cfg } = {}) {
     if (shanghaiDayKey(createdAt) === todayKey) todayCount += 1;
   }
 
-  if (todayCount >= config.dailyCap) {
-    return { ok: false, reason: 'daily_cap', retryAfterMs: msUntilNextShanghaiMidnight(at), todayCount };
-  }
-
-  if (latestAt > 0) {
-    const elapsed = at - latestAt;
-    if (elapsed < config.minIntervalMs) {
-      return { ok: false, reason: 'interval', retryAfterMs: Math.max(0, config.minIntervalMs - elapsed), todayCount };
+  // windowHours: 0 时退回自然日计数（`todayCount` 就是窗口计数），否则统计滑动窗口。
+  const windowMs = config.windowHours * HOUR_MS;
+  let windowCount = todayCount;
+  let earliestInWindow = 0;
+  if (windowMs > 0) {
+    const windowStart = at - windowMs;
+    windowCount = 0;
+    for (const post of list) {
+      const createdAt = toFiniteNumber(post && post.createdAt);
+      if (!Number.isFinite(createdAt) || createdAt <= 0) continue;
+      if (createdAt <= windowStart) continue;
+      windowCount += 1;
+      if (earliestInWindow === 0 || createdAt < earliestInWindow) earliestInWindow = createdAt;
     }
   }
 
-  return { ok: true, reason: null, retryAfterMs: 0, todayCount };
+  if (config.windowCap <= 0) {
+    return { ok: false, reason: 'daily_cap', retryAfterMs: 0, windowCount, todayCount };
+  }
+
+  if (windowCount >= config.windowCap) {
+    // 窗口内至少有一条（windowCount ≥ 1），所以 earliestInWindow 一定有效。
+    const retryAfterMs = windowMs > 0
+      ? Math.max(1, earliestInWindow + windowMs - at)
+      : msUntilNextShanghaiMidnight(at);
+    return { ok: false, reason: 'daily_cap', retryAfterMs, windowCount, todayCount };
+  }
+
+  return { ok: true, reason: null, retryAfterMs: 0, windowCount, todayCount };
 }
 
 /** 可见范围：配置里是 1/4/64 就用它，其余（含 16/128/缺省）回落 4（好友可见）。 */
@@ -287,6 +411,9 @@ export function pickUgcRight(cfg) {
 /**
  * 裁剪发布记录：丢掉没有 `createdAt` 的脏数据，按 `createdAt` 倒序保留前 `keep` 条。
  * 返回新数组（不改调用方的数组、也不改记录对象）；`keep` 缺省 50。
+ *
+ * 调用方（`src/bridge.js` 的 `writeQzoneState`）传的是 `Math.max(50, windowCap + 20)`：
+ * 固定 50 条的话，`windowCap > 50` 时窗口内计数永远到不了上限，配额会被静默穿透。
  */
 export function prunePosts(posts, keep = 50) {
   const list = Array.isArray(posts) ? posts : [];
