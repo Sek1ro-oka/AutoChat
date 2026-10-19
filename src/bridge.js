@@ -3541,17 +3541,12 @@ async function main() {
           }
           return;
         }
-        // 看门狗 Demo（用户已确认的 T-002 纯前端产物）作为 `/demo` 挂在控制台上。
-        // 读取方式与 `/` 完全一致：同款 content-type、同款 SECURITY_HEADERS（no-store 必须保留，
-        // 否则带令牌的地址会进浏览器缓存/历史）。位置在令牌关卡与 x-agent-token 白名单之后，
-        // 因此它和其它页面一样受控制台令牌保护，智能体令牌拿不到。
+        // 决策沙盘已经内联进控制台的 #sandbox 视图（原来单独读 static Demo 页的那段已删除）。
+        // 这里只保留一个 302，让老书签 /demo 继续能用；位置仍在令牌关卡与 x-agent-token 白名单
+        // 之后，所以跳转本身也要过令牌。no-store：别让带令牌的地址进浏览器缓存/历史。
         if (req.method === 'GET' && url.pathname === '/demo') {
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS });
-          try {
-            res.end(fs.readFileSync(path.join(ROOT, 'public', 'stall-watchdog-demo.html'), 'utf8'));
-          } catch {
-            res.end('看门狗 Demo 页面缺失：qq-bridge/public/stall-watchdog-demo.html');
-          }
+          res.writeHead(302, { Location: '/#sandbox', 'Cache-Control': 'no-store' });
+          res.end();
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/status') {

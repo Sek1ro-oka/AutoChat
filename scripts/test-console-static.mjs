@@ -73,35 +73,67 @@ const fixture = fs.readFileSync(path.join(ROOT, 'scripts', 'console-ui-fixture.m
 ok(fixture.includes("case '/api/socialV2/voices'"), 'fixture mock 了 /api/socialV2/voices');
 ok(fixture.includes("case '/api/voice/send'"), 'fixture mock 了 /api/voice/send');
 
-console.log('## 看门狗 Demo（/demo）');
-// T-002 的 Demo 是用户已确认的产物：进仓库时是逐字节复制，不重排版/不压缩/不改文案，
-// 所以这里把字节数钉死；一旦有人"顺手优化"了它，这条会立刻失败。
+console.log('## 决策沙盘（#sandbox 视图，原 /demo 页面已内联）');
+// 原来独立的 public/stall-watchdog-demo.html 已经整段搬进 console.html 的 #sandbox 视图，文件本身删掉：
+// 留着就会有两份各自漂移的拷贝，而这页面本身就是"阈值决策"的唯一说明书。
 const demoPath = path.join(ROOT, 'public', 'stall-watchdog-demo.html');
-const demoExists = fs.existsSync(demoPath);
-const demoBytes = demoExists ? fs.statSync(demoPath).size : -1;
-ok(demoBytes === 29205, 'Demo 已挂到 public/ 且字节数 = 29205', demoExists ? `${demoBytes} 字节` : '文件不存在');
-const demo = demoExists ? fs.readFileSync(demoPath, 'utf8') : '';
-// Demo 必须保持零外链：CSP 是 default-src/script-src/style-src 'self'，任何外部资源都会静默失败。
+ok(!fs.existsSync(demoPath), 'public/stall-watchdog-demo.html 已删除（内容已内联）');
+ok(!html.includes('stall-watchdog-demo.html'), 'console.html 里没有指向已删文件的字样');
+
+ok(/<section class="card" id="sandbox" data-page="sandbox">/.test(html), '存在 #sandbox 视图（data-page="sandbox"）');
+ok((html.match(/data-view="sandbox"/g) ?? []).length === 1, '侧栏入口只有一处');
+ok(!/href="\/demo"/.test(html), '页面里不再有指向 /demo 的外链（已改成本页视图）');
+ok((html.match(/id="sandboxScript"/g) ?? []).length === 1, '沙盘脚本容器 #sandboxScript 只有一处');
+ok(/<script type="text\/plain" id="sandboxScript">/.test(html), '沙盘脚本以 text/plain 存放（页面加载时不执行）');
+ok(/let sandboxInited = false;/.test(html) && /function initSandbox\(\) \{/.test(html), 'initSandbox 已定义');
+ok(/if \(page === 'sandbox'\) initSandbox\(\);/.test(html), 'setConsolePage 切到 #sandbox 时调用 initSandbox');
+ok(/currentConsolePage === 'sandbox'/.test(html)
+  && /addEventListener\('DOMContentLoaded', \(\) => initSandbox\(\)\)/.test(html), '#sandbox 直达时在 DOM 就绪后补一次');
+ok(/sandbox: \['决策沙盘'/.test(html), 'consolePages 里注册了 sandbox（哈希路由才认它）');
+// 沙盘自带标题栏、没有 h2：控制台的搜索索引会遍历每个 section 取 h2，取不到就 null.textContent 崩掉整页。
+ok(/const heading = section\.querySelector\('h2'\);/.test(html)
+  && /heading \? heading\.textContent : consolePages\[page\]\[0\]/.test(html), '搜索索引容忍没有 h2 的视图');
+
+// 样式是机械作用域化的：沙盘 CSS 里的 .card/.brand/.tag 与控制台重名，不挂 #sandbox 就会反向污染整个控制台。
+const styleStart = html.indexOf('<style id="sandboxStyle">');
+const styleEnd = html.indexOf('</style>', styleStart);
+ok(styleStart > -1 && styleEnd > styleStart, '沙盘样式段存在（<style id="sandboxStyle">）');
+const sandboxCss = styleStart > -1 && styleEnd > styleStart ? html.slice(styleStart, styleEnd) : '';
+const hashCount = (sandboxCss.match(/#sandbox/g) ?? []).length;
+ok(/#sandbox \.wrap\{/.test(sandboxCss) && /#sandbox \.brand\{/.test(sandboxCss) && /#sandbox \.card\{/.test(sandboxCss), '沙盘选择器都挂了 #sandbox 前缀');
+ok(/#sandbox, #sandbox \*\{box-sizing:border-box\}/.test(sandboxCss), '全局 * 规则被改写成 #sandbox, #sandbox *');
+const badTop = sandboxCss.split(/\r?\n/).filter((line) => /^\s*\./.test(line) || /^\s*(?:html|body)\b/.test(line)
+  || /^\s*:root\b/.test(line) || /^\s*\*\s*\{/.test(line));
+ok(badTop.length === 0, '没有未加 #sandbox 前缀的顶层选择器', badTop.length ? badTop.slice(0, 3).join(' | ') : '#sandbox ×' + hashCount);
+ok(hashCount >= 100, '#sandbox 出现次数与规则数相当', '#sandbox ×' + hashCount);
+ok(/#sandbox\.card\{[\s\S]{0,160}?border:0/.test(sandboxCss), '中和了控制台 .card 的边框');
+ok(/#sandbox\.card\{[\s\S]{0,160}?grid-column:1\/-1/.test(sandboxCss), '沙盘横跨整行（否则会被压进页面网格的一列）');
+
+// 沙盘原本是独立页面、零外链（CSP 是 'self'），搬进来以后这条性质必须保持。
+const holder = html.match(/<script type="text\/plain" id="sandboxScript">([\s\S]*?)<\/script>/);
+ok(!!holder, '能取出沙盘脚本正文');
+const sandboxJs = holder ? holder[1] : '';
 const externalPatterns = ['http://', 'https://', 'fetch(', 'XMLHttpRequest', '<link', '<img', '<iframe'];
 const externalHits = externalPatterns
-  .map((needle) => [needle, (demo.match(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) ?? []).length])
+  .map((needle) => [needle, (sandboxJs.match(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) ?? []).length])
   .filter(([, n]) => n > 0);
-ok(externalHits.length === 0, 'Demo 零外链（http/https/fetch/XHR/link/img/iframe）', externalHits.length ? externalHits.map(([s, n]) => `${s}×${n}`).join(', ') : `${externalPatterns.length} 项全为 0`);
+ok(externalHits.length === 0, '沙盘脚本零外链（http/https/fetch/XHR/link/img/iframe）', externalHits.length ? externalHits.map(([s, n]) => s + '×' + n).join(', ') : externalPatterns.length + ' 项全为 0');
+try { new Function(sandboxJs); ok(true, '沙盘脚本语法可解析', sandboxJs.length + ' 字符'); }
+catch (e) { ok(false, '沙盘脚本语法', e.message); }
 
 const bridge = fs.readFileSync(path.join(ROOT, 'src', 'bridge.js'), 'utf8');
 const gateAt = bridge.indexOf('if (consoleToken && !tokenMatches)');
 // 只认"独立路由"那一处：关卡里的判断是多一层括号的 (/ || /demo)，不会被这条正则误命中。
 const routeAt = bridge.search(/if \(req\.method === 'GET' && url\.pathname === '\/demo'\)\s*\{/);
-ok(routeAt > -1 && gateAt > -1 && routeAt > gateAt, 'bridge.js 存在 /demo 路由且位于令牌关卡之后', `关卡位置 ${gateAt} < 路由位置 ${routeAt}`);
-ok(gateAt > -1 && routeAt > gateAt && bridge.slice(gateAt, routeAt).includes("'/demo'"), '令牌关卡本身认得 /demo（401 回跳 /demo 而非控制台首页）');
-
-ok(/id="demoLink"[^>]*href="\/demo"/.test(html), '控制台存在指向 /demo 的入口链接');
-ok(/const saved = localStorage\.getItem\('consoleToken'\)/.test(html) && /demoLink\.href = saved \? '\/demo\?token='/.test(html), '入口按已有令牌拼 /demo?token=（不写死令牌）');
+ok(routeAt > -1 && gateAt > -1 && routeAt > gateAt, 'bridge.js 存在 /demo 路由且位于令牌关卡之后', '关卡位置 ' + gateAt + ' < 路由位置 ' + routeAt);
+ok(routeAt > -1 && /res\.writeHead\(302, \{ Location: '\/#sandbox', 'Cache-Control': 'no-store' \}\)/.test(bridge.slice(routeAt, routeAt + 400)), '/demo 现在是 302 到 /#sandbox（no-store）');
+ok(!/stall-watchdog-demo\.html/.test(bridge), 'bridge.js 不再读取已删除的 static Demo 文件');
+ok(gateAt > -1 && routeAt > gateAt && bridge.slice(gateAt, routeAt).includes("'/demo'"), '令牌关卡本身认得 /demo（跳转前一样要过令牌）');
 
 console.log('## 开关页（看门狗自动硬清理）');
 ok(/data-view="switches"/.test(html) && /data-page="switches"/.test(html), '侧栏入口与新视图都在', 'data-view + data-page');
 ok(html.indexOf('data-view="switches"') > 0
-  && html.indexOf('data-view="switches"') < html.indexOf('id="demoLink"'), '新入口在侧栏里、位于 demoLink 之前（demoLink 本任务不动）');
+  && html.indexOf('data-view="switches"') < html.indexOf('data-view="sandbox"'), '侧栏顺序：开关在决策沙盘之前');
 for (const id of ['wdBadge', 'wdRunBadge', 'wdStats', 'wdLastKill', 'wdThresholds', 'wdSuspects', 'wdSuspectCount', 'wdToggle', 'wdMsg']) {
   const n = (html.match(new RegExp(`id="${id}"`, 'g')) ?? []).length;
   ok(n === 1, `开关页元素 ${id}`, `${n} 处`);
