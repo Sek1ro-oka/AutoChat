@@ -3360,9 +3360,13 @@ async function main() {
         return crypto.timingSafeEqual(a, b);
       })();
       if (consoleToken && !tokenMatches) {
-        if (req.method === 'GET' && url.pathname === '/') {
+        // `/` 和 `/demo` 都是人直接在地址栏打开的 HTML 页面，给它们一支自带 prompt() 的 401 页
+        // 比回 JSON 有用；其余路径仍回 JSON。回跳地址只在这两个**固定字面量**里取，不拼接请求里的
+        // 任何内容（避免开放重定向）；按实际打开的那一页回跳，否则从 /demo 进来会被弹回控制台首页。
+        if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/demo')) {
+          const backTo = url.pathname === '/demo' ? '/demo' : '/';
           res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS });
-          res.end('<!doctype html><meta charset="utf-8"><title>需要令牌</title><script>const t=prompt(\'请输入控制台访问令牌\');if(t)location.href=\'/?token=\'+encodeURIComponent(t);</script>');
+          res.end(`<!doctype html><meta charset="utf-8"><title>需要令牌</title><script>const t=prompt('请输入控制台访问令牌');if(t)location.href='${backTo}?token='+encodeURIComponent(t);</script>`);
         } else {
           sendJson({ ok: false, error: '未授权：请提供控制台访问令牌' }, 401);
         }
@@ -3456,6 +3460,19 @@ async function main() {
             res.end(fs.readFileSync(path.join(ROOT, 'public', 'console.html'), 'utf8'));
           } catch {
             res.end('控制台页面缺失：qq-bridge/public/console.html');
+          }
+          return;
+        }
+        // 看门狗 Demo（用户已确认的 T-002 纯前端产物）作为 `/demo` 挂在控制台上。
+        // 读取方式与 `/` 完全一致：同款 content-type、同款 SECURITY_HEADERS（no-store 必须保留，
+        // 否则带令牌的地址会进浏览器缓存/历史）。位置在令牌关卡与 x-agent-token 白名单之后，
+        // 因此它和其它页面一样受控制台令牌保护，智能体令牌拿不到。
+        if (req.method === 'GET' && url.pathname === '/demo') {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS });
+          try {
+            res.end(fs.readFileSync(path.join(ROOT, 'public', 'stall-watchdog-demo.html'), 'utf8'));
+          } catch {
+            res.end('看门狗 Demo 页面缺失：qq-bridge/public/stall-watchdog-demo.html');
           }
           return;
         }

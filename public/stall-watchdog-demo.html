@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>会话繁忙看门狗 · 决策沙盘（纯前端模拟）</title>
+<style>
+  :root{
+    --bg:#0a0f16;
+    --panel:#131b26;
+    --panel2:#0e151e;
+    --line:#22303f;
+    --text:#e7eef8;
+    --muted:#8ba0b8;
+    --accent:#4aa8ff;
+    --pass:#22c55e;
+    --soft:#f59e0b;
+    --hard:#ef4444;
+    --kill:#f43f5e;
+    --mono:"Cascadia Mono","Consolas","JetBrains Mono",ui-monospace,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    min-height:100vh;
+    background:
+      radial-gradient(1100px 520px at 12% -8%, #14273c 0%, rgba(20,39,60,0) 62%),
+      radial-gradient(900px 480px at 92% 4%, #1b1b33 0%, rgba(27,27,51,0) 60%),
+      var(--bg);
+    color:var(--text);
+    font:13px/1.55 "Segoe UI","Microsoft YaHei","PingFang SC",system-ui,-apple-system,sans-serif;
+    padding:12px 16px 14px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1340px;margin:0 auto}
+
+  /* ---------- 顶部 ---------- */
+  .top{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .brand{font-size:16px;font-weight:700;letter-spacing:.3px;white-space:nowrap}
+  .brand .ver{
+    font:11px/1 var(--mono);font-weight:400;color:#7f96b0;margin-left:9px;
+    border:1px solid var(--line);border-radius:5px;padding:3px 6px;vertical-align:2px;
+  }
+  .banner{
+    flex:1;min-width:360px;display:flex;align-items:center;gap:9px;
+    background:rgba(245,158,11,.11);border:1px solid rgba(245,158,11,.45);
+    color:#ffd894;border-radius:8px;padding:7px 12px;font-size:12.5px;font-weight:600;
+  }
+  .banner .dot{
+    width:8px;height:8px;border-radius:50%;background:var(--soft);flex:none;
+    box-shadow:0 0 0 4px rgba(245,158,11,.18);animation:blink 2.2s ease-in-out infinite;
+  }
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
+
+  /* ---------- 工具条 ---------- */
+  .toolbar{
+    display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+    margin-top:10px;padding:8px 12px;
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  }
+  .tb-label{font-size:12px;color:var(--muted);white-space:nowrap}
+  .seg{display:flex;gap:3px;padding:3px;background:#0b1219;border:1px solid var(--line);border-radius:8px}
+  .segbtn{
+    appearance:none;-webkit-appearance:none;border:0;background:transparent;color:#9db0c8;
+    font:inherit;font-size:12.5px;padding:6px 13px;border-radius:6px;cursor:pointer;
+    display:flex;align-items:center;gap:6px;transition:background .16s,color .16s;
+  }
+  .segbtn:hover{background:#16202c;color:#dce8f7}
+  .segbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .segbtn.is-on{
+    background:linear-gradient(180deg,#2f74bd,#1e4f88);color:#fff;font-weight:600;
+    box-shadow:0 0 0 1px #56a0e6 inset,0 2px 8px rgba(30,79,136,.5);
+  }
+  .segbtn em{
+    font-style:normal;font-size:10px;font-weight:700;line-height:1;
+    background:var(--soft);color:#231603;border-radius:4px;padding:2px 4px;
+  }
+  .sw{display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;font-size:12.5px;color:#c8d7ea}
+  .sw input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+  .sw .bar{
+    width:34px;height:18px;border-radius:9px;background:#26323f;position:relative;
+    transition:background .18s;flex:none;
+  }
+  .sw .bar::after{
+    content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;
+    background:#93a6bb;transition:left .18s,background .18s;
+  }
+  .sw input:checked + .bar{background:#1f6feb}
+  .sw input:checked + .bar::after{left:18px;background:#fff}
+  .sw input:focus-visible + .bar{outline:2px solid var(--accent);outline-offset:2px}
+  .readout{margin-left:auto;font-size:12.5px;color:var(--muted);white-space:nowrap}
+  .readout b{font-weight:700}
+  .readout .s-soft{color:#ffce7a}
+  .readout .s-hard{color:#ff9a9a}
+  .hardnote{font-size:11.5px;color:#ffce7a;white-space:nowrap}
+
+  /* ---------- 公式 ---------- */
+  .formula{
+    display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+    margin-top:10px;padding:9px 13px;
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  }
+  .formula pre{
+    margin:0;flex:1;min-width:430px;
+    font:12.5px/1.7 var(--mono);color:#a8d3ff;
+    background:#091019;border:1px solid #1b2837;border-radius:8px;padding:7px 12px;
+    overflow-x:auto;
+  }
+  .formula .src{font-size:11.5px;color:var(--muted);line-height:1.7}
+  .formula .src code{color:#9ecbff}
+  .legend{display:flex;gap:10px;flex-wrap:wrap;font-size:11.5px;color:var(--muted)}
+  .legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:1px}
+  .legend .p{background:var(--pass)}
+  .legend .s{background:var(--soft)}
+  .legend .h{background:var(--hard)}
+  .legend .k{background:var(--kill)}
+
+  /* ---------- 主体 ---------- */
+  .main{display:grid;grid-template-columns:minmax(0,1fr) 356px;gap:12px;margin-top:12px;align-items:start}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+
+  .card{
+    position:relative;display:flex;flex-direction:column;gap:8px;
+    background:linear-gradient(180deg,#141d29,#111823);
+    border:1px solid var(--line);border-left:3px solid var(--pass);
+    border-radius:10px;padding:10px 12px 11px;overflow:hidden;
+    transition:border-color .2s,box-shadow .2s;
+  }
+  .card[data-verdict="soft"]{border-left-color:var(--soft)}
+  .card[data-verdict="hard"]{border-left-color:var(--hard)}
+  .card[data-verdict="kill"]{
+    border-left-color:var(--kill);border-color:rgba(244,63,94,.5);
+    box-shadow:0 0 0 1px rgba(244,63,94,.22),0 0 26px rgba(244,63,94,.16);
+  }
+  .card-hd{display:flex;align-items:center;gap:8px;flex-wrap:nowrap}
+  .tag{
+    font:10.5px/1 var(--mono);color:#7f96b0;background:#0b1219;
+    border:1px solid #1e2b3b;border-radius:5px;padding:3px 6px;white-space:nowrap;
+  }
+  .card h2{font-size:13.5px;font-weight:650;margin:0;white-space:nowrap}
+  .badges{margin-left:auto;display:flex;align-items:center;gap:6px}
+  .badge{
+    font-size:11.5px;font-weight:700;padding:3px 9px;border-radius:999px;
+    border:1px solid;white-space:nowrap;letter-spacing:.2px;
+  }
+  .b-pass{color:#8df0b4;background:rgba(34,197,94,.14);border-color:rgba(34,197,94,.48)}
+  .b-soft{color:#ffd681;background:rgba(245,158,11,.14);border-color:rgba(245,158,11,.5)}
+  .b-hard{color:#ffb4b4;background:rgba(239,68,68,.16);border-color:rgba(239,68,68,.55)}
+  .b-kill{
+    color:#fff;background:#e11d48;border-color:#ff9db0;
+    box-shadow:0 0 0 3px rgba(244,63,94,.2);animation:alarm 1.5s ease-in-out infinite;
+  }
+  @keyframes alarm{
+    0%,100%{box-shadow:0 0 0 3px rgba(244,63,94,.2)}
+    50%{box-shadow:0 0 0 8px rgba(244,63,94,.05)}
+  }
+  .arr{font-style:normal;color:#6f839c;font-size:11px}
+  .desc{margin:0;font-size:12.5px;color:#cddaea}
+  .chips{display:flex;flex-wrap:wrap;gap:5px}
+  .chips span{
+    font-size:11px;color:#93a9c2;background:#0c141d;border:1px solid #1d2a39;
+    border-radius:5px;padding:2px 7px;white-space:nowrap;
+  }
+  .chips span.hotline{color:#ffb0b0;border-color:rgba(239,68,68,.45);background:rgba(239,68,68,.1)}
+  .why{margin:0;font-size:12px;color:#a9bcd2;line-height:1.62}
+  .why b{color:#e7eef8;font-weight:600}
+  .snippet{
+    font:11px/1.5 var(--mono);color:#ffc9d4;background:rgba(244,63,94,.08);
+    border:1px solid rgba(244,63,94,.3);border-radius:6px;padding:4px 8px;
+    overflow-x:auto;white-space:nowrap;
+  }
+
+  /* ---------- 时间轴 ---------- */
+  .tl{margin-top:2px;padding-top:2px}
+  .tl-row{position:relative;height:14px}
+  .tl-lbl{
+    position:absolute;top:0;transform:translateX(-50%);
+    font:10.5px/1.4 var(--mono);white-space:nowrap;
+  }
+  .tl-lbl.soft{color:#ffd681}
+  .tl-lbl.hard{color:#ff9a9a}
+  .tl-lbl.plain{color:#7f96b0}
+  .tl-track{
+    position:relative;height:10px;border-radius:5px;
+    background:#0a1119;border:1px solid #1b2837;
+  }
+  .tl-zone{
+    position:absolute;top:0;bottom:0;border-radius:5px;
+    background:repeating-linear-gradient(90deg,rgba(74,168,255,.22) 0 5px,transparent 5px 11px);
+  }
+  .tl-fill{
+    position:absolute;top:0;bottom:0;left:0;border-radius:5px;
+    background:linear-gradient(90deg,rgba(34,197,94,.55),#22c55e);
+  }
+  .tl-fill.f-soft{background:linear-gradient(90deg,rgba(245,158,11,.5),#f59e0b)}
+  .tl-fill.f-hard{background:linear-gradient(90deg,rgba(239,68,68,.5),#ef4444)}
+  .tl-fill.f-kill{background:linear-gradient(90deg,#f43f5e,#ff8fa3)}
+  .tl-soft,.tl-hard{
+    position:absolute;top:-5px;bottom:-5px;width:0;z-index:3;
+  }
+  .tl-soft{border-left:1px dashed #f59e0b}
+  .tl-hard{border-left:1px dashed #ef4444}
+  .tl-ev{
+    position:absolute;top:50%;width:5px;height:5px;margin:-2.5px 0 0 -2.5px;
+    border-radius:50%;background:#5fb6ff;box-shadow:0 0 6px rgba(95,182,255,.9);z-index:2;
+  }
+  .tl-burst{
+    position:absolute;top:2px;bottom:2px;left:0;border-radius:3px;z-index:2;
+    background:repeating-linear-gradient(90deg,#8ed0ff 0 1.5px,rgba(142,208,255,0) 1.5px 3.4px);
+    box-shadow:0 0 9px rgba(95,182,255,.45);
+  }
+  .tl-break{
+    position:absolute;top:-5px;bottom:-5px;left:46%;width:0;border-left:2px solid #f43f5e;
+    box-shadow:0 0 9px rgba(244,63,94,.9);z-index:3;animation:blink 1.7s ease-in-out infinite;
+  }
+  .tl-head{
+    position:absolute;top:-9px;bottom:-9px;width:2px;left:0;border-radius:1px;
+    background:#e7eef8;box-shadow:0 0 10px rgba(231,238,248,.85);z-index:4;
+  }
+  .tl-head::after{
+    content:"";position:absolute;top:-4px;left:-3px;width:8px;height:8px;border-radius:50%;
+    background:#fff;box-shadow:0 0 8px rgba(255,255,255,.9);
+  }
+
+  /* ---------- 侧栏 ---------- */
+  .side{display:flex;flex-direction:column;gap:12px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px 11px}
+  .panel h3{
+    margin:0 0 8px;font-size:12.5px;font-weight:650;color:#dbe7f6;
+    display:flex;align-items:center;gap:7px;
+  }
+  .panel h3::before{content:"";width:3px;height:12px;border-radius:2px;background:var(--hard)}
+  .steps{margin:0;padding:0;list-style:none;counter-reset:s;display:flex;flex-direction:column;gap:6px}
+  .steps li{
+    counter-increment:s;position:relative;padding-left:22px;
+    font-size:11.5px;color:#b3c5da;line-height:1.55;
+  }
+  .steps li::before{
+    content:counter(s);position:absolute;left:0;top:1px;
+    width:16px;height:16px;border-radius:5px;background:#1b2836;border:1px solid #2b3d50;
+    color:#8fb1d6;font:10.5px/15px var(--mono);text-align:center;
+  }
+  .steps code{
+    font:11px/1 var(--mono);color:#9ecbff;background:#0b131b;
+    border:1px solid #1b2938;border-radius:4px;padding:1px 4px;white-space:nowrap;
+  }
+  .fine{margin:8px 0 0;font-size:11px;color:#7f96b0;line-height:1.6}
+  .fine b{color:#ffc9c9;font-weight:600}
+
+  .quick{width:100%;border-collapse:collapse;font-size:11.5px}
+  .quick th,.quick td{padding:4px 6px;text-align:left;border-bottom:1px solid #1b2837}
+  .quick th{color:#7f96b0;font-weight:500;font-size:11px}
+  .quick td{color:#b9cbe0;font-family:var(--mono);font-size:11.5px}
+  .quick tr.on td{color:#fff;background:rgba(74,168,255,.12)}
+  .quick tr.on td:first-child{border-radius:6px 0 0 6px}
+  .quick tr.on td:last-child{border-radius:0 6px 6px 0}
+  .quick .cur{font:10px/1 var(--mono);color:#8ec3ff;margin-left:5px}
+
+  /* ---------- 结论 ---------- */
+  .conclusion{
+    display:flex;align-items:center;gap:10px;
+    margin-top:12px;padding:9px 14px;
+    background:linear-gradient(90deg,rgba(34,197,94,.12),rgba(34,197,94,.03));
+    border:1px solid rgba(34,197,94,.35);border-radius:10px;
+    font-size:12.5px;color:#cfe6d8;
+  }
+  .conclusion b{color:#9df0bd;font-weight:700}
+  .conclusion .ico{font-size:14px;flex:none}
+  .conclusion.warn{background:linear-gradient(90deg,rgba(244,63,94,.14),rgba(244,63,94,.03));border-color:rgba(244,63,94,.4);color:#ffd5dc}
+  .conclusion.warn b{color:#ff9db0}
+  .conclusion.mid{background:linear-gradient(90deg,rgba(245,158,11,.12),rgba(245,158,11,.03));border-color:rgba(245,158,11,.38);color:#ffe6bd}
+  .conclusion.mid b{color:#ffd07a}
+
+  @media (max-width:1180px){
+    .main{grid-template-columns:1fr}
+    .side{flex-direction:row;flex-wrap:wrap}
+    .side .panel{flex:1;min-width:300px}
+  }
+  @media (max-height:740px){
+    body{padding:8px 14px 10px}
+    .card{padding:8px 11px 9px;gap:6px}
+    .tl-row{height:12px}
+    .steps{gap:4px}
+    .formula{padding:7px 12px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div class="brand">会话繁忙看门狗 · 决策沙盘<span class="ver">T-002 · 静态模拟</span></div>
+    <div class="banner"><span class="dot"></span>本页面为纯前端模拟（静态数据），用于确认看门狗阈值，不代表真实运行状态。</div>
+  </header>
+
+  <section class="toolbar" aria-label="阈值选择">
+    <span class="tb-label">软阈值（只观测）</span>
+    <div class="seg" role="group" aria-label="软阈值档位">
+      <button type="button" class="segbtn" data-soft="5" aria-pressed="false">5 分钟</button>
+      <button type="button" class="segbtn is-on" data-soft="15" aria-pressed="true">15 分钟<em>推荐</em></button>
+      <button type="button" class="segbtn" data-soft="30" aria-pressed="false">30 分钟</button>
+    </div>
+    <label class="sw">
+      <input type="checkbox" id="twice" checked>
+      <span class="bar" aria-hidden="true"></span>
+      <span>硬清理阈值 = 软阈值 ×2</span>
+    </label>
+    <span class="hardnote" id="hardNote" hidden></span>
+    <div class="readout">当前：软 <b class="s-soft" id="readSoft">15 分钟</b> · 硬 <b class="s-hard" id="readHard">30 分钟</b></div>
+  </section>
+
+  <section class="formula" aria-label="判定公式">
+    <pre>idle = now − max(lastEventAt, turnStartAt, activeWaitStartedAt, pendingWakeArmAt)</pre>
+    <div class="src">
+      数据来源：四个时间戳全部来自桥接内存状态 <code>src/bridge.js</code>（其中 <code>lastEventAt</code> 为本次新增）。<br>
+      索引：前两项按 <code>sessionId</code> 取，后两项按 <code>convKey</code> 取，经 <code>state.sessions</code> 互相映射。<br>
+      <code>activeWaitStartedAt</code> 在 <code>ACTIVE_WAIT_LEASE_MS</code>（15 分钟）内都是合法等待 —— 所以软阈值不能低于 15 分钟。
+    </div>
+    <div class="legend">
+      <span><i class="p"></i>放行</span>
+      <span><i class="s"></i>软告警</span>
+      <span><i class="h"></i>硬清理</span>
+      <span><i class="k"></i>误杀</span>
+    </div>
+  </section>
+
+  <div class="main">
+    <div class="cards" id="cards"></div>
+    <aside class="side">
+      <section class="panel">
+        <h3>硬清理动作（越过硬阈值后按序执行）</h3>
+        <ol class="steps">
+          <li>打 <code>zombieKilledAt</code>（让迟到 <code>turn/end</code> 短路）</li>
+          <li><code>await api.sessions.cancel({ sessionId })</code>（真取消，<code>session-not-found</code> 吞掉）</li>
+          <li><code>promptQueues</code>：在飞项 reject + 排队项 reject + <b>delete 条目</b></li>
+          <li><code>v2TurnStartAt</code> / <code>collectors</code> / <code>lastEventAt</code> 清理</li>
+          <li><code>pendingWakeKeys</code> + <code>disarmPendingWakeLease</code></li>
+          <li><code>activeWaits</code> 清理</li>
+          <li>残留：<code>sendToolSucceededSessions</code> / <code>pendingSendToolCalls</code> / <code>toolCallNames</code> / <code>social.silentTurns</code></li>
+        </ol>
+        <p class="fine">顺序<b>不得调换</b>：先打标记（短路迟到的 <code>turn/end</code>）→ 再真取消 → 最后清本地账本。第 3 步只能 <code>delete</code> 整条，不能只置 <code>running=false</code>，否则对象同一性守卫失效会重复投递。</p>
+      </section>
+      <section class="panel">
+        <h3>三档速查（软 / 硬）</h3>
+        <table class="quick" id="quick"></table>
+        <p class="fine">扫描周期 60 秒，连续 2 轮越线才动手（<code>STALL_CONFIRM_ROUNDS = 2</code>），避免单轮抖动误杀。</p>
+      </section>
+    </aside>
+  </div>
+
+  <footer class="conclusion" id="conclusion"></footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var FIXED_HARD = 30;
+  var state = { soft: 15, twice: true };
+
+  function hardOf(soft, twice) {
+    return twice ? soft * 2 : Math.max(FIXED_HARD, soft * 2);
+  }
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+  function clock(min) {
+    var s = Math.round(min * 60);
+    return pad2(Math.floor(s / 60)) + ':' + pad2(s % 60);
+  }
+
+  var SCENARIOS = [
+    {
+      id: 'A',
+      name: '正常短回合',
+      kind: 'normal',
+      end: 2,
+      idle: 10 / 60,
+      desc: '回合进行 2 分钟，每 10 秒有一帧事件。',
+      chips: ['回合时长 02:00', '帧间隔 00:10', '共 13 帧'],
+      events: (function () {
+        var arr = [];
+        for (var i = 0; i <= 12; i++) arr.push(i * 10 / 60);
+        return arr;
+      })()
+    },
+    {
+      id: 'B',
+      name: '合法长轮询',
+      kind: 'longpoll',
+      end: 10,
+      idle: 10,
+      desc: 'qq_wait_for_messages 静默 10 分钟，期间 DSH 零帧。',
+      chips: ['wait.maxMs = 600000', '依据 src/bridge.js:787', '静默期内零帧'],
+      silence: [0, 10]
+    },
+    {
+      id: 'C',
+      name: '回合卡死',
+      kind: 'stuck',
+      end: 45,
+      idle: 45,
+      desc: 'turn/start 之后 45 分钟无任何事件，事件流仍然活着。',
+      chips: ['事件流存活', '零帧时长 45:00'],
+      silence: [0, 45]
+    },
+    {
+      id: 'D',
+      name: '事件流断开',
+      kind: 'disconnected',
+      end: 0,
+      idle: 0,
+      desc: '断流瞬间：与看门狗无关，展示既有行为。',
+      chips: ['既有逻辑', '不涉及 idle 计龄', '本次不改动']
+    }
+  ];
+
+  /* 判定：返回 { verdict, stages[], why } */
+  function judge(sc, soft, hard) {
+    if (sc.kind === 'normal') {
+      return {
+        verdict: 'pass',
+        stages: [{ k: 'pass', label: '放行', at: null }],
+        why: '<b>放行</b>：每来一帧就刷新 lastEventAt，idle 始终只有 ' + clock(sc.idle) + '，离最激进的软阈值（05:00）还差 30 倍。任何档位都不该动它。'
+      };
+    }
+
+    if (sc.kind === 'longpoll') {
+      if (sc.idle >= soft) {
+        if (sc.idle >= hard) {
+          return {
+            verdict: 'kill',
+            stages: [{ k: 'kill', label: '误杀', at: null }],
+            why: '<b>误杀</b>：静默 10 分钟先后越过软阈值 ' + clock(soft) + ' 和硬清理线 ' + clock(hard) +
+              '。硬线被压到和这次合法等待一样长，只要等待稍长一点、或者紧接着再等一轮，合法的 qq_wait_for_messages 就会在 ' + clock(hard) +
+              ' 之后被真取消，排队中的唤醒全部 reject。这段静默里 DSH 事件流一帧都没有，但模型确实在等 HTTP 工具返回。'
+          };
+        }
+        return {
+          verdict: 'soft',
+          stages: [{ k: 'soft', label: '误判', at: null }],
+          why: '<b>误判</b>：静默 10 分钟越过软阈值 ' + clock(soft) + '，会被标成 suspect、写日志、在 /api/status 里露脸；' +
+            '但硬清理线在 ' + clock(hard) + '，这一档不会真的动手。噪声本身仍然是错的——它是合法等待，不是卡死。'
+        };
+      }
+      return {
+        verdict: 'pass',
+        stages: [{ k: 'pass', label: '放行', at: null }],
+        why: '<b>放行</b>：10 分钟静默仍低于软阈值 ' + clock(soft) + '，idle 没有碰到任何阈值线。这正是把推荐值定在 15 分钟的理由：阈值必须大于最长合法静默（10 分钟）。'
+      };
+    }
+
+    if (sc.kind === 'stuck') {
+      var stages = [];
+      if (sc.idle >= soft) stages.push({ k: 'soft', label: '软告警', at: soft });
+      if (sc.idle >= hard) stages.push({ k: 'hard', label: '硬清理', at: hard });
+      if (!stages.length) {
+        return {
+          verdict: 'pass',
+          stages: [{ k: 'pass', label: '放行', at: null }],
+          why: '<b>放行</b>：45 分钟零帧还没到软阈值 ' + clock(soft) + '，看门狗继续观察。'
+        };
+      }
+      var last = stages[stages.length - 1].k;
+      return {
+        verdict: last,
+        stages: stages,
+        why: '<b>' + (last === 'hard' ? '两级命中' : '仅软告警') + '</b>：软阈值 ' + clock(soft) +
+          ' 起只写日志、在 /api/status 标 suspect，<b>不动任何状态</b>；越过硬阈值 ' + clock(hard) +
+          ' 并连续两轮（60 秒 ×2）确认后，才执行右侧 7 步清理。' +
+          (last === 'hard' ? ' 45 分钟观察窗内两级都命中了。' : ' 45 分钟观察窗内还没到硬清理线。')
+      };
+    }
+
+    return {
+      verdict: 'pass',
+      stages: [{ k: 'pass', label: '放行', at: null }],
+      why: '<b>看门狗不介入</b>：事件流断开走既有 onclose 路径，一次性 drain 掉全部 prompt 队列，在飞与排队中的投递统一按上面那句原因 reject；看门狗只按 idle 计龄，不监听连接状态，这件事从头到尾没有它。'
+    };
+  }
+
+  /* 时间轴：刻度跨度取「场景时长」与「硬阈值」的较大者，保证阈值线始终在画面里 */
+  function timeline(sc, soft, hard) {
+    var span = Math.max(sc.end, hard, 1) * 1.08;
+    function pct(m) { return (m / span) * 100; }
+    function clamp(v) { return Math.max(7, Math.min(93, v)); }
+
+    var endPct = pct(sc.end);
+    var softPct = pct(soft);
+    var hardPct = pct(hard);
+
+    var zone = '';
+    if (sc.kind === 'longpoll' && sc.silence) {
+      zone = '<div class="tl-zone" style="left:0;width:' + pct(sc.silence[1]) + '%"></div>';
+    }
+    var evs = '';
+    if (sc.events) {
+      if (endPct < 18) {
+        evs = '<span class="tl-burst" style="width:' + endPct + '%"></span>';
+      } else {
+        evs = sc.events.map(function (m) {
+          return '<span class="tl-ev" style="left:' + pct(m) + '%"></span>';
+        }).join('');
+      }
+    }
+    var v = judge(sc, soft, hard).verdict;
+    var fillCls = v === 'pass' ? '' : (v === 'soft' ? ' f-soft' : (v === 'hard' ? ' f-hard' : ' f-kill'));
+
+    return '' +
+      '<div class="tl">' +
+        '<div class="tl-row"><span class="tl-lbl soft" style="left:' + clamp(softPct) + '%">软 ' + clock(soft) + '</span></div>' +
+        '<div class="tl-track">' +
+          '<div class="tl-fill' + fillCls + '" data-end="' + endPct + '" style="width:0%"></div>' +
+          zone +
+          evs +
+          '<span class="tl-soft" style="left:' + softPct + '%"></span>' +
+          '<span class="tl-hard" style="left:' + hardPct + '%"></span>' +
+          '<span class="tl-head" data-end="' + endPct + '" style="left:0%"></span>' +
+        '</div>' +
+        '<div class="tl-row"><span class="tl-lbl hard" style="left:' + clamp(hardPct) + '%">硬 ' + clock(hard) + '</span></div>' +
+      '</div>';
+  }
+
+  function timelineBroken() {
+    return '' +
+      '<div class="tl">' +
+        '<div class="tl-row"><span class="tl-lbl plain" style="left:16%">连接正常</span><span class="tl-lbl hard" style="left:72%">✕ 断流瞬间</span></div>' +
+        '<div class="tl-track">' +
+          '<div class="tl-fill" style="width:46%"></div>' +
+          '<span class="tl-break"></span>' +
+        '</div>' +
+        '<div class="tl-row"><span class="tl-lbl plain" style="left:50%">既有 onclose 路径 · 一次性 drain 全部队列</span></div>' +
+      '</div>';
+  }
+
+  function badgesOf(j) {
+    var html = j.stages.map(function (s, i) {
+      var text = s.at == null ? s.label : s.label + ' ' + clock(s.at);
+      return (i ? '<i class="arr">→</i>' : '') + '<span class="badge b-' + s.k + '">' + text + '</span>';
+    }).join('');
+    return '<span class="badges">' + html + '</span>';
+  }
+
+  function cardHTML(sc, soft, hard) {
+    var j = judge(sc, soft, hard);
+    var chips = sc.chips.map(function (c) { return '<span>' + c + '</span>'; }).join('');
+    if (sc.kind === 'longpoll' && j.verdict === 'kill') {
+      chips += '<span class="hotline">10:00 = 硬清理线</span>';
+    }
+    if (sc.kind === 'longpoll' && j.verdict === 'soft') {
+      chips += '<span>硬清理线 ' + clock(hard) + '（未触及）</span>';
+    }
+    if (sc.kind === 'stuck') {
+      chips += '<span>硬清理线 ' + clock(hard) + '</span>';
+    }
+    var tl = sc.kind === 'disconnected' ? timelineBroken() : timeline(sc, soft, hard);
+    var snip = sc.kind === 'disconnected'
+      ? '<div class="snippet">drainAllPromptQueues(\'事件流断开，已取消未完成的投递\')</div>'
+      : '';
+
+    return '<article class="card" data-verdict="' + j.verdict + '">' +
+      '<div class="card-hd"><span class="tag">场景 ' + sc.id + '</span><h2>' + sc.name + '</h2>' + badgesOf(j) + '</div>' +
+      '<p class="desc">' + sc.desc + '</p>' +
+      '<div class="chips">' + chips + '</div>' +
+      snip +
+      tl +
+      '<p class="why">' + j.why + '</p>' +
+    '</article>';
+  }
+
+  function quickTable(soft, hard) {
+    var rows = [5, 15, 30].map(function (s) {
+      var h = hardOf(s, state.twice);
+      var on = s === soft;
+      return '<tr' + (on ? ' class="on"' : '') + '><td>' + s + ' 分钟' + (s === 15 ? '<span class="cur">推荐</span>' : '') +
+        '</td><td>' + clock(h) + '</td></tr>';
+    }).join('');
+    return '<tr><th>软阈值</th><th>对应硬阈值</th></tr>' + rows;
+  }
+
+  function conclusionHTML(soft, hard) {
+    if (soft === 15 && hard === 30) {
+      return '<span class="ico">✅</span><span><b>15 分钟软告警 + 30 分钟硬清理</b>：合法长轮询（10 分钟）不会被打断，卡死会话最迟 30 分钟自愈。</span>';
+    }
+    if (soft === 5) {
+      return '<span class="ico">⚠️</span><span><b>5 分钟档太激进</b>：合法的 10 分钟 qq_wait_for_messages 会在 05:00 被判成僵尸' +
+        (hard <= 10 ? '，并在 10:00 真的被取消' : '（软告警噪声）') + '。调研结论已否决任何不超过 5 分钟的阈值。</span>';
+    }
+    return '<span class="ico">🐢</span><span><b>30 分钟软告警 + ' + clock(hard) + ' 硬清理</b>：最保守，合法流量绝不误伤，但卡死会话要挨到 ' +
+      clock(hard) + ' 才自愈，这段时间该会话一直拒收新消息。</span>';
+  }
+
+  /* ---------- 渲染 ---------- */
+  var rafId = 0;
+
+  function animate() {
+    var heads = Array.prototype.slice.call(document.querySelectorAll('.tl-head'));
+    var fills = Array.prototype.slice.call(document.querySelectorAll('.tl-fill[data-end]'));
+    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    function paint(e) {
+      var i;
+      for (i = 0; i < heads.length; i++) {
+        var he = parseFloat(heads[i].getAttribute('data-end'));
+        heads[i].style.left = (he * e) + '%';
+      }
+      for (i = 0; i < fills.length; i++) {
+        var fe = parseFloat(fills[i].getAttribute('data-end'));
+        fills[i].style.width = (fe * e) + '%';
+      }
+    }
+
+    if (reduce || !heads.length) { paint(1); return; }
+
+    var t0 = 0;
+    var DUR = 2400;
+    function step(ts) {
+      if (!t0) t0 = ts;
+      var k = Math.min(1, (ts - t0) / DUR);
+      paint(1 - Math.pow(1 - k, 3));
+      if (k < 1) rafId = requestAnimationFrame(step);
+      else rafId = 0;
+    }
+    rafId = requestAnimationFrame(step);
+  }
+
+  function render() {
+    var soft = state.soft;
+    var hard = hardOf(soft, state.twice);
+
+    var btns = document.querySelectorAll('.segbtn');
+    for (var i = 0; i < btns.length; i++) {
+      var on = Number(btns[i].getAttribute('data-soft')) === soft;
+      btns[i].classList.toggle('is-on', on);
+      btns[i].setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
+
+    document.getElementById('readSoft').textContent = soft + ' 分钟';
+    document.getElementById('readHard').textContent = hard + ' 分钟';
+
+    var note = document.getElementById('hardNote');
+    if (!state.twice && soft * 2 > FIXED_HARD) {
+      note.textContent = '固定硬阈值 ' + FIXED_HARD + ' 分钟必须大于软阈值，本档自动取 ' + hard + ' 分钟';
+      note.hidden = false;
+    } else {
+      note.textContent = '';
+      note.hidden = true;
+    }
+
+    document.getElementById('cards').innerHTML = SCENARIOS.map(function (sc) {
+      return cardHTML(sc, soft, hard);
+    }).join('');
+
+    document.getElementById('quick').innerHTML = quickTable(soft, hard);
+
+    var c = document.getElementById('conclusion');
+    c.className = 'conclusion' + (soft === 15 && hard === 30 ? '' : (soft === 5 ? ' warn' : ' mid'));
+    c.innerHTML = conclusionHTML(soft, hard);
+
+    animate();
+  }
+
+  function bind() {
+    var btns = document.querySelectorAll('.segbtn');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].addEventListener('click', function () {
+        state.soft = Number(this.getAttribute('data-soft'));
+        render();
+      });
+    }
+    document.getElementById('twice').addEventListener('change', function () {
+      state.twice = this.checked;
+      render();
+    });
+  }
+
+  bind();
+  render();
+})();
+</script>
+</body>
+</html>
