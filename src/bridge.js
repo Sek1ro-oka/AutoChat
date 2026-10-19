@@ -1248,6 +1248,177 @@ function extractMediaFromSegments(segments) {
   return media;
 }
 
+// ── 文件收发：QQ 里收到的 .md/.txt/.pdf 落到 files/ 托管目录 ────────────────
+// 只做「下载 + 落盘」，读取/发送由 src/mcp-file-safe.js 的 MCP 工具负责，
+// 这样桥接不需要知道文件内容，也不会把整篇正文塞进提示词。
+const MANAGED_FILE_EXT = new Set(['.md', '.txt', '.pdf']);
+
+function extractFilesFromSegments(segments) {
+  const files = [];
+  for (const seg of segments ?? []) {
+    if (!seg || typeof seg !== 'object' || seg.type !== 'file') continue;
+    const d = seg.data ?? {};
+    files.push({
+      name: String(d.name ?? d.file_name ?? d.filename ?? d.file ?? '').trim(),
+      file: String(d.file ?? ''),
+      fileId: String(d.file_id ?? d.file ?? d.id ?? ''),
+      id: String(d.id ?? ''),
+      busid: d.busid ?? d.bus_id ?? null,
+      url: String(d.url ?? ''),
+      size: Number(d.size ?? d.file_size ?? 0) || 0
+    });
+  }
+  return files;
+}
+
+function managedFileDir(cfg) {
+  const raw = String(cfg?.file?.dir ?? 'files').trim() || 'files';
+  return path.isAbsolute(raw) ? raw : path.join(ROOT, raw);
+}
+
+// 只保留 .md/.txt/.pdf：其它类型一律丢弃（不做猜测、不做改名成 .txt）
+function sanitizeIncomingFileName(raw) {
+  const base = path.basename(String(raw ?? '').replace(/\\/g, '/')).trim();
+  if (!base) return '';
+  const cleaned = base.replace(/[^\p{L}\p{N} ._\-()（）[\]【】]/gu, '_').slice(0, 100).trim();
+  const ext = path.extname(cleaned).toLowerCase();
+  if (!MANAGED_FILE_EXT.has(ext)) return '';
+  return cleaned;
+}
+
+function uniqueFileName(dir, name) {
+  const ext = path.extname(name);
+  const stem = name.slice(0, name.length - ext.length);
+  let candidate = name;
+  for (let i = 2; fs.existsSync(path.join(dir, candidate)); i += 1) {
+    candidate = `${stem}-${i}${ext}`;
+    if (i > 50) { candidate = `${stem}-${Date.now()}${ext}`; break; }
+  }
+  return candidate;
+}
+
+async function readBufferedBody(res, maxBytes) {
+  const declared = Number(res.headers.get('content-length') ?? 0);
+  if (declared > maxBytes) throw new Error(`文件超过上限（${declared} > ${maxBytes} 字节）`);
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of res.body) {
+    total += chunk.length;
+    if (total > maxBytes) throw new Error(`文件超过上限（> ${maxBytes} 字节）`);
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+// 取文件字节：优先直接下载 data.url；没有 url 时按会话类型向 SnowLuma 要临时下载地址。
+// 私聊文件走 get_private_file_url（{user_id, file_id}），群文件走 get_group_file_url
+// （{group_id, file_id, busid}）；两者都失败才退回 get_file（只适合图片/语音缓存，
+// 普通文件会返回 retcode=100 "file_id not found in the image/voice cache"）。
+async function oneBotActionNested(cfg, action, params, timeoutMs = 120000) {
+  const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+  const res = await fetch(`${httpUrl}/${action}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
+    },
+    body: JSON.stringify(params),
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+  const body = await res.json().catch(() => ({}));
+  return { res, body, data: body?.data ?? {} };
+}
+
+async function fetchIncomingFileBytes(meta, cfg, ctx = {}) {
+  const maxBytes = Math.min(Math.max(Number(cfg?.file?.maxSendBytes) || 20971520, 65536), 67108864);
+  if (/^https?:\/\//i.test(meta.url)) {
+    const res = await fetch(meta.url, { signal: AbortSignal.timeout(120000) });
+    if (!res.ok) throw new Error(`下载失败 HTTP ${res.status}`);
+    return readBufferedBody(res, maxBytes);
+  }
+  const fileId = meta.fileId || meta.id || meta.file;
+  const failures = [];
+
+  // ① 按会话类型换成临时下载地址，再正常 HTTP 下载
+  const urlActions = [];
+  if (ctx.kind === 'private' && ctx.id) {
+    urlActions.push(['get_private_file_url', { user_id: Number(ctx.id), file_id: fileId }]);
+  } else if (ctx.kind === 'group' && ctx.id) {
+    urlActions.push(['get_group_file_url', { group_id: Number(ctx.id), file_id: fileId, busid: Number(meta.busid ?? 102) }]);
+  }
+  for (const [action, params] of urlActions) {
+    try {
+      const { body, data } = await oneBotActionNested(cfg, action, params);
+      const url = String(data.url ?? '');
+      if (/^https?:\/\//i.test(url)) {
+        const res = await fetch(url, { signal: AbortSignal.timeout(180000) });
+        if (!res.ok) throw new Error(`下载失败 HTTP ${res.status}`);
+        return readBufferedBody(res, maxBytes);
+      }
+      failures.push(`${action}: ${JSON.stringify(body).slice(0, 160)}`);
+    } catch (error) {
+      failures.push(`${action}: ${error?.message ?? error}`);
+    }
+  }
+
+  // ② 退回 get_file（图片/语音缓存、部分实现会返回 base64 或本地路径）
+  try {
+    const { body, data } = await oneBotActionNested(cfg, 'get_file', { file_id: fileId, file: meta.file });
+    if (typeof data.base64 === 'string' && data.base64.length > 0) {
+      const bytes = Buffer.from(data.base64, 'base64');
+      if (bytes.length > maxBytes) throw new Error(`文件超过上限（${bytes.length} 字节）`);
+      return bytes;
+    }
+    const local = String(data.file ?? data.path ?? '');
+    if (local && fs.existsSync(local)) {
+      const stat = fs.statSync(local);
+      if (stat.size > maxBytes) throw new Error(`文件超过上限（${stat.size} 字节）`);
+      return fs.readFileSync(local);
+    }
+    failures.push(`get_file: ${JSON.stringify(body).slice(0, 160)}`);
+  } catch (error) {
+    failures.push(`get_file: ${error?.message ?? error}`);
+  }
+
+  throw new Error(`没有可用的下载地址（${failures.join('；')}）`);
+}
+
+async function saveIncomingFiles(fileList, { cfg, isOwner, kind, id }) {
+  if (!Array.isArray(fileList) || fileList.length === 0) return [];
+  if (cfg?.file?.enabled === false || cfg?.file?.incomingEnabled === false) return [];
+  // 默认只收管理员的文件：群里任何人发 PDF 都会落盘会让托管目录变成公共投递箱。
+  if (cfg?.file?.incomingFromAdminOnly !== false && !isOwner) {
+    log(`收到文件但不落盘（非管理员，file.incomingFromAdminOnly=true）：${fileList.map((f) => f.name || f.file).join('、')}`);
+    return [];
+  }
+  const dir = managedFileDir(cfg);
+  fs.mkdirSync(dir, { recursive: true });
+  const saved = [];
+  for (const meta of fileList) {
+    const name = sanitizeIncomingFileName(meta.name);
+    if (!name) {
+      log(`跳过不支持的文件类型：${meta.name || meta.file || '(未命名)'}`);
+      continue;
+    }
+    try {
+      const bytes = await fetchIncomingFileBytes(meta, cfg, { kind, id });
+      const fileName = uniqueFileName(dir, name);
+      fs.writeFileSync(path.join(dir, fileName), bytes);
+      saved.push({ name: fileName, bytes: bytes.length });
+      log(`已保存 QQ 文件：${fileName}（${bytes.length} 字节）`);
+    } catch (error) {
+      log(`保存 QQ 文件失败（${name}）：${error?.message ?? error}`);
+    }
+  }
+  return saved;
+}
+
+function fileHintFor(saved) {
+  if (!Array.isArray(saved) || saved.length === 0) return '';
+  const list = saved.map((item) => `${item.name}（${(item.bytes / 1024).toFixed(1)}KB）`).join('、');
+  return `\n【文件】本条消息含文件，已存入托管目录：${list}。需要内容时调用 mcp__file-safe__file_read（PDF 只能抽取文本层）。`;
+}
+
 function allowed(kind, id, cfg) {
   // OneBot 事件里的 id 可能是数字也可能是字符串（int64 序列化差异），统一转字符串比较。
   // 配置字段兼容单数（group/private）与复数（groups/privates）两种写法。
@@ -9859,9 +10030,10 @@ async function main() {
     const resolveReply = (messageId) => resolveReplyInfo(kind, id, messageId, event.self_id);
     // textContent 带引用对象信息，供 DSH 判断“这句话在对谁说”；
     // plainContent 只保留当前消息自己的文字，用于命令/指向性判断，避免被引用原文干扰。
-    const textContent = await segmentsToText(event.message ?? [], { resolveAtName, resolveReply });
+    let textContent = await segmentsToText(event.message ?? [], { resolveAtName, resolveReply });
     const plainContent = await segmentsToText(event.message ?? [], { resolveAtName, includeReply: false });
     const mediaList = extractMediaFromSegments(event.message ?? []);
+    const fileList = extractFilesFromSegments(event.message ?? []);
     const messageRef = String(event.message_id ?? event.msg_id ?? event.message_seq ?? '');
     const seqRef = event.message_seq != null ? String(event.message_seq) : '';
     const refsToStore = [...new Set([messageRef, seqRef].filter(Boolean))];
@@ -9883,8 +10055,11 @@ async function main() {
     // 因此必须先解析 quoteTargetIsSelf 再做空文本过滤，避免“只引用不附文”被漏掉。
     const quoteTargetIsSelf = await isQuoteTargetSelf(event.message ?? [], kind, id, event.self_id);
     if (!isSessionAllowedInCurrentMode(key)) return;
-    if (!plainContent && !quoteTargetIsSelf) return;
+    if (!plainContent && !quoteTargetIsSelf && fileList.length === 0) return;
     const isOwner = String(event.user_id) === String(cfg.ownerQQ ?? '');
+    // 文件先落盘，再把提示接到 textContent 上：后续摘要/未读/提示词都自然带上这条线索。
+    const savedFiles = await saveIncomingFiles(fileList, { cfg, isOwner, kind, id });
+    if (savedFiles.length > 0) textContent += fileHintFor(savedFiles);
     const roleState = readRoleState();
 
     // 若该会话有挂起的提问/审批，先当作回答处理（用当前消息自己的文字，不含引用原文）。
@@ -10776,6 +10951,10 @@ async function main() {
         toolCallNames.clear();
         pendingWakeKeys.clear();
         clearAllPendingWakeLeases();
+        // 事件流断开时若还有 turn 在飞，那个 await 永远不会 settle，entry.running 会一直为 true，
+        // 该会话就被永久判成「会话繁忙」（12:36 DSH 重启后群里 @ 不进反令就是这么来的）。
+        // 断开即丢弃所有未完成的投递，让下一次唤醒能重新排队。
+        drainAllPromptQueues('事件流断开，已取消未完成的投递');
         social.exitingSessions.clear();
         wakeConfigUpdatedKeys.clear();
         markReadCalledKeys.clear();

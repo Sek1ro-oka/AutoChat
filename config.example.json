@@ -21,6 +21,35 @@
     "launcherPath": "",
     "homeDir": ""
   },
+  "mc": {
+    "enabled": false,
+    "host": "",
+    "keyPath": "",
+    "knownHostsPath": "",
+    "remoteBin": "mc",
+    "adminQQ": [],
+    "timeoutMs": 20000
+  },
+  "file": {
+    "enabled": false,
+    "dir": "files",
+    "adminQQ": [],
+    "maxReadBytes": 8388608,
+    "maxSendBytes": 20971520,
+    "maxTextChars": 20000,
+    "maxPdfPages": 200,
+    "incomingEnabled": true,
+    "incomingFromAdminOnly": true
+  },
+  "bili": {
+    "enabled": false,
+    "bin": "",
+    "timeoutMs": 60000,
+    "maxSubtitleChars": 6000,
+    "maxComments": 10,
+    "useOpencli": true,
+    "opencliBin": ""
+  },
   "ownerQQ": null,
   "sessionCwd": "",
   "agentPreset": "qq-chat",

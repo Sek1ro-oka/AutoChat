@@ -9,6 +9,9 @@ config.json
 *.bak
 *.bak-*
 
+# 运行日志目录（bridge.out / dsh-web.out 等，仅本机排障用）
+/logs/
+
 # Local development / planning / research docs (not part of public project)
 /PROJECT_GUIDE.md
 /ARCH_REVIEW.md
@@ -65,4 +68,11 @@ docs/guides/VOICE.md
 
 # 语音库（用户个人音频素材，config.json 的 socialV2.voice.dir 指向此处）
 audio/
+
+# 文件托管目录（config.json 的 file.dir 指向此处）：QQ 收发的 .md/.txt/.pdf 都在这里
+files/
+
+# 本地临时/交接文档目录（HANDOVER-*.md、一次性探针脚本都在这里）。
+# 里面是本机绝对路径和真实 QQ 号/群号：既不该入库，也不该出现在 privacy-scan 的结果里。
+/work/
 

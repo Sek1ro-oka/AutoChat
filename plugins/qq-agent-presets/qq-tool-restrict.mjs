@@ -164,6 +164,17 @@ const SAFE_PREFIXES = [
   'mcp__snowluma__',
   'mcp__snowluma-host__',
   'mcp__web-search-safe__',
+  // Minecraft 服务器控制（src/mcp-mc-console.js）：工具面固定为 list/status/ban/unban/
+  // kick/say，写操作在 MCP 进程内再校验 operator_qq 是否属于 config.json 的 mc.adminQQ，
+  // 所以放行的只是窄接口，不是任意命令执行。
+  'mcp__mc-console__',
+  // 文件托管目录（src/mcp-file-safe.js）：只碰 files/ 下的 .md/.txt/.pdf，
+  // 写入/删除/发送在 MCP 进程内再校验 operator_qq 是否属于 config.json 的 file.adminQQ；
+  // 读操作（file_list/file_read）对群友开放，但同样被钉死在托管目录内。
+  'mcp__file-safe__',
+  // B站只读能力（src/mcp-bili-safe.js）：搜索、视频详情、字幕、热门，
+  // 底层是 bili-cli；只放行这三个只读动作，点赞/投币/登录等写操作在 MCP 服务里根本没有实现。
+  'mcp__bili-safe__',
 ]
 
 // 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，

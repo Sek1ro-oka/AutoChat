@@ -34,8 +34,10 @@
 
 ## QQ 会话 agent 的硬边界
 
-1. **无本地工具**：qq-chat / qq-chat-v2 预设不挂载 bash/pwsh、文件读写、子代理、工作流——群友无论如何诱导，agent 物理上无法操作本机。
-2. **QQ 动作安全子集**：只允许 `mcp__snowluma__*`、`mcp__snowluma-host__*`、`mcp__web-search-safe__*` 三个命名空间下的工具，以及 `ask_user_question` / `todo_write`；其他工具（含 `dev_*` 开发/管理工具）在执行期会被 `qq-tool-restrict.mjs` 拒绝。QQ 动作无禁言、踢人、文件上传下载等管理操作。
+1. **无通用本地工具**：qq-chat / qq-chat-v2 预设不挂载 bash/pwsh、子代理、工作流，也不暴露本机任意路径——群友无论如何诱导，agent 物理上无法执行命令或读 `files/` 之外的文件。唯一的本地能力是下面第 2 条的文件托管目录。
+2. **QQ 动作安全子集**：只允许 `mcp__snowluma__*`、`mcp__snowluma-host__*`、`mcp__web-search-safe__*`、`mcp__mc-console__*`、`mcp__file-safe__*`、`mcp__bili-safe__*` 六个命名空间下的工具，以及 `ask_user_question` / `todo_write`；其他工具（含 `dev_*` 开发/管理工具）在执行期会被 `qq-tool-restrict.mjs` 拒绝。QQ 动作无禁言、踢人等管理操作。
+   - **B站只读（`src/mcp-bili-safe.js`）**：`bili_search` / `bili_video` / `bili_hot` 三个只读工具，底层调用本机 `bili-cli`（agent-reach 的 B站渠道），能拿标题/简介/时长/播放数据/字幕/评论/B站 AI 总结。只接受 BV 号或 `bilibili.com`、`b23.tv` 链接；参数直接 `spawn` 传数组、不过 shell；点赞、投币、登录、发动态等写操作**没有实现**。字幕默认最多 6000 字符，超时 60s。详见 [docs/guides/BILI.md](docs/guides/BILI.md)。
+   - **文件托管目录（`src/mcp-file-safe.js`）**：只碰 `files/`（`config.json` 的 `file.dir`）下、且扩展名是 `.md` / `.txt` / `.pdf` 的文件。`file_list` / `file_read` 任何人可用；`file_save` / `file_delete` / `file_send` 必须带 `operator_qq` 且命中 `file.adminQQ`。文件名先过白名单字符集、拒绝任何路径分量，resolve 后必须仍在托管目录内；读取 8MB / 发送 20MB / 写入字符上限可配（代码缺省 12 万，`config.example.json` 与出厂配置为 2 万）；`file_send` 的目标还要再过一遍 `allow.groups` / `allow.private` 白名单。PDF 只读（抽取文本层），不生成。收文件默认只收管理员发来的（`file.incomingFromAdminOnly`），落盘后由 agent 用 `file_read` 读；需要清理由管理员调 `file_delete` 或用 `file_send` 的 `delete_after`。详见 [docs/guides/FILES.md](docs/guides/FILES.md)。
 3. **只读联网搜索**：`qq-chat` / `qq-chat-v2` 预设已关闭 DSH 内置 `tool-web` 的 `search` / `fetch`，联网统一走 `src/mcp-web-search-safe.js` 提供的 `mcp__web-search-safe__web_search/web_fetch`。不暴露本地文件、命令执行、写操作。
    - ✅ `mcp__web-search-safe__web_fetch` 已做 SSRF 加固：仅 http/https、禁止 localhost/私有 IP/链路本地/CGNAT/带凭据 URL、DNS 解析结果全量校验、每跳重定向重新校验、响应体限量读取。
 4. **发送强制白名单**：所有发送类工具（`qq_send_group_message` / `qq_send_private_message` / `qq_send_message` / `qq_send_burst` / `qq_reply` / `qq_send_poke` / `qq_send_sticker` / `qq_send_voice` 等）的目标必须命中 `config.json` 的 `allow.groups` / `allow.private`，否则拒绝执行。

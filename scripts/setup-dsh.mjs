@@ -123,7 +123,7 @@ function yamlSingleQuote(s) {
 }
 
 // 由桥接托管的 MCP 条目 id：脚本对这三个 id 拥有所有权，可安全地按 id 增删。
-const MANAGED_MCP_IDS = ['mcp-snowluma', 'mcp-snowluma-host', 'mcp-web-search-safe'];
+const MANAGED_MCP_IDS = ['mcp-snowluma', 'mcp-snowluma-host', 'mcp-web-search-safe', 'mcp-mc-console', 'mcp-file-safe', 'mcp-bili-safe'];
 
 function mcpEntries() {
   const node = process.execPath;
@@ -131,6 +131,12 @@ function mcpEntries() {
     'mcp-snowluma': { serverName: 'snowluma', script: path.join(REPO_ROOT, 'src', 'mcp-snowluma-safe.js'), toolCallTimeoutMs: 725000 },
     'mcp-snowluma-host': { serverName: 'snowluma-host', script: path.join(REPO_ROOT, 'src', 'mcp-host-server.js') },
     'mcp-web-search-safe': { serverName: 'web-search-safe', script: path.join(REPO_ROOT, 'src', 'mcp-web-search-safe.js') },
+    // SSH 到 Minecraft 主机执行 mc 包装脚本；单次命令有 20s 超时，给足网络抖动余量。
+    'mcp-mc-console': { serverName: 'mc-console', script: path.join(REPO_ROOT, 'src', 'mcp-mc-console.js'), toolCallTimeoutMs: 60000 },
+    // 托管目录 files/ 的读写与 QQ 文件收发；PDF 文本抽取（unpdf）可能要几秒，给到 120s。
+    'mcp-file-safe': { serverName: 'file-safe', script: path.join(REPO_ROOT, 'src', 'mcp-file-safe.js'), toolCallTimeoutMs: 120000 },
+    // B站搜索/视频详情/字幕；bili-cli 是 Python 程序，冷启动慢，给到 120s。
+    'mcp-bili-safe': { serverName: 'bili-safe', script: path.join(REPO_ROOT, 'src', 'mcp-bili-safe.js'), toolCallTimeoutMs: 120000 },
   };
   let out = '# === qq-bridge MCP BEGIN ===\n';
   out += '# 由 scripts/setup-dsh.mjs 维护；这段区块会被整体替换，请勿手工编辑内部条目。\n';
