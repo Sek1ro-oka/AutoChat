@@ -82,6 +82,13 @@ const tests = [
   // 三端点是否落在令牌关卡之后、闸门顺序是否 disabled → audit → quota → OneBot、
   // MCP 三工具是否都注册且描述里带「不代发」红线。
   'test-qzone-endpoints.mjs',
+  // 情绪状态机（T-012 第一步）：四维强度的软饱和累积 / 半衰期衰减 / 剂量积分 /
+  // canVent 五道闸门的 reason 与 retryAfterMs 都是纯函数，时钟由 now 注入，
+  // 所以这里能钉死「第 3 次才触发」「冷却 45 分钟」「30 分钟后约剩一半」这类时序断言。
+  'test-affect-core.mjs',
+  // 宣泄决策器（T-012 第二步）：闸门顺序、出口降级链、文案质量闸门（URL/@/手机号/
+  // 3-gram 去重）。同样是纯函数，不连网不发消息。
+  'test-affect-vent.mjs',
 ];
 let failed = 0;
 for (const test of tests) {
