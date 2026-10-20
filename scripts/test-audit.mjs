@@ -89,6 +89,9 @@ const tests = [
   // 宣泄决策器（T-012 第二步）：闸门顺序、出口降级链、文案质量闸门（URL/@/手机号/
   // 3-gram 去重）。同样是纯函数，不连网不发消息。
   'test-affect-vent.mjs',
+  // 情绪接线的只读契约（T-012 第三步）：端点是否存在且只读、配置归一入口、
+  // 状态文件路径、样例配置与出厂默认是否对齐、桥接里有没有偷偷写死阈值。
+  'test-affect-endpoints.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

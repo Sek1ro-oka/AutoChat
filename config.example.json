@@ -305,6 +305,57 @@
       "maxBytes": 8388608,
       "maxPixels": 64000000,
       "maxCount": 5
+    },
+    "affect": {
+      "enabled": true,
+      "vents": {
+        "qzone": true,
+        "private": true,
+        "diary": true,
+        "group": false
+      },
+      "minIntervalMs": 7200000,
+      "jitterRatio": 0.25,
+      "quietHours": {
+        "enabled": false,
+        "start": "23:30",
+        "end": "07:30"
+      },
+      "dailyCap": {
+        "qzone": 2,
+        "private": 3,
+        "diary": 5
+      },
+      "emotions": {
+        "anger": {
+          "halfLifeMin": 30,
+          "sensitivity": 0.35,
+          "threshold": 0.7,
+          "doseMin": 12,
+          "cooldownMin": 45
+        },
+        "sadness": {
+          "halfLifeMin": 180,
+          "sensitivity": 0.2,
+          "threshold": 0.75,
+          "doseMin": 30,
+          "cooldownMin": 120
+        },
+        "joy": {
+          "halfLifeMin": 90,
+          "sensitivity": 0.3,
+          "threshold": 0.85,
+          "doseMin": 20,
+          "cooldownMin": 60
+        },
+        "boredom": {
+          "halfLifeMin": 120,
+          "sensitivity": 0.15,
+          "threshold": 0.8,
+          "doseMin": 60,
+          "cooldownMin": 180
+        }
+      }
     }
   },
   "webSearch": {

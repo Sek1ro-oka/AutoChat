@@ -97,6 +97,25 @@ import {
   applyStickerNote,
   markStickerUsed
 } from './sticker-lib.js';
+// 情绪内核（T-012）：四维心情的衰减、阈值判定、状态归一与序列化。
+// 阈值/剂量/半衰期一律以 AFFECT_DEFAULTS 与 normalizeAffectConfig 为准，
+// 桥接里**不写任何字面量**——将来调平衡只改 affect-core.js 一处。
+import {
+  AFFECT_EMOTIONS,
+  AFFECT_DEFAULTS,
+  normalizeAffectConfig,
+  createState,
+  normalizeState,
+  decayTo,
+  scoreOf,
+  canVent,
+  listCandidates,
+  serializeState,
+  parseState
+} from './affect-core.js';
+// 情绪出口的纯规划层：只算「该不该说、走哪个渠道、说多长」，不发送、不写盘。
+// planVent 被 /api/socialV2/affect 用来给面板生成「现在会发生什么」的逐行中文解释。
+import { planVent, checkVentText } from './affect-vent.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -122,6 +141,9 @@ const BRIDGE_LOG = path.join(STATE_DIR, 'bridge.log');
 // 两者都可能是「不存在」——读审计一律当空文件处理，绝不能让 GET 端点 500。
 const SOCIAL_AUTO_AUDIT_FILE = path.join(STATE_DIR, 'social-auto.jsonl');
 const SOCIAL_AUTO_STATE_FILE = path.join(STATE_DIR, 'social-auto.json');
+// 情绪状态：四维强度/剂量/冷却 + 最近 50 条事件与最近 50 条宣泄决策（T-012）。
+// 与 qzone-posts.json 一样是「可丢」文件：不存在或损坏都从出厂状态重启，绝不让端点 500。
+const AFFECT_STATE_FILE = path.join(STATE_DIR, 'affect.json');
 
 /**
  * 模式拼写的**唯一**归一入口（输入边界）。
@@ -965,6 +987,13 @@ function loadConfig() {
   // 额度 0 是合法值——当天一次都不自动做，不能当"没设置"回落成 5。
   cfg.socialV2.automation = normalizeAutomation(cfg.socialV2.automation);
 
+  // socialV2.affect：情绪内核的四维心情（生气/难过/开心/无聊）+ 出口开关 + 三条日常额度。
+  // 这里是**唯一**的归一入口：面板、阈值判定、冷却计算都吃这一份，缺字段补默认、越界钳制
+  // （normalizeAffectConfig 永不抛，坏的配置最多退回出厂值）。
+  // 注意：归一只保留 quietHours 的 start/end（enabled 目前不参与判定）——本步骤
+  // planVent 恒按 quiet:false 调用，静默时段等下一步接入发送时再连同 enabled 一起处理。
+  cfg.socialV2.affect = normalizeAffectConfig(cfg.socialV2?.affect);
+
   // socialV2.voice：语音发送（把准备好的音频文件当 QQ 语音发出去）。
   // dir 为相对仓库根目录的语音库路径；AI 的 qq_send_voice 默认只能从这个目录取文件，
   // 绝对路径需要显式开 allowAbsolutePath（默认关，避免 prompt injection 读到任意本地文件）。
@@ -1525,6 +1554,172 @@ function qzoneKeepPosts(windowCap) {
 // atomicWriteJson 自带 mkdir + 临时文件 + rename，不用自己写；裁剪统一走 prunePosts。
 function writeQzoneState(posts, windowCap) {
   atomicWriteJson(QZONE_STATE_FILE, { version: 1, posts: prunePosts(posts, qzoneKeepPosts(windowCap)) });
+}
+
+// ── 情绪内核（T-012）：状态文件与面板快照 ───────────────────────────────────
+// 判定逻辑（衰减 / 阈值 / 冷却 / 配额闸门 / 出口规划）全在 src/affect-core.js 与
+// src/affect-vent.js，两个模块零 I/O 零依赖。这里只做两件事：读写 state/affect.json、
+// 把「这一秒的状态」拼成面板能直接渲染的一份快照。
+//
+// 和 qzone 一样不做进程内缓存：文件很小，且手动删文件 / 另一个进程改了状态都要立刻生效。
+
+// 四个情绪的中文标签（面板直接用）。键必须覆盖 AFFECT_EMOTIONS：
+// 漏一个就退回英文 key，面板上不会出现空白。
+const AFFECT_LABELS = Object.freeze({
+  anger: '生气',
+  sadness: '难过',
+  joy: '开心',
+  boredom: '无聊'
+});
+
+// 面板只显示最近 10 条；状态文件本身各留 50 条（normalizeState 的上限）。
+const AFFECT_SNAPSHOT_EVENTS = 10;
+// 决策记录里的正文只给摘要：面板一行放不下整段，全文留在 state/affect.json 里。
+const AFFECT_SNAPSHOT_TEXT_MAX = 40;
+
+/**
+ * 读情绪状态（纯读，不落盘）。
+ *
+ * - 没有文件 / JSON 坏了 / 形状不是对象 → 出厂状态（createState），且**不写盘**：
+ *   第一次真实变化由后续步骤负责落盘，读接口绝不制造副作用。
+ * - 其余都过 normalizeState：坏值修复、lastTs 钳到 now、events / ventLog 各留 50 条。
+ * - 永不抛：情绪状态是可丢数据，不能让它把端点弄成 500。
+ */
+function readAffectState(now = Date.now(), affectConfig = null) {
+  const ts = Number.isFinite(now) ? now : Date.now();
+  const affect = affectConfig ?? loadConfig().socialV2.affect;
+  const raw = readJsonSafe(AFFECT_STATE_FILE, null);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return createState(ts, affect);
+  try {
+    return normalizeState(raw, ts, affect);
+  } catch (error) {
+    log(`[affect] 状态文件无法归一，改用出厂状态：${error?.message ?? error}`);
+    return createState(ts, affect);
+  }
+}
+
+/**
+ * 落盘情绪状态（留给后续「记录事件 / 执行宣泄」，本步骤没有调用点）。
+ *
+ * serializeState 已经把 NaN / Infinity 换成 0；这里再走一遍 parseState 做形状校验，
+ * 保证写出去的永远是对象。失败只记日志：情绪是可丢数据，不能因为它让这一轮失败。
+ */
+function writeAffectState(state) {
+  try {
+    const payload = parseState(serializeState(state));
+    if (!payload) {
+      log('[affect] 状态序列化结果不是对象，本次跳过落盘');
+      return;
+    }
+    atomicWriteJson(AFFECT_STATE_FILE, payload);
+  } catch (error) {
+    log(`[affect] 状态落盘失败（本轮继续）：${error?.message ?? error}`);
+  }
+}
+
+/**
+ * 面板快照：一次读盘 + 一次规划，所有字段都是「now 这一秒」的值。
+ *
+ * 纯读：不落盘、不发消息、不起定时器、不改任何状态——带 agent token 也可以随便读。
+ * 为什么不缓存：文件只有几 KB，一次模型往返就够读几百遍。
+ */
+function affectSnapshot(now = Date.now()) {
+  const cfg = loadConfig();
+  const affect = cfg.socialV2.affect;
+  const ts = Number.isFinite(now) ? now : Date.now();
+
+  // 文件里的强度是「上次写入那一刻」的，先按时长衰减到 ts：否则面板会一直显示旧数字，
+  // 明明早该消气了还挂着 0.8。decayTo 不改入参，所以另建一份 live 视图给判定用。
+  const state = readAffectState(ts, affect);
+  const live = { ...state, emotions: {} };
+  const emotions = AFFECT_EMOTIONS.map((key) => {
+    const params = affect.emotions[key] ?? AFFECT_DEFAULTS.emotions[key];
+    const emotion = decayTo(state.emotions[key], ts, affect, key);
+    live.emotions[key] = emotion;
+    return {
+      key,
+      label: AFFECT_LABELS[key] ?? key,
+      intensity: emotion.intensity,
+      dose: emotion.dose,
+      threshold: params.threshold,
+      doseMin: params.doseMin,
+      cooldownUntil: emotion.cooldownUntil,
+      halfLifeMin: params.halfLifeMin,
+      sensitivity: params.sensitivity
+    };
+  });
+
+  // 主导维 + 候选都用衰减后的视图。scoreOf 是「强度最大的那一维」；
+  // 面板的「当前判断」用候选首位（已过阈值、按 (I-T)/T 降序）更贴近下一步要做什么。
+  const score = scoreOf(live, affect);
+  const candidates = listCandidates(live, affect, ts);
+  const focus = candidates[0] ?? score.dominant;
+  const verdict = canVent(live, focus, affect, ts);
+
+  // 空间出口的额度现算：qzone-post.checkQuota 是纯函数，posts 直接从状态文件读。
+  const qz = normalizeQzoneConfig(cfg.qzone);
+  const qzState = readQzoneState();
+  const quota = checkQuota({ now: ts, posts: qzState.posts, cfg: qz });
+  const remaining = Number.isFinite(quota.windowCount)
+    ? Math.max(0, qz.windowCap - quota.windowCount)
+    : 0;
+  const caps = {
+    qzone: quota.ok === true,
+    // 私聊 / 日记没有独立配额：它们的总量由 canVent 的「三出口日配额相加」闸门管，
+    // 所以这里恒为 true，面板上显示成「可用」而不是「未知」。
+    private: true,
+    diary: true,
+    qzoneConfigured: qz.enabled === true,
+    qzoneRemaining: remaining,
+    qzoneRetryAfterMs: quota.ok === true ? 0 : Math.max(0, quota.retryAfterMs ?? 0)
+  };
+
+  // 规划：静默时段本步骤恒关（quiet:false），面板展示的是「假设现在就要说」的结论。
+  // quietHours 的真判定要等发送步骤接入——那之前绝不能凭空把出口关掉。
+  const planned = planVent({
+    state: live,
+    cfg: affect,
+    now: ts,
+    quiet: false,
+    caps,
+    recentTexts: qzState.posts.slice(0, 5).map((post) => (typeof post?.text === 'string' ? post.text : '')),
+    lastVentTs: state.lastVentTs
+  });
+
+  return {
+    ok: true,
+    enabled: affect.enabled === true,
+    now: ts,
+    emotions,
+    dominant: score.dominant,
+    topIntensity: score.intensity,
+    // ok:true 时 canVent 只回 {ok:true}，这里补齐字段，面板不用自己判 undefined。
+    canVent: {
+      ok: verdict.ok === true,
+      emotion: focus,
+      reason: verdict.ok === true ? null : (verdict.reason ?? 'below_threshold'),
+      retryAfterMs: Number.isFinite(verdict.retryAfterMs) ? verdict.retryAfterMs : 0
+    },
+    plan: Array.isArray(planned.plan) ? planned.plan : [],
+    events: (state.events ?? []).slice(-AFFECT_SNAPSHOT_EVENTS).map((event) => ({
+      ts: event.ts,
+      source: event.source ?? '',
+      kind: event.kind ?? '',
+      step: event.step ?? 0,
+      confidence: event.confidence ?? 0,
+      causeSummary: event.causeSummary ?? ''
+    })),
+    vents: (state.ventLog ?? []).slice(-AFFECT_SNAPSHOT_EVENTS).map((vent) => ({
+      ts: vent.ts,
+      channel: vent.channel ?? '',
+      emotion: vent.emotion ?? '',
+      ok: vent.ok === true,
+      reason: vent.reason ?? '',
+      text: typeof vent.text === 'string' ? vent.text.slice(0, AFFECT_SNAPSHOT_TEXT_MAX) : ''
+    })),
+    caps,
+    config: affect
+  };
 }
 
 // 只有「请求根本没送到 / 没能等到回话」才值得重试一次。SnowLuma 用 retcode 表达的业务性
@@ -4270,6 +4465,19 @@ async function main() {
             // 否则是一个绝对时间戳（调用方自己决定怎么显示）。
             nextAllowedAt: quota.ok || qz.windowCap <= 0 ? 0 : now + quota.retryAfterMs
           });
+          return;
+        }
+        // 情绪面板：GET，只读。返回「这一秒」的四维强度、判定结果、逐行规划与最近记录；
+        // 不落盘、不发消息、不起定时器 —— 它是纯查询，允许 agent token 读。
+        // 正因如此**不进 adminOnlyV2Paths**：后续的 affect/config 与 affect/vent 写端点才需要
+        // 控制台权限，不要把只读端点一起关掉（AI 自己也该能看见「我现在什么心情」）。
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/affect') {
+          try {
+            sendJson(affectSnapshot(Date.now()));
+          } catch (error) {
+            log(`[affect] 面板数据生成失败: ${error?.message ?? error}`);
+            sendJson({ ok: false, error: '情绪面板数据生成失败，详情见桥接日志' }, 500);
+          }
           return;
         }
         // 配置：POST body 支持四键的**部分更新**（enabled / windowHours / windowCap / ugcRight）。

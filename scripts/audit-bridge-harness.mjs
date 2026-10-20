@@ -32,6 +32,15 @@ import * as consoleAuth from '../src/console-auth.js';
 // prunePosts 并在模块初始化期直接调用（loadConfig 里就归一 qzone），少这一行 VM 里立刻
 // ReferenceError → 所有 HTTP 用例（含 token/voice/reply-wait）一起红。与 consoleAuth 同理。
 import * as qzone from '../src/qzone-post.js';
+// 情绪内核 + 出口规划（T-012），同样是纯逻辑模块（零依赖、零 I/O、时钟由 now 注入）：
+// bridge.js 顶层 import 了 AFFECT_EMOTIONS / AFFECT_DEFAULTS / normalizeAffectConfig /
+// createState / normalizeState / decayTo / scoreOf / canVent / listCandidates / serializeState /
+// parseState 与 planVent / checkVentText，loadConfig 期间就调 normalizeAffectConfig，
+// GET /api/socialV2/affect 又会用其余几个。少这两行 VM 里立刻 ReferenceError，
+// 全部 HTTP 用例一起红（与 qzone / socialAuto 同理）。
+// 导出名已核对：两个模块互不重名，也不与其它 spread 模块重名（唯一的 nowIso 是既有冲突）。
+import * as affectCore from '../src/affect-core.js';
+import * as affectVent from '../src/affect-vent.js';
 // 社交自动化（入群邀请 / 好友申请）也是纯逻辑模块（决策、文案、额度、审计格式，零 I/O）：
 // bridge.js 顶层 import 了 16 个导出名，loadConfig 期间就调 normalizeAutomation，少这一行
 // VM 里立刻 ReferenceError → 所有走 VM 的用例一起红。
@@ -178,6 +187,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...stall, ...consoleAuth, ...qzone, ...presetPrompt,
     ...socialAuto,
+    ...affectCore, ...affectVent,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),
