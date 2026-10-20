@@ -21,6 +21,7 @@ import {
   AFFECT_EMOTIONS,
   AFFECT_LIMITS,
   normalizeAffectConfig,
+  inQuietHours,
   createState,
   normalizeState,
   decayTo,
@@ -626,6 +627,32 @@ check('抖动在 ±25% 内：不同 lastVentTs 的间隔都落在 [1.5h, 2.5h]',
   }
   return true;
 })());
+
+// ── ⑫ quietHours：enabled 归一与跨午夜判定（T-012 上报步骤追加） ──────────
+console.log('\n⑫ quietHours.enabled / inQuietHours');
+
+check('出厂默认静默时段是关（enabled === false）', AFFECT_DEFAULTS.quietHours.enabled === false);
+check('归一化：空配置 → enabled false', normalizeAffectConfig({}).quietHours.enabled === false);
+check('归一化：显式 true 才开', normalizeAffectConfig({ quietHours: { enabled: true } }).quietHours.enabled === true);
+check("归一化：'true' / 1 都不算开",
+  normalizeAffectConfig({ quietHours: { enabled: 'true' } }).quietHours.enabled === false
+  && normalizeAffectConfig({ quietHours: { enabled: 1 } }).quietHours.enabled === false);
+check('归一化：显式 false 保持 false', normalizeAffectConfig({ quietHours: { enabled: false } }).quietHours.enabled === false);
+check('归一化：坏 start/end 回落默认，但不影响 enabled', (() => {
+  const bad = normalizeAffectConfig({ quietHours: { enabled: true, start: '25:00', end: 'x' } });
+  return bad.quietHours.enabled === true
+    && bad.quietHours.start === AFFECT_DEFAULTS.quietHours.start
+    && bad.quietHours.end === AFFECT_DEFAULTS.quietHours.end;
+})());
+
+const quietOn = normalizeAffectConfig({ quietHours: { enabled: true, start: '23:30', end: '07:30' } }).quietHours;
+check('跨午夜：23:45 / 06:59 在窗内', inQuietHours(quietOn, 23, 45) === true && inQuietHours(quietOn, 6, 59) === true);
+check('跨午夜：07:30 整出窗（左闭右开）', inQuietHours(quietOn, 7, 30) === false);
+check('跨午夜：12:00 不在窗内', inQuietHours(quietOn, 12, 0) === false);
+check('关掉后恒 false（哪怕正处窗口内）',
+  inQuietHours(normalizeAffectConfig({ quietHours: { enabled: false } }).quietHours, 23, 45) === false);
+check('纯函数：同一配置重复调用结果稳定', inQuietHours(quietOn, 3, 0) === inQuietHours(quietOn, 3, 0));
+check('起止相同 → 视为没有窗口', inQuietHours({ enabled: true, start: '12:00', end: '12:00' }, 12, 30) === false);
 
 // ── 汇总 ───────────────────────────────────────────────────────────────────
 console.log(`\n通过 ${passed} / 失败 ${failed}`);

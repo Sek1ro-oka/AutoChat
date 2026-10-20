@@ -38,6 +38,15 @@ const VENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const DOSE_RATE_FLOOR = 1e-6;
 // 单维重复抑制的窗口（research §2 重复抑制行：同一类事件 5 分钟内第 n 次）。
 const REPEAT_WINDOW_MS = 5 * 60 * 1000;
+
+// 上报闸门（T-012 §12 风险表）：同一条感受 10 分钟内只记一次；同一个人 1 小时内
+// 最多能「喂」你 3 条 —— 前者防模型把同一件事反复上报刷强度，后者防一个人刷屏。
+const EVENT_DUPLICATE_WINDOW_MS = 10 * 60 * 1000;
+const EVENT_ACTOR_WINDOW_MS = 60 * 60 * 1000;
+const EVENT_ACTOR_LIMIT = 3;
+
+/** 上报允许的剂量档位：轻微 / 明显 / 很重 / 最重（工具侧 z.union 与这里必须一致）。 */
+export const AFFECT_EVENT_STEPS = Object.freeze([0.25, 0.5, 0.75, 1]);
 // 四维强度总和的硬上限（research §2 全局约束行）。
 const TOTAL_INTENSITY_CAP = 2.5;
 
@@ -64,7 +73,9 @@ export const AFFECT_DEFAULTS = Object.freeze({
   vents: Object.freeze({ qzone: true, private: true, diary: true, group: false }),
   minIntervalMs: 7200000,
   jitterRatio: 0.25,
-  quietHours: Object.freeze({ start: '23:30', end: '07:30' }),
+  // `enabled` 出厂关：静默时段只影响「发不发出去」，不影响情绪累积，
+  // 而这一步（T-012）还没有发送逻辑，先让它保持关、由后续步骤打开。
+  quietHours: Object.freeze({ enabled: false, start: '23:30', end: '07:30' }),
   dailyCap: Object.freeze({ qzone: 2, private: 3, diary: 5 }),
   emotions: Object.freeze({
     //              半衰期      敏感度      阈值        剂量下限   冷却
@@ -111,6 +122,13 @@ function booleanOr(value, fallback) {
 /** 'HH:mm' 校验：认不出就回落默认，永不抛。 */
 function clockOr(value, fallback) {
   return typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value) ? value : fallback;
+}
+
+/** 'HH:mm' → 当天第几分钟（0–1439）；认不出给 -1（静默窗口判定用，-1 当无效端）。 */
+function clockMinutes(value) {
+  if (typeof value !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) return -1;
+  const [hour, minute] = value.split(':');
+  return Number(hour) * 60 + Number(minute);
 }
 
 /** 去掉控制字符（dev-doc §2.2：causeSummary 去控制字符、≤60 字），再裁长度。 */
@@ -197,13 +215,42 @@ export function normalizeAffectConfig(raw) {
     vents: Object.freeze(vents),
     minIntervalMs: clampTo(source.minIntervalMs, AFFECT_LIMITS.minIntervalMs, AFFECT_DEFAULTS.minIntervalMs),
     jitterRatio: clampTo(source.jitterRatio, AFFECT_LIMITS.jitterRatio, AFFECT_DEFAULTS.jitterRatio),
+    // **只有显式 `true` 才开**：与 enabled/vents 的「写错回落默认=开」相反 ——
+    // 静默时段的默认值是关（见 AFFECT_DEFAULTS 的注释），写 'true'、1 都不算开。
     quietHours: Object.freeze({
+      enabled: source.quietHours?.enabled === true,
       start: clockOr(source.quietHours?.start, AFFECT_DEFAULTS.quietHours.start),
       end: clockOr(source.quietHours?.end, AFFECT_DEFAULTS.quietHours.end)
     }),
     dailyCap: Object.freeze(dailyCap),
     emotions: Object.freeze(emotions)
   });
+}
+
+/**
+ * 现在是不是静默时段（dev-doc §3 / §4 quietHours）。
+ *
+ * 纯函数：本地时和本地分由调用方传进来（bridge 用 `new Date(now).getHours()`）——
+ * 本模块不碰系统时钟，也不认时区，单测才能随便造时间点。
+ *
+ * 三条口径：
+ * - `enabled !== true` 一律 false（只有显式开才静默）；
+ * - 窗口**左闭右开**：23:30–07:30 在 07:30 整已经不算静默（测试断言 07:30 为 false）；
+ * - 支持 `start > end` 的跨午夜；`start === end` 视为**没有窗口**（不是静默一整天），
+ *   否则「手滑把起止写成一样」会静默 24 小时，那种事故比少静默一晚严重得多。
+ */
+export function inQuietHours(quietHours, hour, minute) {
+  const source = isPlainObject(quietHours) ? quietHours : {};
+  if (source.enabled !== true) return false;
+  const start = clockMinutes(source.start);
+  const end = clockMinutes(source.end);
+  if (start < 0 || end < 0 || start === end) return false;
+  const h = Math.trunc(toNumeric(hour, Number.NaN));
+  if (!Number.isFinite(h) || h < 0 || h > 23) return false;
+  const m = clamp(Math.trunc(toNumeric(minute, 0)), 0, 59);
+  const nowMin = h * 60 + m;
+  if (start < end) return nowMin >= start && nowMin < end;
+  return nowMin >= start || nowMin < end;
 }
 
 // ── 状态创建 / 修复 ─────────────────────────────────────────────────────────
@@ -348,6 +395,92 @@ export function decayTo(emotion, now, cfg, key = AFFECT_EMOTIONS[0]) {
   const intensity = clamp01(base.intensity * factor);
   const dose = Math.max(0, base.dose * factor + base.intensity * dtMin);
   return { ...base, intensity, dose, lastTs: ts, peak: Math.max(base.peak, intensity) };
+}
+
+// ── 上报入参归一 / 防刷（T-012 §2.2 / §12） ─────────────────────────────────
+
+/** 压成单行再裁长度：换行 / 制表符压成空格，'a\nb' 不会粘成 'ab'。 */
+function singleLineText(value, maxLength) {
+  if (typeof value !== 'string') return '';
+  return toText(value.replace(/\s+/g, ' '), maxLength);
+}
+
+/** actorQQ 只认 5–12 位纯数字（QQ 号长度），其余一律当没有；返回 0 表示「不知道是谁」。 */
+function normalizeActorQQ(value) {
+  const text = typeof value === 'number' && Number.isFinite(value)
+    ? String(Math.trunc(value))
+    : String(value ?? '').trim();
+  return /^\d{5,12}$/.test(text) ? Number(text) : 0;
+}
+
+/**
+ * 工具入参 → 一条可入库的事件。**永不抛**：坏输入一律回 `{ ok:false, reason }`，
+ * 桥接把 reason 原样收进 `rejected[]`（模型能据此自己改，不用猜为什么没记上）。
+ *
+ * 与 dev-doc §2.2 的差异（本任务口径优先）：confidence 缺省 **0.6**（不是 0.7）、
+ * 钳到 0.2–1；causeSummary 收 80 字（addEvent 落盘时仍按 60 裁）；actorQQ 只在
+ * 「5–12 位纯数字」时才带 —— 认不出就当没有这个人，绝不能把昵称写进状态文件。
+ */
+export function normalizeEventInput(raw) {
+  if (!isPlainObject(raw)) return { ok: false, reason: '事件必须是对象' };
+  const kind = typeof raw.kind === 'string' ? raw.kind.trim() : '';
+  if (!AFFECT_EMOTIONS.includes(kind)) {
+    return { ok: false, reason: `kind 必须是 ${AFFECT_EMOTIONS.join('/')}` };
+  }
+  const step = toNumeric(raw.step, Number.NaN);
+  if (!AFFECT_EVENT_STEPS.includes(step)) {
+    return { ok: false, reason: 'step 必须是 0.25/0.5/0.75/1' };
+  }
+  const rawConfidence = toNumeric(raw.confidence, Number.NaN);
+  const confidence = Number.isFinite(rawConfidence) ? clamp(rawConfidence, 0.2, 1) : 0.6;
+  const event = {
+    kind,
+    step,
+    confidence,
+    causeSummary: singleLineText(raw.causeSummary, 80),
+    source: singleLineText(raw.source, 24) || 'llm'
+  };
+  const actorQQ = normalizeActorQQ(raw.actorQQ);
+  if (actorQQ) event.actorQQ = actorQQ;
+  return { ok: true, event };
+}
+
+/**
+ * 这条上报要不要丢掉（只判两种；更细的重复抑制交给 addEvent 的 m_r 连击衰减）：
+ * - `duplicate`：最近 10 分钟内已有同一句 causeSummary（窗口**含端点**，简化边界）；
+ * - `actor_rate`：同一 actorQQ 最近 1 小时内已记 ≥3 条（没有 / 认不出 actorQQ 就不判）。
+ *
+ * `opts` 只是给单测留的缝（{ duplicateWindowMs, actorWindowMs, actorLimit }），线上不传。
+ */
+export function shouldSkipEvent(state, event, now, opts = {}) {
+  const ts = toNumeric(now, Number.NaN);
+  if (!Number.isFinite(ts)) return { skip: false };
+  const events = Array.isArray(state?.events) ? state.events : [];
+  const source = isPlainObject(event) ? event : {};
+  const duplicateWindowMs = Math.max(0, toNumeric(opts?.duplicateWindowMs, EVENT_DUPLICATE_WINDOW_MS));
+  const actorWindowMs = Math.max(0, toNumeric(opts?.actorWindowMs, EVENT_ACTOR_WINDOW_MS));
+  const actorLimit = Math.max(1, Math.trunc(toNumeric(opts?.actorLimit, EVENT_ACTOR_LIMIT)));
+
+  const summary = singleLineText(source.causeSummary, 80);
+  if (summary) {
+    for (const item of events) {
+      const dt = ts - toNumeric(item?.ts, Number.NaN);
+      if (!Number.isFinite(dt) || dt < 0 || dt > duplicateWindowMs) continue;
+      if (singleLineText(item?.causeSummary, 80) === summary) return { skip: true, reason: 'duplicate' };
+    }
+  }
+
+  const actorQQ = normalizeActorQQ(source.actorQQ);
+  if (!actorQQ) return { skip: false };
+  let count = 0;
+  for (const item of events) {
+    if (normalizeActorQQ(item?.actorQQ) !== actorQQ) continue;
+    const dt = ts - toNumeric(item?.ts, Number.NaN);
+    if (!Number.isFinite(dt) || dt < 0 || dt > actorWindowMs) continue;
+    count += 1;
+  }
+  if (count >= actorLimit) return { skip: true, reason: 'actor_rate' };
+  return { skip: false };
 }
 
 /**

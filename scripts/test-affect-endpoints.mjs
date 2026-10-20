@@ -88,9 +88,12 @@ const qzoneConfigLine = lineOf(bridge, "if (req.method === 'POST' && url.pathnam
 check('端点排在 /api/qzone/recent 之后', pathLines.length > 0 && pathLines[0] > recentLine);
 check('端点排在 /api/qzone/config 之前', pathLines.length > 0 && pathLines[0] < qzoneConfigLine);
 
-// handler 切片：从 if 到下一个端点（qzone/config）。
+// handler 切片：从 if 到**下一个端点**为止。T-012 上报步骤在 GET 之后插入了
+// POST /api/socialV2/affect/events（写盘端点），所以切片必须在它前面收口 ——
+// 否则「只读 handler」的断言会把隔壁写端点的 writeAffectState 算到自己头上。
 const handlerStart = bridge.indexOf(`if (req.method === 'GET' && url.pathname === '${AFFECT_PATH}')`);
-let handlerEnd = bridge.indexOf("\n        if (req.method === 'POST' && url.pathname === '/api/qzone/config'", handlerStart);
+let handlerEnd = bridge.indexOf("\n        if (req.method === 'POST' && url.pathname === '/api/socialV2/affect/events'", handlerStart);
+if (handlerEnd < 0) handlerEnd = bridge.indexOf("\n        if (req.method === 'POST' && url.pathname === '/api/qzone/config'", handlerStart);
 if (handlerEnd < 0) handlerEnd = Math.min(bridge.length, handlerStart + 1200);
 const handler = bridge.slice(handlerStart, handlerEnd);
 check('handler 内调用 affectSnapshot(', handler.includes('affectSnapshot('));
@@ -158,7 +161,12 @@ for (const field of ['ok:', 'enabled:', 'now:', 'emotions,', 'dominant:', 'topIn
 check('canVent 字段含 ok/emotion/reason/retryAfterMs', ['ok:', 'emotion:', 'reason:', 'retryAfterMs:'].every((key) => snapshot.includes(key)));
 check('caps 覆盖三出口 + 空间读数', ['qzone:', 'private:', 'diary:', 'qzoneConfigured:', 'qzoneRemaining:', 'qzoneRetryAfterMs:'].every((key) => snapshot.includes(key)));
 check('caps.qzone 由 checkQuota 判定', snapshot.includes('checkQuota({ now: ts, posts: qzState.posts, cfg: qz })'));
-check('planVent 以 quiet:false 调用（静默时段本步骤恒关）', snapshot.includes('quiet: false'));
+// 静默时段：本步骤起改成**真判定**（inQuietHours + 本地时分），不再恒 false ——
+// 写死 false 会让「面板规划」与发送步骤的闸门口径分叉，那种漂移比功能缺失更难查。
+check('planVent 的 quiet 来自真实静默判定（inQuietHours + 本地时分）',
+  snapshot.includes('inQuietHours(affect.quietHours, localNow.getHours(), localNow.getMinutes())'));
+check('快照里不再写死 quiet:false', !snapshot.includes('quiet: false'));
+check('快照把 quiet 传给 planVent', snapshot.includes('quiet,'));
 check('planVent 带最近 5 条空间文案', snapshot.includes('qzState.posts.slice(0, 5)'));
 check('planVent 带 lastVentTs', snapshot.includes('lastVentTs: state.lastVentTs'));
 check('快照不落盘（不调用 atomicWriteJson / writeAffectState）', !snapshot.includes('atomicWriteJson') && !snapshot.includes('writeAffectState('));

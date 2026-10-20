@@ -827,6 +827,51 @@ server.tool(
   }
 );
 
+// 情绪上报（T-012）：把「真的被触动了一下」记进 state/affect.json。
+// 刻意**不登记** TOOL_CONFIG_FLAGS：那是「注册期开关」表，登记就得新增一个
+// socialV2.tools.affect 配置键（控制台开关不在本步骤范围）——那等于改门控语义。
+// 这里只做「入参形状 + 描述」，能不能报由桥接侧（模式 / 会话 / 情绪模块开关）判。
+server.tool(
+  'qq_affect_report',
+  '记录一次真正触动到你的事：被夸/被骂/被冷落/无聊。只在有真实感受时调用，一次 1–3 条；不要为了触发发说说而调用。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    events: z.array(z.object({
+      kind: z.enum(['joy', 'sadness', 'anger', 'boredom']).describe('情绪种类'),
+      step: z.union([z.literal(0.25), z.literal(0.5), z.literal(0.75), z.literal(1)]).describe('这一下多重：轻微 0.25 / 明显 0.5 / 很重 0.75 / 最重 1'),
+      confidence: z.number().min(0).max(1).optional().describe('你有多确定，默认 0.6'),
+      causeSummary: z.string().describe('≤60 字，只说发生了什么，不写别人的隐私')
+    })).min(1).max(3).describe('1–3 条事件')
+  },
+  async ({ key, token, events }) => {
+    try {
+      const data = await agentApi('/api/socialV2/affect/events', {
+        method: 'POST',
+        body: JSON.stringify({ key, events }),
+        headers: { 'x-agent-token': token }
+      });
+      // 返回值只说「记上几条 / 哪几条被丢、为什么」，**绝口不提会不会发出去**：
+      // 一旦这里出现「我会去发」，模型就会把「调这个工具」学成「触发空间动态」的开关。
+      const applied = Array.isArray(data?.applied) ? data.applied : [];
+      const skipped = Array.isArray(data?.skipped) ? data.skipped : [];
+      const rejected = Array.isArray(data?.rejected) ? data.rejected : [];
+      const skipReasons = { duplicate: '10 分钟内已记过同一件事', actor_rate: '同一个人 1 小时内说得够多了' };
+      const lines = [`已记录 ${applied.length} 条`];
+      if (applied.length > 0) lines.push(`情绪：${applied.map((item) => item.kind).join('、')}`);
+      if (skipped.length > 0) {
+        lines.push(`跳过 ${skipped.length} 条（${skipped.map((item) => skipReasons[item.reason] ?? item.reason).join('；')}）`);
+      }
+      if (rejected.length > 0) {
+        lines.push(`未记录 ${rejected.length} 条（${rejected.map((item) => item.reason).join('；')}）`);
+      }
+      return { content: [{ type: 'text', text: lines.join('\n') }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `情绪上报失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
 server.tool(
   'qq_get_my_recent_messages',
   '查看自己最近发过的消息（只读），避免重复/保持人设。',

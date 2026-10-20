@@ -92,6 +92,10 @@ const tests = [
   // 情绪接线的只读契约（T-012 第三步）：端点是否存在且只读、配置归一入口、
   // 状态文件路径、样例配置与出厂默认是否对齐、桥接里有没有偷偷写死阈值。
   'test-affect-endpoints.mjs',
+  // 情绪上报（T-012 第四步）：POST /api/socialV2/affect/events 的接线契约 +
+  // normalizeEventInput / shouldSkipEvent / inQuietHours 的纯函数边界。
+  // 同样只读源码（import bridge 会真起服务）+ 直接 import 纯模块跑。
+  'test-affect-events.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

@@ -111,7 +111,11 @@ import {
   canVent,
   listCandidates,
   serializeState,
-  parseState
+  parseState,
+  // 上报链路（T-012）：入参归一 / 防刷 / 静默判定，全都只在纯模块里实现。
+  inQuietHours,
+  normalizeEventInput,
+  shouldSkipEvent
 } from './affect-core.js';
 // 情绪出口的纯规划层：只算「该不该说、走哪个渠道、说多长」，不发送、不写盘。
 // planVent 被 /api/socialV2/affect 用来给面板生成「现在会发生什么」的逐行中文解释。
@@ -1599,7 +1603,7 @@ function readAffectState(now = Date.now(), affectConfig = null) {
 }
 
 /**
- * 落盘情绪状态（留给后续「记录事件 / 执行宣泄」，本步骤没有调用点）。
+ * 落盘情绪状态（调用点：POST /api/socialV2/affect/events 成功记上至少一条事件后）。
  *
  * serializeState 已经把 NaN / Infinity 换成 0；这里再走一遍 parseState 做形状校验，
  * 保证写出去的永远是对象。失败只记日志：情绪是可丢数据，不能因为它让这一轮失败。
@@ -1674,13 +1678,15 @@ function affectSnapshot(now = Date.now()) {
     qzoneRetryAfterMs: quota.ok === true ? 0 : Math.max(0, quota.retryAfterMs ?? 0)
   };
 
-  // 规划：静默时段本步骤恒关（quiet:false），面板展示的是「假设现在就要说」的结论。
-  // quietHours 的真判定要等发送步骤接入——那之前绝不能凭空把出口关掉。
+  // 静默时段：真的按**本地时间**判（inQuietHours 是纯函数，时区知识留在这一层）。
+  // 这一步只影响「规划」——不发送、不起定时器；发送步骤会把同一个 quiet 用作出闸条件。
+  const localNow = new Date(ts);
+  const quiet = inQuietHours(affect.quietHours, localNow.getHours(), localNow.getMinutes());
   const planned = planVent({
     state: live,
     cfg: affect,
     now: ts,
-    quiet: false,
+    quiet,
     caps,
     recentTexts: qzState.posts.slice(0, 5).map((post) => (typeof post?.text === 'string' ? post.text : '')),
     lastVentTs: state.lastVentTs
@@ -1693,6 +1699,8 @@ function affectSnapshot(now = Date.now()) {
     emotions,
     dominant: score.dominant,
     topIntensity: score.intensity,
+    // 面板也要能看见「现在是不是静默时段」：发送步骤接入后，它就是出口的硬闸门。
+    quiet,
     // ok:true 时 canVent 只回 {ok:true}，这里补齐字段，面板不用自己判 undefined。
     canVent: {
       ok: verdict.ok === true,
@@ -4480,6 +4488,79 @@ async function main() {
           }
           return;
         }
+        // 情绪上报：POST，目前**唯一**会写 state/affect.json 的入口（T-012）。
+        // 鉴权照抄 /api/socialV2/feedback：控制台令牌走全局关卡；带 x-agent-token 时
+        // 还要过 agentTokenOk（令牌得对得上这个会话）+ v2SessionAllowed（模式允许）。
+        // 依然**不进 adminOnlyV2Paths** —— 上报是 AI 自己的动作，不是控制台管理操作。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/affect/events') {
+          const body = await readBody();
+          const key = String(body?.key ?? '').trim();
+          const agentToken = req.headers['x-agent-token'];
+          if (agentToken) {
+            if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+            if (!agentTokenOk(key, agentToken)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+            if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          }
+          const affectCfg = loadConfig().socialV2.affect;
+          if (affectCfg.enabled === false) { sendJson({ ok: false, error: '情绪模块已关闭' }, 403); return; }
+          const rawEvents = Array.isArray(body?.events) ? body.events : null;
+          if (!rawEvents || rawEvents.length === 0) {
+            sendJson({ ok: false, error: 'events 必须是非空数组' }, 400);
+            return;
+          }
+          // 上限 3：工具 schema 已经拦住，但 HTTP 是公开入口，这里必须再兜一次。
+          if (rawEvents.length > 3) {
+            sendJson({ ok: false, error: '一次最多上报 3 条' }, 400);
+            return;
+          }
+          const now = Date.now();
+          let next = readAffectState(now, affectCfg);
+          const applied = [];
+          const skipped = [];
+          const rejected = [];
+          for (let index = 0; index < rawEvents.length; index += 1) {
+            const normalized = normalizeEventInput(rawEvents[index]);
+            if (!normalized.ok) { rejected.push({ index, reason: normalized.reason }); continue; }
+            const verdict = shouldSkipEvent(next, normalized.event, now);
+            if (verdict.skip) { skipped.push({ index, reason: verdict.reason }); continue; }
+            next = addEvent(next, normalized.event, affectCfg, now);
+            applied.push({
+              index,
+              kind: normalized.event.kind,
+              step: normalized.event.step,
+              confidence: normalized.event.confidence
+            });
+          }
+          // 只有真记上了才落盘：全被拒 / 全被跳过时碰都不碰状态文件。
+          if (applied.length > 0) writeAffectState(next);
+          const emotions = AFFECT_EMOTIONS.map((emotionKey) => {
+            const emotion = decayTo(next.emotions[emotionKey], now, affectCfg, emotionKey);
+            return {
+              key: emotionKey,
+              label: AFFECT_LABELS[emotionKey] ?? emotionKey,
+              intensity: emotion.intensity,
+              dose: emotion.dose
+            };
+          });
+          const candidates = listCandidates(next, affectCfg, now);
+          const focus = candidates[0] ?? scoreOf(next, affectCfg, now).dominant;
+          const verdict = canVent(next, focus, affectCfg, now);
+          sendJson({
+            ok: true,
+            now,
+            applied,
+            skipped,
+            rejected,
+            emotions,
+            canVent: {
+              ok: verdict.ok === true,
+              emotion: focus,
+              reason: verdict.ok === true ? null : (verdict.reason ?? 'below_threshold'),
+              retryAfterMs: Number.isFinite(verdict.retryAfterMs) ? verdict.retryAfterMs : 0
+            }
+          });
+          return;
+        }
         // 配置：POST body 支持四键的**部分更新**（enabled / windowHours / windowCap / ugcRight）。
         // 写的是 config.json 里的 qzone.*：这是运行配置，不是运行时状态 —— 只改内存的话，
         // 重启一次就回到文件里的旧值，控制台上那些输入框会「自己弹回去」。
@@ -5835,6 +5916,13 @@ async function main() {
               proactive: cfg.socialV2?.proactive ?? {}
             },
             enabledTools,
+            // 情绪上报的一句话提示（T-012）：只告诉模型「可以上报」，**绝不**承诺「上报了就会发说说」——
+            // 发不发由 affect-vent 的闸门和发送步骤自己判，模型不该学会「调工具 = 触发说说」。
+            affect: {
+              enabled: cfg.socialV2?.affect?.enabled !== false,
+              reportTool: 'qq_affect_report',
+              hint: '情绪上报：qq_affect_report（不保证会发说说）'
+            },
             replyTiming: replyTimingV2(st),
             unreadCount: st.unread.length,
             recentCount: st.recentMessages.length,
