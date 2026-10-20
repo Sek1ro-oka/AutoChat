@@ -7,6 +7,21 @@
 
 ### 新增
 
+- **AI 自己的日记本（`qq_diary_write` / `qq_diary_list` / `qq_diary_read`）**：每个聊天一个文件夹、
+  一天一个 `.md`（`state/diaries/<group_群号|private_QQ号>/<YYYY-MM-DD>.md`，`state/` 不进版本库）。
+  同一天可以写多则（按 `## HH:MM · 标题` 分节）；`list` 给日期/则数/摘要，`read` 给某天全文（超长截断并标记）。
+  - 新模块 `src/diary-store.js`：路径派生与 **resolve 校验**（key 来自模型，按不可信输入处理，防 `../` 穿越）、
+    日期校验（只认今天或过去）、正文净化（本机绝对路径与 `token=`/`password:` 形态替换成「已隐去」）、
+    长度上限（单则 4000 字/标题 60/心情 20/标签 8 个）、同一天最多 20 则、`.tmp` + `rename` 原子写。
+  - 桥接三端点 `POST /api/socialV2/diary-write`、`GET /api/socialV2/diary-list|diary-read`，
+    与其它 v2 工具同一套关卡（`agentTokenOk` + `v2SessionAllowed` + `v2ToolEnabled('diary')`）；
+    `socialV2.tools.diary` 出厂 `true`，关掉后三个工具**根本不注册**。
+  - 二代仿真提示词新增【日记】一节（`dsh/agent-presets/qq-chat-v2/agent.cordis.yml`）：什么时候写、
+    写多少、写之前先翻目录避免重复、被问到旧事时怎么读、不写群友隐私与本机路径。
+  - 控制台「二代仿真 → 工具开关」新增日记一项；`config.example.json` 的 `socialV2.tools` 同步补 `diary`。
+  - 自检 `node scripts/test-diary.mjs`（40 条断言：路径穿越/日期/净化/上限/会话隔离/接线）。
+  - 详见 [docs/guides/DIARY.md](docs/guides/DIARY.md)。
+
 - **说说限流改成可调参数**：`qzone.windowHours`（窗口长度，0~24 小时，出厂 24）与
   `qzone.windowCap`（窗口内最多几条，0~100，出厂 2）。判定口径是**滑动窗口**——最近
   `windowHours` 小时内最多 `windowCap` 条，不再按自然日归零。

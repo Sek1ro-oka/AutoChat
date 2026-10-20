@@ -165,6 +165,7 @@
       "setWakeConfig": true,
       "markRead": true,
       "memory": true,
+      "diary": true,
       "slangQuery": true,
       "slangSubmit": true,
       "getImages": true,

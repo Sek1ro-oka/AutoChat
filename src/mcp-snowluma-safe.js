@@ -213,6 +213,9 @@ const TOOL_CONFIG_FLAGS = {
   qq_memory_query: 'memory',
   qq_memory_remove: 'memory',
   qq_memory_clear: 'memory',
+  qq_diary_write: 'diary',
+  qq_diary_list: 'diary',
+  qq_diary_read: 'diary',
   qq_slang_query: 'slangQuery',
   qq_slang_submit: 'slangSubmit',
   qq_send_voice: 'sendVoice',
@@ -846,6 +849,75 @@ server.tool(
       return { content: [{ type: 'text', text: serializeModelData(data) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `记忆清空失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_diary_write',
+  '写一则只给自己看的日记：存进「这个聊天专属」的日记文件夹，按天一个文件。只在这次聊天里真有事发生、有想记住的感受时才写（被逗笑、被戳到、聊到在意的话题、某个人说的话）；100~300 字，第一人称，像写给自己看，不要写成群聊总结或流水账。不写群友的真实隐私（真名/电话/住址/账号）、不写本机路径与密钥。一天最多写三四则，没什么可写就不写；日记不会发到 QQ。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    content: z.string().describe('日记正文（100~300 字最佳，最多 4000 字）'),
+    date: z.string().optional().describe('日期 YYYY-MM-DD，缺省=今天；只能写今天或过去'),
+    title: z.string().optional().describe('小标题（可选，≤60 字）'),
+    mood: z.string().optional().describe('心情一两个词（可选，如 平静/有点烦/开心）'),
+    tags: z.array(z.string()).optional().describe('标签（可选，最多 8 个）'),
+    mode: z.enum(['append', 'replace']).optional().describe('append=追加一则（默认）；replace=整篇重写当天')
+  },
+  async ({ key, token, content, date, title, mood, tags, mode }) => {
+    try {
+      const data = await agentApi('/api/socialV2/diary-write', {
+        method: 'POST',
+        body: JSON.stringify({ key, content, date, title, mood, tags, mode }),
+        headers: { 'x-agent-token': token }
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `写日记失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_diary_list',
+  '翻自己的日记目录（最近若干天，新→旧），返回日期、当天几则、摘要与字数。写日记之前先看一眼，避免同一天重复写同一件事；想回忆几天前的事也可以先列出来再 qq_diary_read。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    limit: z.number().optional().describe('最多列几天，默认 7，最大 30')
+  },
+  async ({ key, token, limit }) => {
+    try {
+      const q = new URLSearchParams({ key });
+      if (limit !== undefined) q.set('limit', String(limit));
+      const data = await agentApi(`/api/socialV2/diary-list?${q.toString()}`, { headers: { 'x-agent-token': token } });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `翻日记失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_diary_read',
+  '读某一天的日记全文（缺省今天）。被问到「你还记得…」、聊到旧事、或想确认自己当时怎么想的时候用。超长会截断并标 truncated。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    date: z.string().optional().describe('日期 YYYY-MM-DD，缺省=今天'),
+    maxChars: z.number().optional().describe('最多返回多少字符，默认 20000')
+  },
+  async ({ key, token, date, maxChars }) => {
+    try {
+      const q = new URLSearchParams({ key });
+      if (date) q.set('date', String(date));
+      if (maxChars !== undefined) q.set('maxChars', String(maxChars));
+      const data = await agentApi(`/api/socialV2/diary-read?${q.toString()}`, { headers: { 'x-agent-token': token } });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `读日记失败：${error?.message ?? error}` }], isError: true };
     }
   }
 );

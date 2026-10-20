@@ -18,6 +18,12 @@ import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
 import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken } from './dsh-client.js';
 import { mdToPlain, splitForQQ, truncateText, truncateTextTail } from './md-to-plain.js';
+import {
+  diaryFolderName,
+  listDiaryEntries,
+  readDiaryEntry,
+  writeDiaryEntry
+} from './diary-store.js';
 import { SENSITIVE_RE } from './sensitive.js';
 // QQ 空间（说说）：审计/配额/可见范围/记录裁剪全是纯逻辑 + 零 I/O，放在独立模块里。
 // 时钟也不由它读：now 一律由这一层（I/O 层）传 Date.now() 进去，纯模块才好测。
@@ -80,6 +86,9 @@ const ROLE_STATE_FILE = path.join(STATE_DIR, 'current-role.json');
 const SLANG_FILE = path.join(STATE_DIR, 'slang.json');
 const SLANG_SESSION_FILE = path.join(STATE_DIR, 'slang-session.json');
 const SOCIAL_V2_FILE = path.join(STATE_DIR, 'social-v2.json');
+// 日记本根目录：state/diaries/<group_群号|private_QQ号>/<YYYY-MM-DD>.md
+// 放在 state/ 下（已被 .gitignore 忽略），一个聊天一个文件夹，一天一个文件。
+const DIARY_ROOT = path.join(STATE_DIR, 'diaries');
 const STICKER_FILE = path.join(STATE_DIR, 'stickers.json');
 const FEEDBACK_FILE = path.join(STATE_DIR, 'feedback.json');
 const TOOL_LOG_FILE = path.join(STATE_DIR, 'tool-calls.jsonl');
@@ -863,6 +872,7 @@ function loadConfig() {
     setWakeConfig: true,
     markRead: true,
     memory: true,
+    diary: true,
     slangQuery: true,
     slangSubmit: true,
     getImages: true,
@@ -6953,6 +6963,71 @@ async function main() {
           if (!category || category === 'memberImpression') st.memberImpressions = {};
           saveSocialV2State();
           sendJson({ ok: true, key, category: category || 'all', memory: formatMemoryV2(st) });
+          return;
+        }
+        // ── 小鲸鱼的日记本（reserved2）：每个聊天一个文件夹，一天一个 .md ──────
+        //
+        // 与 memory 的分工：memory 是"待用的话题/印象"（短、会过期、会出现在唤醒提示里），
+        // diary 是"写给自己看的一页"（长、按天归档、只在主动翻的时候读）。
+        // 三个端点都必须过与其它 v2 工具同一套关卡：会话令牌绑定 + 模式允许 + 工具开关，
+        // 因为日记内容来自模型，等于一条可被 prompt injection 影响的写路径。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/diary-write') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('diary')) { sendJson({ ok: false, error: '工具未启用：qq_diary_write' }, 403); return; }
+          const mode = String(body.mode ?? 'append').trim() === 'replace' ? 'replace' : 'append';
+          try {
+            const data = writeDiaryEntry({
+              root: DIARY_ROOT,
+              key,
+              content: redactKnownTokensOnly(String(body.content ?? '')),
+              date: body.date === undefined ? '' : String(body.date),
+              title: body.title === undefined ? '' : String(body.title),
+              mood: body.mood === undefined ? '' : String(body.mood),
+              tags: body.tags,
+              mode
+            });
+            sendJson({ ...data, folder: diaryFolderName(key) });
+          } catch (error) {
+            sendJson({ ok: false, error: String(error?.message ?? error) }, 400);
+          }
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/diary-list') {
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('diary')) { sendJson({ ok: false, error: '工具未启用：qq_diary_list' }, 403); return; }
+          try {
+            const data = listDiaryEntries({ root: DIARY_ROOT, key, limit: url.searchParams.get('limit') });
+            sendJson(data);
+          } catch (error) {
+            sendJson({ ok: false, error: String(error?.message ?? error) }, 400);
+          }
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/diary-read') {
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('diary')) { sendJson({ ok: false, error: '工具未启用：qq_diary_read' }, 403); return; }
+          try {
+            const data = readDiaryEntry({
+              root: DIARY_ROOT,
+              key,
+              date: url.searchParams.get('date'),
+              maxChars: url.searchParams.get('maxChars')
+            });
+            if (data.ok === false) { sendJson(data, 404); return; }
+            sendJson(data);
+          } catch (error) {
+            sendJson({ ok: false, error: String(error?.message ?? error) }, 400);
+          }
           return;
         }
         // ── 二代黑话学习（reserved2）：AI 查询/提交黑话候选 ─────────────────
