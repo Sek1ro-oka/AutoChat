@@ -1805,6 +1805,81 @@ button:active:not(:disabled) {
 #section-switches #qzReadouts { margin-top:14px }
 #section-switches #qzReadouts .meta { margin-top:0 }
 
+/* ===== 情绪（T-012）=====
+   信息结构照 work/agent-tasks/T-012/demo/index.html。作用域全部挂在 #section-affect 下：
+   af-* 这些类名不会漏到别的视图，也不会跟下面的 auto-* 段抢优先级。
+   颜色一律吃控制台变量，深色主题里那几条同名变量已经换过值，不需要第二套规则。 */
+#section-affect .af-summary { margin-top:14px }
+#section-affect .af-summary .meta { margin:0 }
+#section-affect .af-caps { margin-top:8px; gap:18px }
+#section-affect .af-caps .meta { margin:0 }
+/* 一行 padding-top 是给刻度小字留的位置：它挂在条形上方，不占轨道高度。 */
+#section-affect .af-bars { margin-top:16px; display:flex; flex-direction:column; gap:12px }
+#section-affect .af-row { display:flex; flex-direction:column; gap:6px; min-width:0 }
+#section-affect .af-row-top { display:flex; align-items:baseline; gap:10px; min-width:0; margin-bottom:4px }
+#section-affect .af-name { font-size:13px; font-weight:600; color:var(--text) }
+/* 轨道本身只有 10px 高，左右留一点圆角；overflow 保持 visible，刻度的竖线要越出上下边界。
+   margin-top:14px 是给刻度小字腾的：它绝对定位在 -14px，必须落在一条空白带上，不能压住维度名。 */
+#section-affect .af-bar { position:relative; height:10px; margin-top:14px; border-radius:999px; background:var(--surface-chip-strong) }
+#section-affect .af-fill {
+  position:absolute; left:0; top:0; bottom:0; width:0;
+  border-radius:999px; background:var(--accent); transition:width .3s ease
+}
+/* 越线用告警色：条形与维度名一起变，不然只有一条细条变色容易被忽略。 */
+#section-affect .af-row.is-over .af-fill { background:var(--warn-fg-strong) }
+#section-affect .af-row.is-over .af-name { color:var(--warn-fg-strong) }
+#section-affect .af-th {
+  position:absolute; top:-5px; bottom:-5px; width:2px; margin-left:-1px;
+  background:var(--text-secondary); opacity:.55; border-radius:1px
+}
+/* 小字贴着刻度线居中：位置由 JS 按阈值百分比写 left，这里只管对齐与字号。
+   top:-14px 正好落在 .af-bar 的 margin-top 空白带里（字号 10px，不会碰到上面的维度名）。 */
+#section-affect .af-th-label {
+  position:absolute; top:-14px; transform:translateX(-50%);
+  font-size:10px; line-height:1; color:var(--muted-soft); white-space:nowrap; pointer-events:none
+}
+#section-affect .af-val {
+  margin-left:auto; font-size:12px; color:var(--text-secondary); font-variant-numeric:tabular-nums
+}
+#section-affect .af-bar-meta { font-size:11px; line-height:1.6; color:var(--muted-soft) }
+/* 决策步骤：✓ 绿 / ✗ 红，说明文字跟着状态回退一档灰度，扫一眼就能看到「卡在哪一步」。 */
+#section-affect .af-plan { list-style:none; margin:10px 0 0; padding:0; display:flex; flex-direction:column; gap:4px }
+#section-affect .af-step { display:flex; gap:8px; font-size:12px; line-height:1.7; color:var(--muted) }
+#section-affect .af-step-mark { flex:0 0 auto; width:1em; text-align:center }
+#section-affect .af-step.ok .af-step-mark { color:var(--ok) }
+#section-affect .af-step.no { color:var(--text-secondary) }
+#section-affect .af-step.no .af-step-mark { color:var(--err) }
+/* 调试区是卡里的一块，边界与浅底照抄说说卡/自动化卡的写法。 */
+#section-affect .af-debug {
+  margin-top:22px; padding:22px 24px 18px;
+  background:var(--surface-subtle); border:1px solid var(--card-border);
+  border-radius:14px; min-width:0; overflow-wrap:anywhere
+}
+#section-affect .af-debug .layer-heading { margin:18px 0 6px }
+#section-affect .af-debug .layer-heading:first-child { margin-top:0 }
+#section-affect .af-field { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:0 }
+/* 数字框定宽：主样式里 input[type=number]{width:100%}，这里靠 #id 的权重压过去。 */
+#section-affect input.af-num {
+  width:4.8em; min-width:4.8em; max-width:4.8em; flex:0 0 auto;
+  padding:6px 6px; text-align:center
+}
+#section-affect input.af-time {
+  width:152px; min-width:152px; max-width:152px; flex:0 0 auto;
+  padding:6px 8px; border:1px solid var(--border-input); border-radius:8px;
+  background:var(--surface); color:var(--text-input); font-size:13px
+}
+#section-affect select.af-select { width:118px; min-width:118px; flex:0 0 auto; padding:6px 8px }
+#section-affect input.af-cause { flex:1 1 220px }
+/* 调试回执：空着的时候整个盒子不占位（:empty 配合 hidden 双保险）。 */
+#section-affect .af-result {
+  margin-top:12px; padding:12px 14px; border:1px solid var(--border-subtle);
+  border-radius:10px; background:var(--surface)
+}
+#section-affect .af-result:empty { display:none }
+#section-affect .af-result pre { max-height:220px }
+#section-affect #afVentMsg, #section-affect #afEventMsg, #section-affect #afSaveMsg { margin:10px 0 0 }
+#section-affect #afVentMsg:empty, #section-affect #afEventMsg:empty, #section-affect #afSaveMsg:empty { margin:0 }
+
 /* ── 社交自动化（T-009）─────────────────────────────────────────────────────
    结构与样式照抄用户已经确认过的设计稿（work/agent-tasks/T-009/demo/index.html），
    只做两处适配：卡片跟在说说卡后面，所以 margin-top 取 22px 与兄弟卡片对齐；
@@ -2245,6 +2320,7 @@ button:active:not(:disabled) {
       <button data-view="social-v2" class="nav-item"><span class="nav-icon" aria-hidden="true">◈</span>二代仿真<span class="nav-note">V2</span></button>
       <button data-view="social-v1" class="nav-item"><span class="nav-icon" aria-hidden="true">◇</span>一代仿真<span class="nav-note">V1</span></button>
       <button data-view="slang" class="nav-item"><span class="nav-icon" aria-hidden="true">▤</span>黑话词库</button>
+      <button data-view="affect" class="nav-item"><span class="nav-icon" aria-hidden="true">☺</span>情绪</button>
       <div class="nav-label">管理</div>
       <button data-view="usage" class="nav-item"><span class="nav-icon" aria-hidden="true">◧</span>令牌与花费</button>
       <button data-view="access" class="nav-item"><span class="nav-icon" aria-hidden="true">⊙</span>访问与安全</button>
@@ -3304,6 +3380,124 @@ button:active:not(:disabled) {
       <div id="usagePrices" class="meta">读取中…</div>
       </div></details>
     </section>
+
+    <section id="section-affect" data-page="affect" class="card span-all">
+      <h2 data-note="停在这一页时随状态轮询刷新">情绪</h2>
+      <div class="meta"><b>这一页回答三件事：它现在什么心情、遇到过什么、为什么还没发说说。</b>强度会自己往下走（越久越淡），每条进度条上的竖线是这一维的<b>阈值</b>，越过去才谈得上宣泄——条形变橙色就是越线了。读数来自 <code>/api/socialV2/affect</code>，<b>只有停在这一页才开始拉</b>，别的页面不会多发请求。</div>
+
+      <h3 class="layer-heading">现在<span class="meta" id="afNow">读取中…</span></h3>
+      <div class="row af-summary" id="afSummary">
+        <span class="pill" id="afEnabledBadge">读取中…</span>
+        <span class="pill" id="afDominantBadge">主导情绪 —</span>
+        <span class="pill" id="afVerdictBadge">判断 —</span>
+        <span class="meta" id="afVerdictText">正在读取情绪状态…</span>
+      </div>
+      <div class="meta" id="afLastVent">最近一次宣泄：—</div>
+      <div class="row af-caps" id="afCaps">
+        <span class="meta" id="afCapQzone">说说额度 —</span>
+        <span class="meta" id="afCapPrivate">私聊额度 —</span>
+        <span class="meta" id="afCapDiary">日记额度 —</span>
+      </div>
+      <div class="meta">三个出口共用一条「最近 24 小时」的总配额；桥接只对说说报了窗口里还剩几条，私聊与日记没有单独的已用计数，所以这里显示的是<b>每天的上限</b>。</div>
+
+      <h3 class="layer-heading">四种情绪<span class="meta">条形 = 当前强度；竖线 = 阈值</span></h3>
+      <div class="af-bars" id="afBars">
+        <div class="af-row" id="afRowAnger" data-emotion="anger">
+          <div class="af-row-top"><span class="af-name">生气</span><span class="af-val" id="afValAnger">—</span></div>
+          <div class="af-bar"><span class="af-fill" id="afFillAnger"></span><span class="af-th" id="afTickAnger" title="阈值"></span><span class="af-th-label" id="afTickAngerLabel">阈值 —</span></div>
+          <div class="af-bar-meta" id="afMetaAnger">剂量 —</div>
+        </div>
+        <div class="af-row" id="afRowSadness" data-emotion="sadness">
+          <div class="af-row-top"><span class="af-name">难过</span><span class="af-val" id="afValSadness">—</span></div>
+          <div class="af-bar"><span class="af-fill" id="afFillSadness"></span><span class="af-th" id="afTickSadness" title="阈值"></span><span class="af-th-label" id="afTickSadnessLabel">阈值 —</span></div>
+          <div class="af-bar-meta" id="afMetaSadness">剂量 —</div>
+        </div>
+        <div class="af-row" id="afRowJoy" data-emotion="joy">
+          <div class="af-row-top"><span class="af-name">开心</span><span class="af-val" id="afValJoy">—</span></div>
+          <div class="af-bar"><span class="af-fill" id="afFillJoy"></span><span class="af-th" id="afTickJoy" title="阈值"></span><span class="af-th-label" id="afTickJoyLabel">阈值 —</span></div>
+          <div class="af-bar-meta" id="afMetaJoy">剂量 —</div>
+        </div>
+        <div class="af-row" id="afRowBoredom" data-emotion="boredom">
+          <div class="af-row-top"><span class="af-name">无聊</span><span class="af-val" id="afValBoredom">—</span></div>
+          <div class="af-bar"><span class="af-fill" id="afFillBoredom"></span><span class="af-th" id="afTickBoredom" title="阈值"></span><span class="af-th-label" id="afTickBoredomLabel">阈值 —</span></div>
+          <div class="af-bar-meta" id="afMetaBoredom">剂量 —</div>
+        </div>
+      </div>
+      <div class="meta">剂量是「这件事累积了多重」，跟强度一起过线才算真的想开口——闪一下就发泄不算。</div>
+
+      <h3 class="layer-heading">为什么不发<span class="meta">桥接按顺序过每一道闸门，卡在哪一步就停在哪一步</span></h3>
+      <ul class="af-plan" id="afPlan"><li class="af-step"><span class="af-step-mark">·</span><span class="af-step-text">读取中…</span></li></ul>
+
+      <h3 class="layer-heading">最近事件<span class="meta" id="afEventNote">接口给最近 10 条</span></h3>
+      <div id="afEventList">
+        <div class="meta" id="afEventEmpty">读取中…</div>
+        <table id="afEventTable" hidden>
+          <thead><tr><th>时间</th><th>情绪</th><th>档位</th><th>原因</th><th>来源</th></tr></thead>
+          <tbody id="afEventBody"></tbody>
+        </table>
+      </div>
+
+      <h3 class="layer-heading">最近宣泄<span class="meta" id="afVentNote">接口给最近 10 次</span></h3>
+      <div id="afVentList">
+        <div class="meta" id="afVentEmpty">读取中…</div>
+        <table id="afVentTable" hidden>
+          <thead><tr><th>时间</th><th>出口</th><th>情绪</th><th>文案</th><th>结果</th></tr></thead>
+          <tbody id="afVentBody"></tbody>
+        </table>
+      </div>
+
+      <section class="af-debug" id="afDebug" aria-labelledby="afDebugTitle">
+        <div class="layer-heading"><h3 id="afDebugTitle">调试</h3><span class="meta">手动戳一下，看它怎么判；下面这几个按钮都不会自己触发</span></div>
+        <div class="row">
+          <button id="afDryRun" class="small" type="button">评估一次（不发）</button>
+          <button id="afRealVent" class="danger small" type="button">真的发一次</button>
+          <span class="meta" id="afVentMsg" role="status" aria-live="polite"></span>
+        </div>
+        <div class="meta">「评估一次」只演一遍判定并给你看它本来会发什么，条数与冷却一点都不会动；「真的发一次」是红色的，会先问一句，确认后才往 QQ 空间发。</div>
+        <div class="af-result" id="afVentResult" hidden></div>
+
+        <div class="layer-heading"><h3>手动加一次情绪</h3><span class="meta">模拟「遇到一件事」，看强度怎么涨</span></div>
+        <div class="row af-field">
+          <select class="af-select" id="afEventKind" aria-label="要加哪一种情绪">
+            <option value="anger">生气</option>
+            <option value="sadness">难过</option>
+            <option value="joy">开心</option>
+            <option value="boredom">无聊</option>
+          </select>
+          <select class="af-select" id="afEventStep" aria-label="这次情绪的档位">
+            <option value="0.25">轻微 0.25</option>
+            <option value="0.5" selected>明显 0.5</option>
+            <option value="0.75">很重 0.75</option>
+            <option value="1">最重 1</option>
+          </select>
+          <input type="text" class="af-cause" id="afEventCause" maxlength="60" autocomplete="off" placeholder="原因（可留空，最多 60 字）" aria-label="这次情绪的原因">
+          <button id="afEventAdd" class="primary small" type="button">加上去</button>
+        </div>
+        <div class="meta" id="afEventMsg" role="status" aria-live="polite"></div>
+
+        <div class="layer-heading"><h3>阈值与限额</h3><span class="meta">保存后写进 <code>config.json</code>，不重启也生效</span></div>
+        <div class="row af-field">
+          <label class="af-field" for="afThAnger">生气阈值<input type="number" class="af-num" id="afThAnger" min="0.3" max="0.99" step="0.01" inputmode="decimal" autocomplete="off" aria-label="生气的阈值"></label>
+          <label class="af-field" for="afThSadness">难过阈值<input type="number" class="af-num" id="afThSadness" min="0.3" max="0.99" step="0.01" inputmode="decimal" autocomplete="off" aria-label="难过的阈值"></label>
+          <label class="af-field" for="afThJoy">开心阈值<input type="number" class="af-num" id="afThJoy" min="0.3" max="0.99" step="0.01" inputmode="decimal" autocomplete="off" aria-label="开心的阈值"></label>
+          <label class="af-field" for="afThBoredom">无聊阈值<input type="number" class="af-num" id="afThBoredom" min="0.3" max="0.99" step="0.01" inputmode="decimal" autocomplete="off" aria-label="无聊的阈值"></label>
+        </div>
+        <div class="row af-field">
+          <label class="af-field" for="afDailyQzone">说说每天<input type="number" class="af-num" id="afDailyQzone" min="0" max="10" step="1" inputmode="numeric" autocomplete="off" aria-label="说说每天最多几条"></label>
+          <label class="af-field" for="afDailyPrivate">私聊每天<input type="number" class="af-num" id="afDailyPrivate" min="0" max="10" step="1" inputmode="numeric" autocomplete="off" aria-label="私聊每天最多几条"></label>
+          <label class="af-field" for="afDailyDiary">日记每天<input type="number" class="af-num" id="afDailyDiary" min="0" max="10" step="1" inputmode="numeric" autocomplete="off" aria-label="日记每天最多几条"></label>
+          <label class="af-field" for="afMinInterval">最小间隔（分钟）<input type="number" class="af-num" id="afMinInterval" min="10" max="1440" step="10" inputmode="numeric" autocomplete="off" aria-label="两次宣泄之间的全局最小间隔，单位分钟"></label>
+        </div>
+        <div class="row af-field">
+          <label class="af-field" for="afQuietToggle"><input type="checkbox" id="afQuietToggle">静默时段</label>
+          <label class="af-field" for="afQuietStart">从<input type="time" class="af-time" id="afQuietStart" aria-label="静默开始时间"></label>
+          <label class="af-field" for="afQuietEnd">到<input type="time" class="af-time" id="afQuietEnd" aria-label="静默结束时间"></label>
+          <button id="afSaveConfig" class="primary" type="button" disabled>保存阈值与限额</button>
+        </div>
+        <div class="meta" id="afSaveMsg" role="status" aria-live="polite"></div>
+        <div class="meta">阈值的可填范围是 <b>0.30–0.99</b>，日配额 <b>0–10</b>（填 0 等于关掉这个出口），最小间隔 <b>10–1440 分钟</b>。超出范围的数字会被桥接夹回边界，保存后输入框会显示夹过的真实值。静默时段只挡「对外发」，情绪照常累积。</div>
+      </section>
+    </section>
       </div>
       <div class="overview-footnote" data-page="overview"><span id="accessSummary">正在读取访问范围…</span><button class="text-button" data-view="access">管理访问范围 →</button></div>
       <footer class="page-footer"><span>QQ Bridge · 连接日常，保持自主</span><span id="lastUpdated">等待首次同步</span></footer>
@@ -3440,6 +3634,9 @@ async function refresh() {
     if (currentConsolePage === 'switches') await refreshQzone();
     // 社交自动化（T-009）同理：只有停在这一页才拉，读数与两块面板跟着这一份响应走。
     if (currentConsolePage === 'switches') await refreshAuto();
+    // 情绪（T-012）：读数不在 /api/status 里，只有停在这一页才拉，复用这趟 3 秒轮询。
+    // refreshAffect 自己吞异常（错误画在面板里），不会把这一趟 /api/status 拖成「连接中断」。
+    if (currentConsolePage === 'affect') refreshAffect();
     const presetSel = document.getElementById('closedPreset');
     if (presetSel && document.activeElement !== presetSel) presetSel.value = s.closedAgentPreset || '';
   } catch (e) { document.getElementById('statusText').textContent = '连接中断 · 请检查桥接服务'; setConnectionError(e); }
@@ -5813,6 +6010,7 @@ const consolePages = {
   'social-v2': ['二代仿真', '自主参与，恰到好处。', '管理 AI 的工具、唤醒与发言节奏。展开需要调整的分组，修改后保存参数。'],
   'social-v1': ['一代仿真', '为自然对话，设定合适的节奏。', '调整参与概率、活跃周期和分条发送；所有配置项完整保留。'],
   slang: ['黑话词库', '读懂群聊里的，言外之意。', '从候选到确认，让 AI 逐渐熟悉大家的表达习惯。'],
+  affect: ['情绪', '它现在什么心情，为什么还没开口。', '四种情绪的强度与阈值、最近遇到的事、宣泄决策卡在哪一步，以及可以手动拨的调试开关。'],
   usage: ['令牌与花费', '每一次思考，都算得清楚。', '实时查看 AI 的 token 消耗与花费，可下钻到每个群、每个好友、每一轮对话。'],
   access: ['访问与安全', '明确边界，安心连接。', '管理允许对话的对象、管理员权限与控制台访问凭证。'],
   operations: ['调试与运维', '让桥接，始终井然有序。', '测试消息、引导 AI，或维护桥接进程与会话工作区。'],
@@ -5852,6 +6050,10 @@ function setConsolePage(page, { updateHash = true, focus = false, target = '' } 
   if (page === 'switches') { renderQzone(lastQzone); refreshQzone(); }
   // 社交自动化：先用缓存画一遍（没缓存就保持「读取中…」），再拉一次。
   if (page === 'switches') { renderAuto(lastAuto); refreshAuto(); }
+  // 情绪：先把上一份快照画一遍（最多旧 5 秒），再强拉一次 —— 切过去的第一眼就该是数据，
+  // 而不是等下一拍轮询。force 绕过下面 refreshAffect 里的节流。
+  // 顺手清掉「改过没保存」的脏标记：离开再回来等于放弃那笔改动，输入框重新对齐服务端真值。
+  if (page === 'affect') { affectParamsDirty = false; paintAffect(); refreshAffect(true); }
   document.querySelectorAll('[data-page]').forEach(el => { el.hidden = el.dataset.page !== page; });
   // 视图已经可见，再让沙盘脚本开始跑（它只会在第一次进入时真正插入一次）。
   if (page === 'sandbox') initSandbox();
@@ -6454,6 +6656,547 @@ document.getElementById('usageClear').addEventListener('click', async () => {
   refreshUsage();
   refreshUsageRecent();
 });
+
+// ── 情绪面板（T-012）─────────────────────────────────────────────────────────
+// 读数只有一处来源：GET /api/socialV2/affect。字段名以桥接实际返回为准（与任务书写的略有出入）：
+//   emotions[].dose / doseMin（没有 peak）、events / vents（不叫 recentEvents / recentVents）、
+//   caps.qzoneRemaining / caps.qzoneRetryAfterMs、config.dailyCap。
+// 「为什么没发」有三层，面板三层都显示：canVent.reason 是这一维的结论，plan 是逐道闸门的明细，
+// caps.qzone* 是说说出口自己的滑动窗口额度 —— 只显示第一层，用户只会看到一句笼统的「没发」。
+let lastAffect = null;          // 最近一次 GET 的整份响应；null = 还没读到 / 读失败
+let affectFetchedAt = 0;        // 上一次请求的时刻：几秒内的重复调用只重绘不重拉
+let affectReadError = '';       // 读失败的原因（面板要说人话，不摆一个假的「已关闭」）
+let affectBusy = false;         // 调试请求进行中：按钮按灰，防连点
+let affectParamsDirty = false;  // 用户动过阈值/限额：轮询回填一律让路
+const AFFECT_EMOTIONS = ['anger', 'sadness', 'joy', 'boredom'];
+const AFFECT_LABELS = { anger: '生气', sadness: '难过', joy: '开心', boredom: '无聊' };
+const AFFECT_CHANNELS = { qzone: '说说', private: '私聊', diary: '日记' };
+// DOM 后缀：四个维度各有一套 id（条、填充、刻度线、刻度小字、读数、剂量行、阈值输入框）。
+const AFFECT_SUFFIX = { anger: 'Anger', sadness: 'Sadness', joy: 'Joy', boredom: 'Boredom' };
+const AFFECT_INPUT = { anger: 'afThAnger', sadness: 'afThSadness', joy: 'afThJoy', boredom: 'afThBoredom' };
+const AFFECT_PARAM_IDS = new Set([
+  ...AFFECT_EMOTIONS.map((key) => AFFECT_INPUT[key]),
+  'afDailyQzone', 'afDailyPrivate', 'afDailyDiary', 'afMinInterval',
+  'afQuietToggle', 'afQuietStart', 'afQuietEnd'
+]);
+// 每种拒因一句人话。桥接新增原因时这里会显示原文，不会静默留白。
+const AFFECT_REASONS = {
+  disabled: '情绪模块现在是关着的，什么都不会发。',
+  below_threshold: '四种情绪都还没到各自的阈值，现在没什么好说的。',
+  below_dose: '强度够了，但这次情绪还没累积到能开口的量，再等等。',
+  cooldown: '这一维刚宣泄过，正在冷却，留一点余温。',
+  daily_cap: '最近 24 小时的宣泄额度用完了。',
+  min_interval: '距上一次宣泄还不到全局最小间隔，防止连着发。',
+  quiet_hours: '现在是静默时段，只允许写日记，不对外发。',
+  qzone_unconfigured: '说说通道没开或没配置好，发出去只会报错，所以先不发。',
+  all_denied: '三个出口都走不通（开关、额度、配置各拦了一条），看下面的逐步说明。',
+  disabled_channel: '这个出口被关掉了。',
+  text_rejected: '写出来的文案没过质量闸门（重复或不合要求），这次不发。',
+  send_failed: '发送失败：空间那边拒了。失败不记情绪账，不会白吃一次冷却。',
+  channel_not_ready: '选中的是私聊 / 日记出口，这两条路还没接通，所以这次发不出去。',
+  config_error: '读 config.json 失败，判定跑不起来。'
+};
+// 手动上报被丢弃的原因（skipped[].reason）。
+const AFFECT_SKIP_REASONS = {
+  duplicate: '10 分钟内已经记过同一句原因，同一个感受不重复加。',
+  actor_rate: '同一个人一小时内上报超过 3 条，这一条被限流丢掉了。'
+};
+// 事件来源是桥接的内部标识，表格里换成看得懂的字。
+const AFFECT_SOURCES = {
+  llm: '模型判定', console: '控制台手动', heuristic: '规则推断', manual: '手动',
+  qzone: '说说', private: '私聊', diary: '日记', group: '群聊'
+};
+// 宣泄结果一栏要短：完整那句放 title，鼠标停上去才看。
+const AFFECT_SHORT_RESULTS = {
+  send_failed: '发送失败',
+  text_rejected: '文案没过闸门',
+  channel_not_ready: '出口没接通',
+  disabled: '模块关着',
+  disabled_channel: '出口关着',
+  quiet_hours: '静默时段',
+  daily_cap: '额度用完',
+  min_interval: '间隔不够',
+  cooldown: '冷却中',
+  below_threshold: '没到阈值',
+  below_dose: '剂量不够',
+  qzone_unconfigured: '说说没配置'
+};
+function afReasonText(reason) {
+  if (!reason) return '';
+  return AFFECT_REASONS[reason] || ('桥接给的原因是「' + reason + '」，这一版面板还不认识。');
+}
+function afSkipText(reason) {
+  if (!reason) return '没说原因';
+  return AFFECT_SKIP_REASONS[reason] || ('桥接给的原因是「' + reason + '」');
+}
+function afNum(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+// 强度 / 阈值都落在 0..1；越界的数据不信任，夹回边界再画，免得条形冲出轨道。
+function afUnit(value) {
+  const n = afNum(value);
+  if (n === null) return null;
+  return Math.max(0, Math.min(1, n));
+}
+function afFixed(value, digits) {
+  const n = afNum(value);
+  return n === null ? '—' : n.toFixed(digits);
+}
+function afLabel(key) { return AFFECT_LABELS[key] || (key || '—'); }
+function afChannel(key) { return AFFECT_CHANNELS[key] || (key || '—'); }
+function afSource(key) { return AFFECT_SOURCES[key] || key || '—'; }
+function afStepText(step) {
+  const n = afNum(step);
+  if (n === null) return '—';
+  const label = n >= 1 ? '最重' : n >= 0.75 ? '很重' : n >= 0.5 ? '明显' : '轻微';
+  return label + ' ' + n;
+}
+function setAffectPill(id, text, tone) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = tone ? 'pill ' + tone : 'pill';
+}
+function setAffectMsg(id, text, kind) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.className = kind ? 'meta ' + kind : 'meta';
+  el.textContent = text;
+}
+// plan 的每一行都是「✓/✗ 步骤：说明」（桥接拼好的），按首字符分色即可。
+function affectPlanHtml(plan) {
+  if (!Array.isArray(plan) || plan.length === 0) {
+    return '<li class="af-step"><span class="af-step-mark">·</span><span class="af-step-text">桥接没有给出步骤。</span></li>';
+  }
+  return plan.map((line) => {
+    const text = String(line ?? '');
+    const good = text.startsWith('✓');
+    return '<li class="af-step ' + (good ? 'ok' : 'no') + '">'
+      + '<span class="af-step-mark">' + (good ? '✓' : '✗') + '</span>'
+      + '<span class="af-step-text">' + esc(text.replace(/^[✓✗]\s*/, '')) + '</span></li>';
+  }).join('');
+}
+function renderAffect(data) {
+  const live = data !== null && data !== undefined;
+  const enabled = live && data.enabled === true;
+  setAffectPill('afEnabledBadge', live ? (enabled ? '已启用' : '已关闭') : (affectReadError ? '读不到状态' : '读取中…'), live ? (enabled ? 'g' : 'r') : '');
+  const nowEl = document.getElementById('afNow');
+  if (nowEl) {
+    const nowMs = live ? afNum(data.now) : null;
+    nowEl.textContent = nowMs === null ? (affectReadError ? '接口出错' : '读取中…') : ('读于 ' + (fmtMinuteStamp(nowMs) || '—'));
+  }
+  const nowMs = live ? afNum(data.now) : null;
+  const emotions = live && Array.isArray(data.emotions) ? data.emotions : [];
+  // ── 四条强度条：宽度 = 强度，竖线 = 阈值，越过阈值整行换告警色
+  for (const key of AFFECT_EMOTIONS) {
+    const suffix = AFFECT_SUFFIX[key];
+    const row = document.getElementById('afRow' + suffix);
+    const fill = document.getElementById('afFill' + suffix);
+    const tick = document.getElementById('afTick' + suffix);
+    const tickLabel = document.getElementById('afTick' + suffix + 'Label');
+    const val = document.getElementById('afVal' + suffix);
+    const meta = document.getElementById('afMeta' + suffix);
+    if (!row || !fill || !tick || !tickLabel || !val || !meta) continue;
+    const item = emotions.find((emotion) => emotion && emotion.key === key) || null;
+    const intensity = item ? afUnit(item.intensity) : null;
+    const threshold = item ? afNum(item.threshold) : null;
+    const dose = item ? afNum(item.dose) : null;
+    const doseMin = item ? afNum(item.doseMin) : null;
+    const over = intensity !== null && threshold !== null && intensity >= threshold;
+    row.classList.toggle('is-over', over === true);
+    fill.style.width = (intensity === null ? 0 : intensity * 100) + '%';
+    if (threshold !== null) {
+      // 阈值可能在 0.30–0.99 之间任意位置：竖线与小字都用百分比定位，跟着数据走。
+      const left = Math.max(0, Math.min(100, threshold * 100)) + '%';
+      tick.style.left = left;
+      tickLabel.style.left = left;
+      tick.title = '阈值 ' + threshold.toFixed(2);
+      tickLabel.textContent = '阈值 ' + threshold.toFixed(2);
+    } else {
+      tickLabel.textContent = '阈值 —';
+    }
+    val.textContent = intensity === null ? '—' : intensity.toFixed(2);
+    // 剂量 / 冷却塞在条形下面一行：它不是主读数，但它决定「差多少才算想开口」。
+    const parts = ['剂量 ' + afFixed(dose, 1) + ' / ' + (doseMin === null ? '—' : String(doseMin))];
+    const cooldownUntil = item ? afNum(item.cooldownUntil) : null;
+    if (cooldownUntil !== null && nowMs !== null && cooldownUntil > nowMs) parts.push('冷却至 ' + (fmtMinuteStamp(cooldownUntil) || '—'));
+    meta.textContent = parts.join(' · ');
+  }
+  // ── 摘要：主导情绪 + canVent 结论
+  const dominant = live && typeof data.dominant === 'string' ? data.dominant : '';
+  const dominantEmotion = dominant ? (emotions.find((emotion) => emotion && emotion.key === dominant) || null) : null;
+  if (dominant) {
+    const value = dominantEmotion ? afUnit(dominantEmotion.intensity) : null;
+    setAffectPill('afDominantBadge', '主导 · ' + afLabel(dominant) + (value === null ? '' : ' ' + value.toFixed(2)), '');
+  } else {
+    setAffectPill('afDominantBadge', '主导情绪 —', '');
+  }
+  const cans = live && data.canVent && typeof data.canVent === 'object' ? data.canVent : null;
+  const verdictEl = document.getElementById('afVerdictBadge');
+  const verdictText = document.getElementById('afVerdictText');
+  if (!live) {
+    setAffectPill('afVerdictBadge', '判断 —', '');
+    if (verdictText) {
+      verdictText.textContent = affectReadError
+        ? ('读不到情绪状态：' + affectReadError + '。桥接可能还是旧版本、还没这个接口，重启桥接后再打开这一页。')
+        : '正在读取情绪状态…';
+    }
+  } else if (cans && cans.ok === true) {
+    setAffectPill('afVerdictBadge', '可以发', 'g');
+    if (verdictText) verdictText.textContent = '现在这一次是真能发出去的：按 说说 → 私聊 → 日记 的顺序挑第一个能用的出口。';
+  } else {
+    setAffectPill('afVerdictBadge', '还发不了', 'r');
+    const reason = cans ? cans.reason : '';
+    const retryMs = cans ? afNum(cans.retryAfterMs) : null;
+    const retry = retryMs !== null && retryMs > 0 ? '（约 ' + fmtAgoMs(retryMs) + '后再看才有意义）' : '';
+    if (verdictText) verdictText.textContent = '为什么现在不发：' + (afReasonText(reason) || '桥接没有给出原因。') + retry;
+  }
+  const quietEl = document.getElementById('afNow');
+  if (quietEl && live && data.quiet === true) quietEl.textContent += ' · 静默时段';
+  // ── 最近一次宣泄：vents 按时间正序给，末尾那条最新
+  const vents = live && Array.isArray(data.vents) ? data.vents : [];
+  const lastVent = vents.length > 0 ? vents[vents.length - 1] : null;
+  const lastVentEl = document.getElementById('afLastVent');
+  if (lastVentEl) {
+    lastVentEl.textContent = '最近一次宣泄：' + (lastVent && afNum(lastVent.ts) !== null
+      ? (fmtMinuteStamp(lastVent.ts) || '—') + (lastVent.emotion ? ' · ' + afLabel(lastVent.emotion) : '') + (lastVent.channel ? ' · ' + afChannel(lastVent.channel) : '')
+      : (live ? '还没宣泄过' : '—'));
+  }
+  // ── 三个出口的额度：dailyCap 是每天上限；只有说说另外报了窗口里还剩几条
+  const cfg = live && data.config && typeof data.config === 'object' ? data.config : null;
+  const dailyCap = cfg && cfg.dailyCap && typeof cfg.dailyCap === 'object' ? cfg.dailyCap : {};
+  const caps = live && data.caps && typeof data.caps === 'object' ? data.caps : {};
+  const qzLeft = afNum(caps.qzoneRemaining);
+  const qzWait = afNum(caps.qzoneRetryAfterMs);
+  const qzEl = document.getElementById('afCapQzone');
+  if (qzEl) {
+    if (!live) qzEl.textContent = '说说额度 —';
+    else {
+      const capText = '说说：每天上限 ' + (afNum(dailyCap.qzone) === null ? '—' : String(afNum(dailyCap.qzone))) + ' 条';
+      if (caps.qzoneConfigured !== true) qzEl.textContent = capText + ' · 出口没配置，发不出去';
+      else if (caps.qzone === false) qzEl.textContent = capText + ' · 窗口额度已满' + (qzWait !== null && qzWait > 0 ? '，' + fmtAgoMs(qzWait) + '后可再发' : '');
+      else qzEl.textContent = capText + ' · 窗口内还能发 ' + (qzLeft === null ? '—' : String(qzLeft)) + ' 条';
+    }
+  }
+  const privateEl = document.getElementById('afCapPrivate');
+  if (privateEl) privateEl.textContent = live
+    ? '私聊：每天上限 ' + (afNum(dailyCap.private) === null ? '—' : String(afNum(dailyCap.private))) + ' 条 · 出口可用'
+    : '私聊额度 —';
+  const diaryEl = document.getElementById('afCapDiary');
+  if (diaryEl) diaryEl.textContent = live
+    ? '日记：每天上限 ' + (afNum(dailyCap.diary) === null ? '—' : String(afNum(dailyCap.diary))) + ' 条 · 出口可用'
+    : '日记额度 —';
+  // ── 决策步骤
+  const planEl = document.getElementById('afPlan');
+  if (planEl) {
+    if (!live) {
+      planEl.innerHTML = '<li class="af-step"><span class="af-step-mark">·</span><span class="af-step-text">'
+        + esc(affectReadError ? '读不到决策步骤：' + affectReadError : '读取中…') + '</span></li>';
+    } else {
+      planEl.innerHTML = affectPlanHtml(data.plan);
+    }
+  }
+  // ── 最近事件（接口只给最近 10 条）：倒序排，最新的在最上面
+  const events = live && Array.isArray(data.events) ? data.events : [];
+  const eventRows = events.slice(-20).reverse();
+  const eventTable = document.getElementById('afEventTable');
+  const eventEmpty = document.getElementById('afEventEmpty');
+  const eventBody = document.getElementById('afEventBody');
+  if (eventTable) eventTable.hidden = eventRows.length === 0;
+  if (eventEmpty) {
+    eventEmpty.hidden = eventRows.length > 0;
+    eventEmpty.textContent = live ? '还没记过任何情绪。' : (affectReadError ? '读不到情绪事件。' : '读取中…');
+  }
+  if (eventBody) {
+    eventBody.innerHTML = eventRows.map((event) => {
+      const item = event && typeof event === 'object' ? event : {};
+      const cause = String(item.causeSummary ?? '').trim() || '（没写原因）';
+      return '<tr><td>' + esc(fmtMinuteStamp(item.ts) || '—') + '</td><td>' + esc(afLabel(item.kind)) + '</td><td>'
+        + esc(afStepText(item.step)) + '</td><td>' + esc(cause) + '</td><td>' + esc(afSource(item.source)) + '</td></tr>';
+    }).join('');
+  }
+  // ── 最近宣泄（接口只给最近 10 次）
+  const ventRows = vents.slice(-10).reverse();
+  const ventTable = document.getElementById('afVentTable');
+  const ventEmpty = document.getElementById('afVentEmpty');
+  const ventBody = document.getElementById('afVentBody');
+  if (ventTable) ventTable.hidden = ventRows.length === 0;
+  if (ventEmpty) {
+    ventEmpty.hidden = ventRows.length > 0;
+    ventEmpty.textContent = live ? '还没宣泄过。' : (affectReadError ? '读不到宣泄记录。' : '读取中…');
+  }
+  if (ventBody) {
+    ventBody.innerHTML = ventRows.map((vent) => {
+      const item = vent && typeof vent === 'object' ? vent : {};
+      const text = String(item.text ?? '').trim();
+      const summary = text.length > 40 ? text.slice(0, 40) + '…' : text;
+      // 表格里只放短结论，完整那句（含「失败不记情绪账」这类细节）挂在 title 上。
+      const short = item.ok === true ? '已发出' : ('没发成 · ' + (AFFECT_SHORT_RESULTS[item.reason] || item.reason || '没说原因'));
+      const full = item.ok === true ? '已发出' : ('没发成：' + (afReasonText(item.reason) || '没说原因'));
+      return '<tr><td>' + esc(fmtMinuteStamp(item.ts) || '—') + '</td><td>' + esc(afChannel(item.channel)) + '</td><td>'
+        + esc(afLabel(item.emotion)) + '</td><td>' + esc(summary || '（空）') + '</td><td title="' + esc(full) + '">'
+        + esc(short) + '</td></tr>';
+    }).join('');
+  }
+}
+// 阈值 / 限额回填。用户正在改的那一格与「脏」状态下都不覆盖，否则输入会被轮询吃掉。
+function renderAffectParams(config) {
+  const cfg = config && typeof config === 'object' ? config : null;
+  const put = (id, value, title) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (title) el.title = title;
+    if (affectParamsDirty) return;
+    if (document.activeElement === el) return;
+    el.value = value === null || value === undefined ? '' : String(value);
+  };
+  const emotions = cfg && cfg.emotions && typeof cfg.emotions === 'object' ? cfg.emotions : {};
+  for (const key of AFFECT_EMOTIONS) {
+    const item = emotions[key] && typeof emotions[key] === 'object' ? emotions[key] : {};
+    const threshold = afNum(item.threshold);
+    put(AFFECT_INPUT[key], threshold === null ? '' : threshold.toFixed(2), '可填 0.30–0.99（现在是 ' + (threshold === null ? '—' : threshold.toFixed(2)) + '）');
+  }
+  const dailyCap = cfg && cfg.dailyCap && typeof cfg.dailyCap === 'object' ? cfg.dailyCap : {};
+  for (const [key, id] of [['qzone', 'afDailyQzone'], ['private', 'afDailyPrivate'], ['diary', 'afDailyDiary']]) {
+    const value = afNum(dailyCap[key]);
+    put(id, value === null ? '' : value, '可填 0–10，0 等于关掉这个出口');
+  }
+  const intervalMs = cfg ? afNum(cfg.minIntervalMs) : null;
+  put('afMinInterval', intervalMs === null ? '' : Math.round(intervalMs / 60000), '两次宣泄之间至少隔几分钟，可填 10–1440');
+  const quiet = cfg && cfg.quietHours && typeof cfg.quietHours === 'object' ? cfg.quietHours : null;
+  const toggle = document.getElementById('afQuietToggle');
+  if (toggle && !affectParamsDirty) toggle.checked = quiet ? quiet.enabled === true : false;
+  put('afQuietStart', quiet && quiet.start ? quiet.start : '', '静默开始时间，例如 23:30');
+  put('afQuietEnd', quiet && quiet.end ? quiet.end : '', '静默结束时间，例如 07:30');
+}
+function syncAffectSaveButton() {
+  const button = document.getElementById('afSaveConfig');
+  if (!button) return;
+  const ready = lastAffect !== null && lastAffect !== undefined;
+  button.disabled = affectBusy || !ready;
+  button.textContent = affectBusy ? '保存中…' : '保存阈值与限额';
+  button.title = ready ? '写进 config.json，不重启也生效' : '读不到当前配置：这时候保存等于把不知道的原值覆盖掉';
+}
+function paintAffect() {
+  renderAffect(lastAffect);
+  renderAffectParams(lastAffect ? lastAffect.config : null);
+  syncAffectSaveButton();
+}
+async function refreshAffect(force = false) {
+  // 5 秒节流：3 秒轮询的下一次调用只重绘，不重复打接口（与说说卡的 10 秒是同一套做法）。
+  if (!force && affectFetchedAt > 0 && Date.now() - affectFetchedAt < 5000) {
+    paintAffect();
+    return;
+  }
+  try {
+    const r = await api('/api/socialV2/affect');
+    if (r && r.ok === true) { lastAffect = r; affectReadError = ''; }
+    else { lastAffect = null; affectReadError = (r && r.error) || '接口没有说原因'; }
+  } catch (error) {
+    lastAffect = null;
+    affectReadError = error && error.message ? error.message : String(error);
+  }
+  affectFetchedAt = Date.now();
+  paintAffect();
+}
+// 调试回执：把 plan / 文案 / 来源 / 闸门原样摆出来，判定过程不藏在日志里。
+function affectVentResultHtml(payload, dryRun) {
+  const item = payload && typeof payload === 'object' ? payload : {};
+  const head = item.ok === true
+    ? (dryRun ? '会发一条（这次没发）' : '已经发出去了')
+    : ('不会发：' + (afReasonText(item.reason) || '桥接没给原因'));
+  const parts = ['<div><span class="pill ' + (item.ok === true ? 'g' : 'r') + '">' + esc(head) + '</span></div>'];
+  if (item.text) parts.push('<div class="meta">文案：' + esc(String(item.text)) + '</div>');
+  if (item.source) {
+    parts.push('<div class="meta">来源：' + esc(item.source === 'llm' ? '模型按人设写的' : item.source === 'template' ? '兜底模板' : String(item.source))
+      + (item.emotion ? ' · 情绪 ' + esc(afLabel(item.emotion)) : '')
+      + (item.channel ? ' · 出口 ' + esc(afChannel(item.channel)) : '')
+      + (item.step !== undefined ? ' · 档位 ' + esc(afStepText(item.step)) : '') + '</div>');
+  }
+  if (Array.isArray(item.reasons) && item.reasons.length > 0) {
+    parts.push('<div class="meta">文案被拦下的原因：' + esc(item.reasons.join('；')) + '</div>');
+  }
+  if (Array.isArray(item.plan) && item.plan.length > 0) parts.push('<ul class="af-plan">' + affectPlanHtml(item.plan) + '</ul>');
+  if (item.gates) {
+    parts.push('<details class="settings-group"><summary>闸门数据（原始 JSON）</summary><div class="settings-content"><pre>'
+      + esc(JSON.stringify(item.gates, null, 2)) + '</pre></div></details>');
+  }
+  if (item.tid) parts.push('<div class="meta">说说 tid：' + esc(String(item.tid)) + '</div>');
+  return parts.join('');
+}
+// 「评估一次（不发）」：body 写死 dryRun:true —— 少写一个字段也不会变成真发。
+async function affectDryRun() {
+  if (affectBusy) return;
+  const button = document.getElementById('afDryRun');
+  const real = document.getElementById('afRealVent');
+  const box = document.getElementById('afVentResult');
+  affectBusy = true;
+  if (button) button.disabled = true;
+  if (real) real.disabled = true;
+  if (box) { box.hidden = true; box.innerHTML = ''; }
+  setAffectMsg('afVentMsg', '正在评估…', '');
+  try {
+    const r = await api('/api/socialV2/affect/vent', 'POST', { dryRun: true });
+    if (box) { box.innerHTML = affectVentResultHtml(r, true); box.hidden = false; }
+    setAffectMsg('afVentMsg', r && r.ok === true ? '评估完成：这次不会发出去。' : '评估完成：按现在的条件发不出去。', r && r.ok === true ? 'ok' : '');
+  } catch (error) {
+    setAffectMsg('afVentMsg', '评估失败：' + (error && error.message ? error.message : error), 'err');
+  } finally {
+    affectBusy = false;
+    if (button) button.disabled = false;
+    if (real) real.disabled = false;
+  }
+}
+// 「真的发一次」：全页唯一一处 dryRun:false，红色按钮 + 二次确认。
+// 发出去就删不掉了，确认框要把代价说全：对外可见、占额度、进冷却。
+async function affectRealVent() {
+  if (affectBusy) return;
+  if (!confirm('真的发一条说说？\n\n会直接发到 QQ 空间，发出去就很难收回；同时会记一次情绪账，占掉今天的额度并让这一维进入冷却。\n\n确定要发？')) return;
+  const button = document.getElementById('afRealVent');
+  const dry = document.getElementById('afDryRun');
+  const box = document.getElementById('afVentResult');
+  affectBusy = true;
+  if (button) button.disabled = true;
+  if (dry) dry.disabled = true;
+  if (box) { box.hidden = true; box.innerHTML = ''; }
+  setAffectMsg('afVentMsg', '正在发送…', '');
+  try {
+    const r = await api('/api/socialV2/affect/vent', 'POST', { dryRun: false });
+    if (box) { box.innerHTML = affectVentResultHtml(r, false); box.hidden = false; }
+    if (r && r.ok === true) {
+      setAffectMsg('afVentMsg', '已发出（说说 tid=' + String(r.tid ?? '—') + '）。', 'ok');
+      await refreshAffect(true);
+    } else {
+      setAffectMsg('afVentMsg', '没有发出去：' + (afReasonText(r && r.reason) || (r && r.error) || '桥接没给原因'), 'err');
+    }
+  } catch (error) {
+    setAffectMsg('afVentMsg', '发送失败：' + (error && error.message ? error.message : error), 'err');
+  } finally {
+    affectBusy = false;
+    if (button) button.disabled = false;
+    if (dry) dry.disabled = false;
+  }
+}
+// 「手动加一次情绪」：POST /api/socialV2/affect/events。桥接要的是 events 数组（一次最多 3 条），
+// 单条也要包一层；source 写 console，事后能看出这次是手动塞进来的。
+async function affectAddEvent() {
+  if (affectBusy) return;
+  const kind = document.getElementById('afEventKind').value;
+  const step = afNum(document.getElementById('afEventStep').value);
+  const causeInput = document.getElementById('afEventCause');
+  const cause = causeInput ? causeInput.value.trim().slice(0, 60) : '';
+  const button = document.getElementById('afEventAdd');
+  if (step === null) { setAffectMsg('afEventMsg', '先选一个档位。', 'err'); return; }
+  affectBusy = true;
+  if (button) button.disabled = true;
+  setAffectMsg('afEventMsg', '正在上报…', '');
+  try {
+    const r = await api('/api/socialV2/affect/events', 'POST', {
+      events: [{ kind, step, confidence: 0.8, causeSummary: cause, source: 'console' }]
+    });
+    if (!r || r.ok !== true) throw new Error((r && r.error) || '桥接拒绝了这次上报');
+    const applied = Array.isArray(r.applied) ? r.applied.length : 0;
+    const skipped = Array.isArray(r.skipped) ? r.skipped : [];
+    const rejected = Array.isArray(r.rejected) ? r.rejected : [];
+    if (applied > 0) {
+      const item = (Array.isArray(r.emotions) ? r.emotions : []).find((emotion) => emotion && emotion.key === kind) || null;
+      const value = item ? afUnit(item.intensity) : null;
+      setAffectMsg('afEventMsg', '记上了：' + afLabel(kind) + ' 现在 ' + (value === null ? '—' : value.toFixed(2)) + '。', 'ok');
+      if (causeInput) causeInput.value = '';
+      await refreshAffect(true);
+    } else if (skipped.length > 0) {
+      setAffectMsg('afEventMsg', '这条被当成重复丢掉了：' + afSkipText(skipped[0] && skipped[0].reason), 'err');
+    } else if (rejected.length > 0) {
+      setAffectMsg('afEventMsg', '桥接不认这条：' + ((rejected[0] && rejected[0].reason) || '参数不合要求'), 'err');
+    } else {
+      setAffectMsg('afEventMsg', '桥接回了个空结果：既没记上也没说为什么。', 'err');
+    }
+  } catch (error) {
+    setAffectMsg('afEventMsg', '上报失败：' + (error && error.message ? error.message : error), 'err');
+  } finally {
+    affectBusy = false;
+    if (button) button.disabled = false;
+  }
+}
+// 「保存阈值与限额」：body 是部分配置，桥接按段合并后回整份归一结果。
+// 保存成功以响应里的 affect 为准回填 —— 用户填了 1.5 会看到被夹成 0.99，而不是假装存下了。
+async function affectSaveConfig() {
+  if (affectBusy) return;
+  if (lastAffect === null || lastAffect === undefined) {
+    setAffectMsg('afSaveMsg', '读不到当前配置，先别改：这时候保存等于把不知道的原值覆盖掉。', 'err');
+    return;
+  }
+  const readNumber = (id) => {
+    const el = document.getElementById(id);
+    if (!el) return null;
+    const raw = String(el.value ?? '').trim();
+    if (raw === '') return null;
+    return afNum(raw);
+  };
+  const emotions = {};
+  for (const key of AFFECT_EMOTIONS) {
+    const value = readNumber(AFFECT_INPUT[key]);
+    if (value === null) { setAffectMsg('afSaveMsg', '四个阈值都要填数字（留空不会被当成出厂值）。', 'err'); return; }
+    emotions[key] = { threshold: value };
+  }
+  const dailyCap = {};
+  for (const [key, id] of [['qzone', 'afDailyQzone'], ['private', 'afDailyPrivate'], ['diary', 'afDailyDiary']]) {
+    const value = readNumber(id);
+    if (value === null) { setAffectMsg('afSaveMsg', '三个日配额都要填数字（可以填 0，表示这个出口不发）。', 'err'); return; }
+    dailyCap[key] = value;
+  }
+  const minutes = readNumber('afMinInterval');
+  if (minutes === null) { setAffectMsg('afSaveMsg', '最小间隔要填分钟数（10–1440）。', 'err'); return; }
+  const quietToggle = document.getElementById('afQuietToggle');
+  const quietStart = String(document.getElementById('afQuietStart').value || '').trim();
+  const quietEnd = String(document.getElementById('afQuietEnd').value || '').trim();
+  const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/;
+  if (quietToggle && quietToggle.checked === true && (!timeRe.test(quietStart) || !timeRe.test(quietEnd))) {
+    setAffectMsg('afSaveMsg', '静默时段要填两个时间（HH:mm），或者先把静默关掉。', 'err');
+    return;
+  }
+  const button = document.getElementById('afSaveConfig');
+  affectBusy = true;
+  if (button) button.disabled = true;
+  setAffectMsg('afSaveMsg', '正在保存…', '');
+  try {
+    const r = await api('/api/socialV2/affect/config', 'POST', {
+      emotions,
+      dailyCap,
+      minIntervalMs: Math.round(minutes * 60000),
+      quietHours: {
+        enabled: quietToggle ? quietToggle.checked === true : false,
+        start: quietStart,
+        end: quietEnd
+      }
+    });
+    if (!r || r.ok !== true) throw new Error((r && r.error) || '桥接拒绝了这次改动');
+    // 响应里的 affect 是归一后的完整配置：以它为准，别用输入框里那串没归一的值。
+    affectParamsDirty = false;
+    if (r.affect) renderAffectParams(r.affect);
+    setAffectMsg('afSaveMsg', '已保存（写进 config.json，不重启也生效）。', 'ok');
+    await refreshAffect(true);
+  } catch (error) {
+    setAffectMsg('afSaveMsg', '保存失败：' + (error && error.message ? error.message : error), 'err');
+  } finally {
+    affectBusy = false;
+    syncAffectSaveButton();
+  }
+}
+// 动过阈值/限额就置脏：之后轮询回填一律让路，直到保存成功或用户自己切页重来。
+function markAffectParamsDirty(event) {
+  const target = event && event.target;
+  if (!target || !target.id) return;
+  if (!AFFECT_PARAM_IDS.has(target.id)) return;
+  affectParamsDirty = true;
+}
+document.getElementById('afDryRun').addEventListener('click', affectDryRun);
+document.getElementById('afRealVent').addEventListener('click', affectRealVent);
+document.getElementById('afEventAdd').addEventListener('click', affectAddEvent);
+document.getElementById('afSaveConfig').addEventListener('click', affectSaveConfig);
+document.getElementById('afDebug').addEventListener('input', markAffectParamsDirty);
+document.getElementById('afDebug').addEventListener('change', markAffectParamsDirty);
 
 setConsolePage(location.hash.slice(1), { updateHash:false });
 // 带 #sandbox 直接打开时，上面这次调用发生在沙盘脚本容器还没解析的时候（容器在 </body> 前），

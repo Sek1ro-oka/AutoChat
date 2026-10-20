@@ -43,6 +43,8 @@ const tests = [
   'test-voice-gui.mjs',
   // 控制台静态契约（跑不了 Playwright 的环境下的替代回归）
   'test-console-static.mjs',
+  // 控制台「情绪」面板（T-012 第七步）：视图/导航一一对应、四个端点、真发按钮的二次确认边界
+  'test-console-affect.mjs',
   // 控制台令牌来源判定与 cookie 边界（纯函数）：以 `/api/` 开头的路径与一切非 GET 永不读 cookie，
   // cookie 只在 `GET /`、`GET /demo` 上参与，且只在"人是拿 url/header 令牌进来的"时才下发。
   'test-console-auth.mjs',
