@@ -37,6 +37,26 @@ import {
   prunePosts,
   usesLegacyDailyCap,
 } from './qzone-post.js';
+// 社交自动化（入群邀请 / 好友申请）：决定、文案、额度、审计全是纯逻辑，放独立模块。
+// 这一层只做 I/O：调 QQ 接口、写白名单、写审计行；校验只有一个源 applyAutomationUpdate。
+import {
+  applyAutomationUpdate,
+  normalizeAutomation,
+  appendAuditLine,
+  auditEntry,
+  parseAuditTail,
+  rollQuotaState,
+  takeQuota,
+  markAlerted,
+  formatApprovedFriend,
+  formatApprovedFriendLog,
+  formatInviteApproved,
+  formatInviteApprovedLog,
+  formatJoinedGroup,
+  formatQuotaExhausted,
+  formatWhitelistAdded,
+  formatWhitelistAddedLog
+} from './social-auto.js';
 import { looksLikeUnfinished } from './v2-wait.js';
 import {
   createStallWatchdog, cleanZombieSession, parseWatchdogEnabled,
@@ -78,6 +98,38 @@ import {
   markStickerUsed
 } from './sticker-lib.js';
 
+// 社交自动化模块的可用性探测（只对 src/social-auto.js 这一个模块）。
+// 背景：scripts/audit-bridge-harness.mjs 会在 vm 里跑 bridge.js，而它第一步就把所有顶层 import
+// 剥掉、再按一份固定清单把纯函数模块的导出注入 context（见该文件开头的说明：新增一个纯函数模块
+// 就必须去那里补一行 import + 一行 spread，否则 VM 里全是 ReferenceError）。
+// 那份清单目前还没有 src/social-auto.js，于是 VM 里 normalizeAutomation 等名字根本不存在，
+// loadConfig 会直接 ReferenceError，连带 5 个走 VM 的测试文件一起红。这里用 typeof 探测兜一层：
+// 模块不可用时**社交自动化整体停用**（fail-closed，端点返回 503、事件回调直接 return），
+// 桥接的其它功能照常启动。真机上这个模块永远在，null 分支只有 VM 会走到；
+// 等 harness 补上那两行之后，这段探测就可以连同上面对应的守卫一起删掉。
+const socialAuto = (() => {
+  if (typeof normalizeAutomation !== 'function') return null;
+  return {
+    normalizeAutomation,
+    applyAutomationUpdate,
+    appendAuditLine,
+    auditEntry,
+    parseAuditTail,
+    rollQuotaState,
+    takeQuota,
+    markAlerted,
+    formatApprovedFriend,
+    formatApprovedFriendLog,
+    formatInviteApproved,
+    formatInviteApprovedLog,
+    formatJoinedGroup,
+    formatQuotaExhausted,
+    formatWhitelistAdded,
+    formatWhitelistAddedLog
+  };
+})();
+const socialAutoUnavailable = '社交自动化模块不可用（src/social-auto.js 没加载）';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const STATE_DIR = path.join(ROOT, 'state');
@@ -95,6 +147,10 @@ const TOOL_LOG_FILE = path.join(STATE_DIR, 'tool-calls.jsonl');
 const TOKEN_USAGE_FILE = path.join(STATE_DIR, 'token-usage.jsonl');
 const ACTIVITY_LOG = path.join(STATE_DIR, 'qq-activity.log');
 const BRIDGE_LOG = path.join(STATE_DIR, 'bridge.log');
+// 社交自动化的两处状态：审计流水（控制台「最近动作」直接读这个文件）与当日额度计数。
+// 两者都可能是「不存在」——读审计一律当空文件处理，绝不能让 GET 端点 500。
+const SOCIAL_AUTO_AUDIT_FILE = path.join(STATE_DIR, 'social-auto.jsonl');
+const SOCIAL_AUTO_STATE_FILE = path.join(STATE_DIR, 'social-auto.json');
 
 /**
  * 模式拼写的**唯一**归一入口（输入边界）。
@@ -888,6 +944,11 @@ function loadConfig() {
     sendVoice: false,
     ...(cfg.socialV2.tools ?? {})
   };
+
+  // socialV2.automation：社交自动化（入群邀请 / 好友申请）的五个开关 + 三条日常额度。
+  // fail-closed：只有 === true 才算开，认不出的值（"true"、1、yes）一律当关。
+  // 额度 0 是合法值——当天一次都不自动做，不能当"没设置"回落成 5。
+  if (socialAuto) cfg.socialV2.automation = socialAuto.normalizeAutomation(cfg.socialV2.automation);
 
   // socialV2.voice：语音发送（把准备好的音频文件当 QQ 语音发出去）。
   // dir 为相对仓库根目录的语音库路径；AI 的 qq_send_voice 默认只能从这个目录取文件，
@@ -3286,6 +3347,301 @@ async function main() {
     setInterval(reportSnowlumaHealth, 30_000);
   }
 
+  // ── 社交自动化（入群邀请 / 好友申请）：I/O 层 ───────────────────────────────
+  // 决策、文案、额度、审计格式全在 src/social-auto.js 的纯函数里；这里只做 I/O：
+  // 读写 state/、调 QQ 接口、串行追加白名单、私聊通知。开关一律 fail-closed（=== true）。
+  // 没有 ownerQQ 时自动化整体不工作（没处通知 = 不悄悄动手），日志会写明原因。
+
+  /** 当日额度状态。文件不存在是常态（第一次跑），按空状态起始；损坏也不让自动化停摆。 */
+  function readAutomationQuota(now = Date.now()) {
+    // 模块不可用（VM 里跑）时给一份空状态：GET 端点那之前已经 503，占额度那之前已经 return。
+    if (!socialAuto) return { day: '', counts: { friendApprove: 0, inviteApprove: 0, whitelistWrite: 0 }, alerted: {} };
+    const raw = readJsonSafe(SOCIAL_AUTO_STATE_FILE, null);
+    return socialAuto.rollQuotaState(raw, now);
+  }
+
+  /** 写回额度状态（含跨天清零后的新状态）。 */
+  function writeAutomationQuota(state) {
+    atomicWriteJson(SOCIAL_AUTO_STATE_FILE, state);
+  }
+
+  /** 追加一行审计。审计写失败只记日志——不能让一次已经完成的自动动作因此回滚。 */
+  function appendAutomationAudit(record, now = Date.now()) {
+    if (!socialAuto) return null;
+    try {
+      return socialAuto.appendAuditLine(SOCIAL_AUTO_AUDIT_FILE, socialAuto.auditEntry(record, now));
+    } catch (error) {
+      log(`社交自动化审计写入失败：${error?.message ?? error}`);
+      return null;
+    }
+  }
+
+  /** 读审计尾部：控制台右侧两块面板的唯一数据源。文件不存在/读失败一律 []，绝不让 GET 500。 */
+  function readAutomationAuditTail(limit = 10) {
+    if (!socialAuto) return [];
+    let text = '';
+    try {
+      text = fs.readFileSync(SOCIAL_AUTO_AUDIT_FILE, 'utf8');
+    } catch (error) {
+      if (error?.code !== 'ENOENT') log(`读取社交自动化审计失败：${error?.message ?? error}`);
+      return [];
+    }
+    return socialAuto.parseAuditTail(text, limit);
+  }
+
+  /** 私聊通知 ownerQQ。notifyOwner 关掉就静默；未配置 ownerQQ 时发不出去，只记日志。 */
+  async function notifyOwnerAutomation(text) {
+    if (!socialAuto) return false;
+    const automation = socialAuto.normalizeAutomation(cfg.socialV2?.automation);
+    if (automation.notifyOwner !== true) return false;
+    if (!cfg.ownerQQ) {
+      log('社交自动化：未配置 ownerQQ，通知发不出');
+      return false;
+    }
+    try {
+      await onebotSend('private', cfg.ownerQQ, text);
+      appendAutomationAudit({ kind: 'notify', ok: true, text });
+      return true;
+    } catch (error) {
+      log(`社交自动化：私聊通知发送失败：${error?.message ?? error}`);
+      return false;
+    }
+  }
+
+  /**
+   * 试占一次当日额度；占不到时「每天只告警一次」（审计 kind:"quota" + 私聊），返回 false。
+   * 0 是合法额度（当天一次都不做），所以这里只认 result.ok，不能拿计数当假值判断。
+   */
+  async function takeAutomationQuota(kind, now = Date.now()) {
+    if (!socialAuto) return false;
+    const automation = socialAuto.normalizeAutomation(cfg.socialV2?.automation);
+    const limits = automation.dailyLimits;
+    const result = socialAuto.takeQuota(readAutomationQuota(now), kind, limits, now);
+    if (result.ok) {
+      writeAutomationQuota(result.state);
+      return true;
+    }
+    if (result.state.alerted?.[kind] === true) return false; // 今天已经告过警，别再刷屏
+    writeAutomationQuota(socialAuto.markAlerted(result.state, kind));
+    const text = socialAuto.formatQuotaExhausted({ kind, limit: limits[kind] });
+    log(`社交自动化：${text}`);
+    appendAutomationAudit({ kind: 'quota', ok: false, text });
+    await notifyOwnerAutomation(text);
+    return false;
+  }
+
+  /**
+   * 追加白名单（只追加，不删不改）。控制台白名单页与自动化会同时「读—改—写」config.json，
+   * 所以所有写入串行排队，且**写前重读文件**，避免拿调用前的旧数组覆盖别人的改动。
+   */
+  let whitelistQueue = Promise.resolve();
+  function appendWhitelist(kind, id) {
+    const target = Number(id);
+    const run = async () => {
+      const configFile = path.join(ROOT, 'config.json');
+      const file = readConfigObject(configFile); // fail-fast：配置坏了就抛，别写脏文件
+      file.allow = (file.allow && typeof file.allow === 'object' && !Array.isArray(file.allow)) ? file.allow : {};
+      const list = Array.isArray(file.allow[kind]) ? file.allow[kind] : [];
+      if (list.some((entry) => String(entry) === String(target))) return { added: false, id: target };
+      file.allow[kind] = [...list, target];
+      atomicWriteJson(configFile, file);
+      // 内存里的 cfg.allow 也只追加：reconcileSessionPolicies 按它决定哪些会话能投递。
+      cfg.allow[kind] = [...(cfg.allow[kind] ?? []), target];
+      reconcileSessionPolicies();
+      log(`自动写入白名单：${kind} += ${target}`);
+      return { added: true, id: target };
+    };
+    const pending = whitelistQueue.then(run, run);
+    whitelistQueue = pending.then(() => {}, () => {}); // 一次失败不能把队列卡死
+    return pending;
+  }
+
+  /** 群名只用于文案，查不到就算了（空串），不能因为查群名失败而中断自动化。 */
+  async function fetchGroupNameQuiet(groupId) {
+    try {
+      const info = await bot.getGroupInfo(groupId);
+      return String(info?.group_name ?? '');
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * 判断「是不是自己被拉进群」用的账号：事件里通常带 self_id，缺了就退回登录账号。
+   * 登录账号只查一次（get_login_info），拿到就缓存；都拿不到返回 0，由调用方决定怎么处理。
+   */
+  let automationSelfId = 0;
+  async function resolveAutomationSelfId(event) {
+    const fromEvent = Number(event?.self_id ?? bot?.selfId ?? bot?.self_id);
+    if (Number.isInteger(fromEvent) && fromEvent > 0) return fromEvent;
+    if (automationSelfId > 0) return automationSelfId;
+    try {
+      const info = await bot.getLoginInfo();
+      const account = Number(info?.user_id ?? info?.uin);
+      if (Number.isInteger(account) && account > 0) {
+        automationSelfId = account;
+        return account;
+      }
+    } catch { /* 老 SDK 没有 getLoginInfo，或者网关还没连上 */ }
+    return 0;
+  }
+
+  /**
+   * 好友申请（dev-doc §7.1）：逐个白名单群查成员，确认对方真在群里才同意。
+   * 不看申请留言里写的群号——那可以伪造。
+   */
+  async function handleFriendRequest(event) {
+    if (!socialAuto) return;
+    const automation = socialAuto.normalizeAutomation(cfg.socialV2?.automation);
+    if (automation.friendFromGroup !== true) return; // 关着就完全不理，不写日志（免得噪音）
+    const now = Date.now();
+    const flag = String(event?.flag ?? '').trim();
+    const qq = Number(event?.user_id);
+    if (!flag || !Number.isInteger(qq) || qq <= 0) {
+      const text = '自动同意好友申请：flag 缺失或 user_id 非法，跳过';
+      log(text);
+      appendAutomationAudit({ kind: 'skip', ok: false, text });
+      return;
+    }
+    // 候选群：白名单群去掉黑名单群，最多 20 个（每个都要真查一次，别拖太久）。
+    const groups = (cfg.allow.groups ?? [])
+      .filter((groupId) => !(cfg.deny.groups ?? []).includes(groupId))
+      .slice(0, 20);
+    if (groups.length === 0) {
+      const text = '自动同意好友申请：白名单里没有群，跳过';
+      log(text);
+      appendAutomationAudit({ kind: 'skip', ok: false, text });
+      return;
+    }
+    // get_group_member_info 对「机器人不在的群」会抛异常，而且风控会慢；每个群单独 try/catch，
+    // 整体超过 10 秒就放弃本轮（宁可这次不自动同意，也不要把连接拖死）。
+    const deadline = now + 10_000;
+    let hit = null;
+    for (const groupId of groups) {
+      if (Date.now() > deadline) break;
+      try {
+        const info = await bot.getGroupMemberInfo(groupId, qq);
+        if (info) {
+          // 只记群号：getGroupMemberInfo 返回的是**申请人自己**在这个群的成员信息，
+          // 它的 card / nickname 是申请人的群名片/昵称，**不是群名**（曾把名片当群名发进通知）。
+          hit = { groupId };
+          break;
+        }
+      } catch { /* 机器人不在这个群，换下一个 */ }
+    }
+    if (!hit) {
+      const text = `自动同意好友申请：${qq} 不在任何白名单群里，已跳过`;
+      log(text);
+      appendAutomationAudit({ kind: 'skip', ok: false, qq, text });
+      return;
+    }
+    if (!(await takeAutomationQuota('friendApprove', now))) return;
+    // 群名单独查（get_group_info），只为写文案：查不到就留空串，文案回落到「来自群 <群号>」。
+    const groupName = await fetchGroupNameQuiet(hit.groupId);
+    try {
+      await bot.setFriendAddRequest(flag, true);
+    } catch (error) {
+      const text = `同意好友申请失败：${error?.message ?? error}`;
+      log(text);
+      appendAutomationAudit({ kind: 'friendApprove', ok: false, qq, groupId: hit.groupId, groupName, text });
+      return;
+    }
+    appendAutomationAudit({
+      kind: 'friendApprove', ok: true, qq, groupId: hit.groupId, groupName,
+      text: socialAuto.formatApprovedFriendLog({ qq, groupId: hit.groupId, groupName })
+    });
+    await notifyOwnerAutomation(socialAuto.formatApprovedFriend({
+      qq, groupId: hit.groupId, groupName,
+      privateWhitelist: automation.privateWhitelist === true
+    }));
+    // ④ 开：顺手把对方加进私聊白名单。写失败不回头撤好友（好友已经加上了，只能补记）。
+    if (automation.privateWhitelist === true) {
+      try {
+        const result = await appendWhitelist('private', qq);
+        if (result.added) {
+          log(socialAuto.formatWhitelistAddedLog({ kind: 'private', id: qq }));
+          appendAutomationAudit({ kind: 'whitelistWrite', ok: true, qq, text: socialAuto.formatWhitelistAddedLog({ kind: 'private', id: qq }) });
+          await notifyOwnerAutomation(socialAuto.formatWhitelistAdded({ kind: 'private', id: qq }));
+        }
+      } catch (error) {
+        const text = `自动写入私聊白名单失败：${error?.message ?? error}`;
+        log(text);
+        appendAutomationAudit({ kind: 'whitelistWrite', ok: false, qq, text });
+      }
+    }
+  }
+
+  /**
+   * 入群邀请（dev-doc §7.2）：flag 原样透传，不自己拼前缀——SnowLuma 实现层会丢弃 sub_type，
+   * 前缀拼错了反而同意不了。也不处理「别人申请加入机器人管的群」。
+   */
+  async function handleGroupInvite(event) {
+    if (!socialAuto) return;
+    const automation = socialAuto.normalizeAutomation(cfg.socialV2?.automation);
+    if (automation.acceptInvite !== true) return;
+    const now = Date.now();
+    const flag = String(event?.flag ?? '').trim();
+    const groupId = Number(event?.group_id);
+    if (!flag || !Number.isInteger(groupId) || groupId <= 0) {
+      const text = '自动同意入群邀请：flag 或 group_id 缺失，跳过';
+      log(text);
+      appendAutomationAudit({ kind: 'skip', ok: false, text });
+      return;
+    }
+    if (!(await takeAutomationQuota('inviteApprove', now))) return;
+    try {
+      await bot.setGroupAddRequest(flag, { approve: true });
+    } catch (error) {
+      const text = `同意入群邀请失败：${error?.message ?? error}`;
+      log(text);
+      appendAutomationAudit({ kind: 'inviteApprove', ok: false, groupId, text });
+      return;
+    }
+    appendAutomationAudit({ kind: 'inviteApprove', ok: true, groupId, text: socialAuto.formatInviteApprovedLog({ groupId }) });
+    await notifyOwnerAutomation(socialAuto.formatInviteApproved({ groupId }));
+  }
+
+  /**
+   * 自己被拉进群（dev-doc §7.3）：只认 user_id === self_id 的 group_increase；
+   * 别人进群不管。已经在白名单里就不重复写、也不烧额度。
+   */
+  async function handleSelfJoinedGroup(event) {
+    if (!socialAuto) return;
+    const automation = socialAuto.normalizeAutomation(cfg.socialV2?.automation);
+    if (automation.groupWhitelist !== true) return;
+    const selfId = await resolveAutomationSelfId(event);
+    if (!selfId) {
+      log('进群后自动加白名单：取不到自己的账号，无法判断是不是自己被拉进群，跳过');
+      return;
+    }
+    if (!event?.user_id || Number(event.user_id) !== selfId) return;
+    const now = Date.now();
+    const groupId = Number(event?.group_id);
+    if (!Number.isInteger(groupId) || groupId <= 0) return;
+    const already = (cfg.allow.groups ?? []).some((entry) => String(entry) === String(groupId));
+    if (already) {
+      log(`进群后自动加白名单：群 ${groupId} 已在群聊白名单里，跳过`);
+      return;
+    }
+    if (!(await takeAutomationQuota('whitelistWrite', now))) return;
+    let result;
+    try {
+      result = await appendWhitelist('groups', groupId);
+    } catch (error) {
+      const text = `自动写入群聊白名单失败：${error?.message ?? error}`;
+      log(text);
+      appendAutomationAudit({ kind: 'whitelistWrite', ok: false, groupId, text });
+      return;
+    }
+    if (!result.added) {
+      appendAutomationAudit({ kind: 'skip', ok: false, groupId, text: `进群后自动加白名单：群 ${groupId} 已在群聊白名单里，跳过` });
+      return;
+    }
+    const groupName = await fetchGroupNameQuiet(groupId);
+    appendAutomationAudit({ kind: 'whitelistWrite', ok: true, groupId, groupName, text: socialAuto.formatWhitelistAddedLog({ kind: 'groups', id: groupId }) });
+    await notifyOwnerAutomation(socialAuto.formatJoinedGroup({ groupId, groupName }));
+  }
+
   // ── 本地控制台（独立 Web 面板，不依赖 DSH WebUI） ───────────────────────────
   // 模式/角色/静默状态都存 state/*.json，桥接即时感知；此服务只读写这些文件。
   function v2ToolEnabled(flag) {
@@ -3537,7 +3893,7 @@ async function main() {
           return;
         }
         // 管理端专用 v2 接口：带 agent token 的请求一律拒绝，防止 MCP 工具越权访问控制台功能
-        const adminOnlyV2Paths = ['/api/socialV2/config', '/api/socialV2/activity', '/api/socialV2/reset', '/api/socialV2/states', '/api/socialV2/wake'];
+        const adminOnlyV2Paths = ['/api/socialV2/config', '/api/socialV2/activity', '/api/socialV2/reset', '/api/socialV2/states', '/api/socialV2/wake', '/api/socialV2/automation'];
         if (req.headers['x-agent-token'] && (adminOnlyV2Paths.includes(url.pathname) || (url.pathname === '/api/socialV2/feedback' && req.method === 'GET') || (url.pathname === '/api/socialV2/tool-log' && req.method === 'GET'))) {
           sendJson({ ok: false, error: '该接口仅控制台可用' }, 403);
           return;
@@ -4939,6 +5295,52 @@ async function main() {
           if (wakeDefaultChanged) refreshAllDefaultWakeConfigsV2();
           log('控制台：二代仿真配置已更新');
           sendJson({ ok: true, config: cfg.socialV2 });
+          return;
+        }
+        // ── 社交自动化：五个开关 + 今日额度 + 最近动作（dev-doc §9） ──────────
+        // 单独一个端点：不动 /api/socialV2/config 那套很长的归一化逻辑。
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/automation') {
+          if (!socialAuto) { sendJson({ ok: false, error: socialAutoUnavailable }, 503); return; }
+          const now = Date.now();
+          const automation = socialAuto.normalizeAutomation(cfg.socialV2?.automation);
+          const today = readAutomationQuota(now);
+          sendJson({
+            ok: true,
+            automation,
+            today: { day: today.day, counts: { ...today.counts } },
+            limits: { ...automation.dailyLimits },
+            recent: readAutomationAuditTail(10)
+          });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/automation') {
+          if (!socialAuto) { sendJson({ ok: false, error: socialAutoUnavailable }, 503); return; }
+          const body = await readBody();
+          // 校验只信这一个纯函数：未知键 / 非布尔 / 空对象三种错误文案都在 social-auto.js 里。
+          const current = socialAuto.normalizeAutomation(cfg.socialV2?.automation);
+          const result = socialAuto.applyAutomationUpdate(current, body);
+          if (!result.ok) {
+            sendJson({ ok: false, error: result.error }, 400);
+            return;
+          }
+          const configFile = path.join(ROOT, 'config.json');
+          try {
+            // 落盘顺序：读 → 改 → 原子写；写成功之后才替换内存里的 cfg，失败则内存保持原样。
+            const file = readConfigObject(configFile);
+            const fileV2 = (file.socialV2 && typeof file.socialV2 === 'object' && !Array.isArray(file.socialV2))
+              ? file.socialV2
+              : {};
+            fileV2.automation = { ...result.automation };
+            file.socialV2 = fileV2;
+            atomicWriteJson(configFile, file);
+            cfg.socialV2.automation = result.automation;
+          } catch (error) {
+            log(`控制台：社交自动化配置写入失败：${error?.message ?? error}`);
+            sendJson({ ok: false, error: '写入 config.json 失败，这次没有生效' }, 500);
+            return;
+          }
+          log(`控制台：社交自动化开关已更新（${result.changed.length > 0 ? result.changed.join('、') : '无变化'}）`);
+          sendJson({ ok: true, automation: cfg.socialV2.automation, changed: result.changed });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/activity') {
@@ -11511,6 +11913,26 @@ async function main() {
   bot.onNotice('notify', async (event) => {
     try { await handlePokeNotice(event); } catch (error) { log('处理拍一拍事件出错:', error?.message ?? error); }
   });
+
+  // ── 社交自动化：好友申请 / 入群邀请 / 自己被拉进群 ───────────────────────
+  // OneBot 的 post_type:"request" 事件此前被整体忽略（onEvent 旁路只拿它记账）。
+  // 三处订阅**各自** try/catch：老版本 SDK 缺 onRequest 时另外两条订阅仍然生效，桥接照常启动。
+  const subscribeAutomation = (name, subscribe) => {
+    try {
+      subscribe();
+    } catch (error) {
+      log(`社交自动化订阅不可用（${name}）：${error?.message ?? error}`);
+    }
+  };
+  subscribeAutomation('好友申请 request/friend', () => bot.onRequest('friend', (event) => {
+    void handleFriendRequest(event).catch((error) => log('自动同意好友申请出错:', error?.message ?? error));
+  }));
+  subscribeAutomation('入群邀请 request/group', () => bot.onRequest('group', (event) => {
+    void handleGroupInvite(event).catch((error) => log('自动同意入群邀请出错:', error?.message ?? error));
+  }));
+  subscribeAutomation('自己进群 notice/group_increase', () => bot.onNotice('group_increase', (event) => {
+    void handleSelfJoinedGroup(event).catch((error) => log('进群后自动加白名单出错:', error?.message ?? error));
+  }));
 
   // ── 上游健康：任何事件包都算「SnowLuma 还活着」，心跳还额外带接收链路健康度 ──
   // 用 onEvent 挂一个**旁路**订阅（不影响主链路）：

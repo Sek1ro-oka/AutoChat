@@ -147,6 +147,18 @@
     "autoReplyCheckMs": 30000,
     "agentPreset": "qq-chat-v2",
     "provideRecommendations": true,
+    "automation": {
+      "acceptInvite": false,
+      "groupWhitelist": false,
+      "friendFromGroup": false,
+      "privateWhitelist": false,
+      "notifyOwner": true,
+      "dailyLimits": {
+        "friendApprove": 5,
+        "inviteApprove": 3,
+        "whitelistWrite": 5
+      }
+    },
     "tools": {
       "getPrompt": true,
       "getUnread": true,

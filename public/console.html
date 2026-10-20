@@ -1805,6 +1805,145 @@ button:active:not(:disabled) {
 #section-switches #qzReadouts { margin-top:14px }
 #section-switches #qzReadouts .meta { margin-top:0 }
 
+/* ── 社交自动化（T-009）─────────────────────────────────────────────────────
+   结构与样式照抄用户已经确认过的设计稿（work/agent-tasks/T-009/demo/index.html），
+   只做两处适配：卡片跟在说说卡后面，所以 margin-top 取 22px 与兄弟卡片对齐；
+   设计稿里那行调试用按钮不搬进真实控制台，相关样式一并不带过来。
+   作用域照旧挂 #section-switches：auto-* 这些类名不会漏到别的视图。 */
+#section-switches .auto-card{
+  margin-top:22px;
+  padding:22px 24px 18px;
+  background:var(--surface-subtle);
+  border:1px solid var(--card-border);
+  border-radius:14px;
+  min-width:0;
+  overflow-wrap:anywhere
+}
+#section-switches .auto-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
+#section-switches .auto-head h3{margin:0;font-size:14px;font-weight:600;line-height:1.6;color:var(--text)}
+#section-switches .auto-head #autoBadge{flex:0 0 auto}
+#section-switches .auto-head #autoMsg{margin:0 0 0 auto;font-size:11px;line-height:1.7;text-align:right;min-width:0}
+#section-switches .auto-head #autoMsg:empty{display:none}
+
+#section-switches .auto-lead{margin:9px 0 0;font-size:12px;color:var(--muted);line-height:1.75}
+#section-switches .auto-lead b{font-weight:600;color:var(--text-secondary)}
+
+#section-switches .auto-grid{
+  display:grid;
+  grid-template-columns:minmax(0,1.62fr) minmax(0,1fr);
+  gap:18px;
+  margin-top:15px;
+  align-items:start;
+  min-width:0
+}
+#section-switches .auto-list{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:9px;
+  min-width:0
+}
+#section-switches .auto-item{
+  display:flex;
+  align-items:flex-start;
+  gap:9px;
+  margin:0;
+  padding:10px 12px;
+  background:var(--surface);
+  border:1px solid var(--border-subtle);
+  border-radius:10px;
+  font-size:12px;
+  color:var(--text-secondary);
+  cursor:pointer;
+  min-width:0;
+  transition:background .15s,border-color .15s
+}
+#section-switches .auto-item:hover{background:var(--surface-hover);border-color:var(--border)}
+#section-switches .auto-item input[type=checkbox]{flex:0 0 auto;margin:3px 0 0}
+#section-switches .auto-item-body{display:block;min-width:0}
+#section-switches .auto-item-title{display:flex;align-items:center;gap:7px;flex-wrap:wrap;min-width:0}
+#section-switches .auto-item-title b{font-size:13px;font-weight:500;line-height:1.55;color:var(--text)}
+#section-switches .auto-item .meta{display:block;margin:2px 0 0;font-size:11.5px;line-height:1.65;color:var(--muted);text-wrap:pretty}
+#section-switches .auto-flag{
+  flex:0 0 auto;
+  padding:0 6px;
+  border:1px solid var(--warn-border);
+  border-radius:20px;
+  background:var(--warn-bg);
+  color:var(--warn-fg);
+  font-size:10px;
+  line-height:1.65
+}
+
+/* 置灰占位：只把标题和勾选框压到 .55，下面那行长说明保持正常对比度，仍然读得清。 */
+#section-switches .auto-item.is-disabled{
+  grid-column:1/-1;
+  background:var(--surface-sunken);
+  cursor:not-allowed
+}
+#section-switches .auto-item.is-disabled:hover{background:var(--surface-sunken);border-color:var(--border-subtle)}
+#section-switches .auto-item.is-disabled .auto-item-title,
+#section-switches .auto-item.is-disabled input[type=checkbox]{opacity:.55}
+#section-switches .auto-item.is-disabled input[type=checkbox]{cursor:not-allowed}
+#section-switches .auto-item.is-disabled .meta{line-height:1.7}
+#section-switches .auto-nowrap{white-space:nowrap}
+
+#section-switches .auto-side{display:flex;flex-direction:column;gap:10px;min-width:0}
+#section-switches .auto-panel{
+  min-width:0;
+  padding:10px 12px;
+  background:var(--surface);
+  border:1px solid var(--border-subtle);
+  border-radius:10px
+}
+#section-switches .auto-panel-head{display:flex;align-items:baseline;gap:8px;margin:0 0 4px;font-size:11px;color:var(--muted-soft);min-width:0}
+#section-switches .auto-panel-head strong{font-size:11.5px;font-weight:600;color:var(--text-secondary)}
+#section-switches .auto-panel-head .meta{margin:0;font-size:10.5px;line-height:1.6}
+#section-switches #autoNotify,#section-switches #autoLog{list-style:none;margin:0;padding:0;overflow:auto;scrollbar-width:thin}
+#section-switches #autoNotify{display:flex;flex-direction:column;gap:5px;max-height:150px}
+#section-switches #autoLog{display:flex;flex-direction:column;gap:1px;max-height:160px}
+#section-switches #autoNotify::-webkit-scrollbar,
+#section-switches #autoLog::-webkit-scrollbar{width:6px;height:6px}
+#section-switches #autoNotify::-webkit-scrollbar-thumb,
+#section-switches #autoLog::-webkit-scrollbar-thumb{background:var(--border-chip);border-radius:99px}
+#section-switches #autoNotify::-webkit-scrollbar-track,
+#section-switches #autoLog::-webkit-scrollbar-track{background:transparent}
+#section-switches .auto-bubble{
+  padding:6px 9px;
+  border:1px solid var(--accent-border-soft);
+  border-radius:9px 9px 9px 3px;
+  background:var(--accent-soft-bg);
+  color:var(--accent-soft-fg);
+  font-size:11px;
+  line-height:1.6;
+  overflow-wrap:anywhere;
+  text-wrap:pretty
+}
+#section-switches .auto-log-item{display:flex;align-items:baseline;gap:8px;padding:2px 0;font-size:11.5px;line-height:1.5;color:var(--text-secondary);min-width:0}
+#section-switches .auto-log-time{flex:0 0 auto;font-family:Consolas,"SFMono-Regular",monospace;font-size:10.5px;color:var(--muted-soft);font-variant-numeric:tabular-nums}
+#section-switches .auto-log-text{min-width:0;overflow-wrap:anywhere;text-wrap:pretty}
+#section-switches .auto-log-item.is-warn .auto-log-text{color:var(--warn-fg-strong);font-weight:500}
+#section-switches .auto-log-item.is-skip .auto-log-text{color:var(--muted)}
+#section-switches .auto-log-empty,#section-switches .auto-empty{padding:6px 0;font-size:11px;line-height:1.6;color:var(--muted-soft)}
+
+#section-switches #autoStats{
+  margin-top:15px;
+  padding-top:12px;
+  border-top:1px solid var(--border-subtle);
+  font-size:12px;
+  line-height:1.7;
+  color:var(--text-secondary);
+  font-variant-numeric:tabular-nums
+}
+
+@media(max-width:1020px){
+  #section-switches .auto-grid{grid-template-columns:minmax(0,1fr)}
+}
+@media(max-width:720px){
+  #section-switches .auto-card{padding:16px}
+  #section-switches .auto-list{grid-template-columns:minmax(0,1fr)}
+  #section-switches .auto-head #autoMsg{width:100%;margin:2px 0 0;text-align:left}
+}
+
 </style>
 <style id="sandboxStyle">
 /* ===== 决策沙盘（内联自原来的看门狗 Demo 页；样式已机械作用域化到 #sandbox）=====
@@ -2951,6 +3090,78 @@ button:active:not(:disabled) {
         </table>
       </div>
       </section>
+
+      <section class="auto-card" id="autoCard" aria-labelledby="autoTitle">
+        <div class="auto-head">
+          <h3 id="autoTitle">社交自动化</h3>
+          <span class="pill" id="autoBadge">读取中…</span>
+          <span class="meta" id="autoMsg" role="status" aria-live="polite"></span>
+        </div>
+
+        <p class="auto-lead">机器人可以自己处理入群邀请和好友申请——<b>默认全关</b>。每次自动操作都会私聊通知你。</p>
+
+        <div class="auto-grid">
+          <div class="auto-list" id="autoList">
+            <label class="auto-item is-disabled">
+              <input type="checkbox" id="autoJoinManual" data-key="joinManual" disabled>
+              <span class="auto-item-body">
+                <span class="auto-item-title"><b>允许自主加群</b><span class="auto-flag">暂不支持</span></span>
+                <span class="meta" id="autoJoinManualNote">主动按群号申请加群：OneBot / SnowLuma 不支持（已核实 132 个动作里没有这个接口）。<span class="auto-nowrap">想让它自己能进群，用下面的「自动同意入群邀请」</span>。</span>
+              </span>
+            </label>
+
+            <label class="auto-item">
+              <input type="checkbox" id="autoAcceptInvite" data-key="acceptInvite">
+              <span class="auto-item-body">
+                <span class="auto-item-title"><b>允许自动同意入群邀请</b></span>
+                <span class="meta">有人邀请它进群时自动同意</span>
+              </span>
+            </label>
+
+            <label class="auto-item">
+              <input type="checkbox" id="autoGroupWhitelist" data-key="groupWhitelist">
+              <span class="auto-item-body">
+                <span class="auto-item-title"><b>允许自主添加群聊白名单</b></span>
+                <span class="meta">它自己进了群之后，自动把这个群加进群聊白名单</span>
+              </span>
+            </label>
+
+            <label class="auto-item">
+              <input type="checkbox" id="autoFriendFromGroup" data-key="friendFromGroup">
+              <span class="auto-item-body">
+                <span class="auto-item-title"><b>允许白名单群里的人添加好友</b></span>
+                <span class="meta">逐个白名单群查成员，确认在群里才同意</span>
+              </span>
+            </label>
+
+            <label class="auto-item">
+              <input type="checkbox" id="autoPrivateWhitelist" data-key="privateWhitelist">
+              <span class="auto-item-body">
+                <span class="auto-item-title"><b>允许自主添加私聊白名单</b></span>
+                <span class="meta">同意好友申请后，自动把对方加进私聊白名单</span>
+              </span>
+            </label>
+          </div>
+
+          <div class="auto-side">
+            <div class="auto-panel">
+              <div class="auto-panel-head"><strong>管理员收到</strong><span class="meta">私聊通知</span></div>
+              <ul class="auto-bubbles" id="autoNotify" aria-live="polite">
+                <li class="auto-empty">暂无私聊通知</li>
+              </ul>
+            </div>
+            <div class="auto-panel">
+              <div class="auto-panel-head"><strong>最近自动动作</strong><span class="meta">每做一次记一行</span></div>
+              <ul class="auto-log" id="autoLog" aria-live="polite">
+                <li class="auto-log-empty">还没有自动动作</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <div id="autoStats">今日：—</div>
+      </section>
+
     </section>
 <section class="card" id="sandbox" data-page="sandbox">
 <div class="wrap">
@@ -3205,6 +3416,8 @@ async function refresh() {
     // 说说读数不在 /api/status 里（那边没有这个字段），只有停在这一页才去拉；
     // 10 秒内的重复调用只重绘不重拉，倒计时是本地按 nextAllowedAt 现算的。
     if (currentConsolePage === 'switches') await refreshQzone();
+    // 社交自动化（T-009）同理：只有停在这一页才拉，读数与两块面板跟着这一份响应走。
+    if (currentConsolePage === 'switches') await refreshAuto();
     const presetSel = document.getElementById('closedPreset');
     if (presetSel && document.activeElement !== presetSel) presetSel.value = s.closedAgentPreset || '';
   } catch (e) { document.getElementById('statusText').textContent = '连接中断 · 请检查桥接服务'; setConnectionError(e); }
@@ -3680,6 +3893,209 @@ document.getElementById('qzList').addEventListener('click', (event) => {
   const button = event.target.closest('button[data-tid]');
   if (!button) return;
   deleteQzone(button.dataset.tid);
+});
+
+// ── 开关页：社交自动化（T-009）────────────────────────────────────────────────
+// 读数只有一处来源：GET /api/socialV2/automation（automation / today.counts / limits / recent）。
+// 勾选立即 POST 部分更新，响应里的 automation 才是权威值——前端不做乐观 UI，只负责回填。
+// 后端可能比这一页晚落地：端点 404、返回非 JSON 都落进「状态未知」这一支，
+// 卡片自己降级，绝不把整页脚本打断。
+const AUTO_SWITCHES = Object.freeze([
+  { id: 'autoAcceptInvite', key: 'acceptInvite', label: '自动同意入群邀请' },
+  { id: 'autoGroupWhitelist', key: 'groupWhitelist', label: '自主添加群聊白名单' },
+  { id: 'autoFriendFromGroup', key: 'friendFromGroup', label: '白名单群里的人添加好友' },
+  { id: 'autoPrivateWhitelist', key: 'privateWhitelist', label: '自主添加私聊白名单' },
+]);
+let lastAuto = null;               // 最近一次 GET 的整份响应；null = 还没读到（或读失败）
+let autoFetchedAt = 0;             // 上一次请求的时刻：10 秒内的重复调用只重绘不重拉
+let autoChain = Promise.resolve(); // POST 串行发：config.json 是单文件读改写，并发会互相盖掉
+const autoPending = new Map();     // key → { value, token }：还没落盘的勾选，回填时优先信它
+let autoToken = 0;
+
+function setAutoBadge(text, tone) {
+  const badge = document.getElementById('autoBadge');
+  if (!badge) return;
+  badge.textContent = text;
+  badge.className = tone ? 'pill ' + tone : 'pill';
+}
+// 回执只由这个函数写：#autoMsg 不参与重绘，否则点一下的回执会被下一次轮询顺手清掉。
+function setAutoMsg(text, kind) {
+  const msg = document.getElementById('autoMsg');
+  if (!msg) return;
+  msg.className = kind ? 'meta ' + kind : 'meta';
+  msg.textContent = text;
+}
+
+// 分母只认接口给的 limits（config.json 里能改），读不到就整行显示「—」，不编一个 5/3/5 出来。
+function autoLimitsOf(data) {
+  const src = (data && data.limits) || (data && data.automation && data.automation.dailyLimits) || null;
+  if (!src) return null;
+  const pick = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+  const limits = { friendApprove: pick(src.friendApprove), inviteApprove: pick(src.inviteApprove), whitelistWrite: pick(src.whitelistWrite) };
+  return Object.values(limits).every(v => v !== null) ? limits : null;
+}
+
+function renderAutoStats(data) {
+  const el = document.getElementById('autoStats');
+  if (!el) return;
+  const limits = autoLimitsOf(data);
+  if (!limits) { el.textContent = '今日：—'; return; }
+  const counts = (data && data.today && data.today.counts) || {};
+  const n = (v) => (Number.isFinite(Number(v)) ? String(Math.max(0, Math.trunc(Number(v)))) : '0');
+  el.textContent = '今日：同意好友 ' + n(counts.friendApprove) + '/' + limits.friendApprove
+    + ' · 自动入群 ' + n(counts.inviteApprove) + '/' + limits.inviteApprove
+    + ' · 写入白名单 ' + n(counts.whitelistWrite) + '/' + limits.whitelistWrite;
+}
+
+function autoEntryText(entry) {
+  const text = entry && typeof entry.text === 'string' ? entry.text.trim() : '';
+  return text || '（这一条没有留下文案）';
+}
+function autoEntryTime(entry) {
+  return entry && entry.at ? String(entry.at) : '—';
+}
+// ok === false 是失败，kind === 'quota' 是「今天到上限了」：两种都得让人一眼看见。
+function autoLogIsWarn(entry) {
+  return !!entry && (entry.ok === false || entry.kind === 'quota');
+}
+
+function renderAutoPanels(data) {
+  const recent = data && Array.isArray(data.recent) ? data.recent.filter(e => e && typeof e === 'object') : [];
+
+  const notify = document.getElementById('autoNotify');
+  if (notify) {
+    // 管理员收到的私聊：只要 kind === 'notify'，取最近两条，保持接口给的时间顺序。
+    const items = recent.filter(e => e.kind === 'notify').slice(-2);
+    notify.replaceChildren();
+    if (!items.length) {
+      const empty = document.createElement('li');
+      empty.className = 'auto-empty';
+      empty.textContent = '暂无私聊通知';
+      notify.append(empty);
+    }
+    for (const entry of items) {
+      const item = document.createElement('li');
+      item.className = 'auto-bubble';
+      item.textContent = autoEntryText(entry);
+      notify.append(item);
+    }
+  }
+
+  const log = document.getElementById('autoLog');
+  if (log) {
+    const items = recent.slice(-5);
+    log.replaceChildren();
+    if (!items.length) {
+      const empty = document.createElement('li');
+      empty.className = 'auto-log-empty';
+      empty.textContent = '还没有自动动作';
+      log.append(empty);
+    }
+    for (const entry of items) {
+      const item = document.createElement('li');
+      const kindClass = entry.kind ? ' is-' + String(entry.kind).replace(/[^a-zA-Z0-9_-]/g, '') : '';
+      item.className = 'auto-log-item' + kindClass + (autoLogIsWarn(entry) ? ' is-warn' : '');
+      const time = document.createElement('span');
+      time.className = 'auto-log-time';
+      time.textContent = autoEntryTime(entry);
+      const text = document.createElement('span');
+      text.className = 'auto-log-text';
+      text.textContent = autoEntryText(entry);
+      item.append(time, text);
+      log.append(item);
+    }
+  }
+}
+
+// 「允许自主加群」这一项接口根本没有：永远不勾、永远不可点，勾选框只是把这个事实画出来。
+function syncAutoSwitches(automation) {
+  const joinManual = document.getElementById('autoJoinManual');
+  if (joinManual) { joinManual.checked = false; joinManual.disabled = true; }
+  const values = automation && typeof automation === 'object' ? automation : {};
+  for (const item of AUTO_SWITCHES) {
+    const input = document.getElementById(item.id);
+    if (!input) continue;
+    const pending = autoPending.get(item.key);
+    input.checked = pending ? pending.value === true : values[item.key] === true;
+  }
+}
+
+function renderAuto(data) {
+  syncAutoSwitches(data && data.automation);
+  renderAutoStats(data);
+  renderAutoPanels(data);
+}
+
+async function refreshAuto(force = false) {
+  if (!force && Date.now() - autoFetchedAt < 10000) return;
+  autoFetchedAt = Date.now();
+  try {
+    const r = await api('/api/socialV2/automation');
+    if (!r || r.ok !== true) throw new Error((r && r.error) || '桥接没有返回自动化状态');
+    lastAuto = r;
+    renderAuto(r);
+    setAutoBadge('已保存', 'g');
+  } catch (e) {
+    // 端点还没上线时降级就落在这里：勾选框回到已知状态（从没读到过就是全关），读数「—」，面板留空态。
+    if (!lastAuto) renderAuto(null);
+    setAutoBadge('状态未知', 'r');
+  }
+}
+
+// 一次改多项时用顿号连起来（与后端 formatAutomationChange 同口径）；现在每次勾选只提交一项。
+function autoReceipt(changes) {
+  return '已保存：' + changes.map(c => c.label + ' = ' + (c.value ? '开' : '关')).join('、') + '（不重启即生效）';
+}
+
+async function saveAutoChanges(changes, token) {
+  let response = null;
+  try {
+    const body = {};
+    for (const change of changes) body[change.key] = change.value === true;
+    const r = await api('/api/socialV2/automation', 'POST', body);
+    if (!r || r.ok !== true) throw new Error((r && r.error) || '桥接拒绝了这次改动');
+    response = r;
+  } catch (e) {
+    response = null;
+  } finally {
+    // 只清自己那一笔：同一个开关又点了一次时，新的 pending 得留着，别被这一轮的结尾顺手抹掉。
+    for (const change of changes) {
+      const entry = autoPending.get(change.key);
+      if (entry && entry.token === token) autoPending.delete(change.key);
+    }
+  }
+
+  if (!response) {
+    setAutoMsg('写入 config.json 失败，这次没有生效', 'err');
+    renderAuto(lastAuto);          // 勾选回滚成「服务器上确实是什么」，不留骗人的已勾状态
+    return;
+  }
+  if (response.automation) {
+    lastAuto = Object.assign({}, lastAuto || {}, { automation: response.automation });
+    renderAuto(lastAuto);
+  }
+  setAutoMsg(autoReceipt(changes), 'ok');
+  setAutoBadge('已保存', 'g');
+  // POST 只回 automation：读数、私聊通知、动作日志得另拉一次，绕过节流。
+  autoFetchedAt = 0;
+  await refreshAuto(true);
+}
+
+function queueAutoChanges(changes) {
+  const token = ++autoToken;
+  // 排队期间也按这次的值显示：否则中间插进来的轮询会把刚点上的框闪回去。
+  for (const change of changes) autoPending.set(change.key, { value: change.value === true, token });
+  autoChain = autoChain
+    .then(() => saveAutoChanges(changes, token))
+    .catch(() => {});
+}
+
+AUTO_SWITCHES.forEach((item) => {
+  const input = document.getElementById(item.id);
+  if (!input) return;
+  input.addEventListener('change', () => {
+    queueAutoChanges([{ key: item.key, label: item.label, value: input.checked === true }]);
+  });
 });
 
 async function refreshPresets() {
@@ -5319,6 +5735,8 @@ function setConsolePage(page, { updateHash = true, focus = false, target = '' } 
   // 之后由 refresh() 的轮询继续更新。首屏直接开在 #switches 时这里是「读取中…」。
   if (page === 'switches') renderWatchdog(lastWatchdog);
   if (page === 'switches') { renderQzone(lastQzone); refreshQzone(); }
+  // 社交自动化：先用缓存画一遍（没缓存就保持「读取中…」），再拉一次。
+  if (page === 'switches') { renderAuto(lastAuto); refreshAuto(); }
   document.querySelectorAll('[data-page]').forEach(el => { el.hidden = el.dataset.page !== page; });
   // 视图已经可见，再让沙盘脚本开始跑（它只会在第一次进入时真正插入一次）。
   if (page === 'sandbox') initSandbox();

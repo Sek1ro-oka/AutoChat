@@ -7,6 +7,24 @@
 
 ### 新增
 
+- **社交自动化（`socialV2.automation`，出厂全关）**：桥接自己处理四类「加好友 / 进群」杂事，不需要模型参与——
+  ①`acceptInvite` 同意入群邀请、②`groupWhitelist` 自己被拉进群后把群加进 `allow.groups`、
+  ③`friendFromGroup` 同意**白名单群成员**的好友申请（真去 `get_group_member_info` 核验，不信申请留言里的群号）、
+  ④`privateWhitelist` 同意好友后把对方加进 `allow.private`。每个动作私聊通知 `ownerQQ`（`notifyOwner`，唯一 fail-open 的键）。
+  - 判定一律 **fail-closed**（`value === true` 才算开），不复用 `socialV2.tools` 那套 `!== false`；额度按**上海自然日**
+    计（默认 5/3/5，区间 `0`~`50`，`0` 是合法值），跨天清零，用完只告警一次不抛错。
+  - 白名单**只追加**、串行排队、写前重读 `config.json`、原子写成功后换内存并 `reconcileSessionPolicies()`。
+  - 新模块 `src/social-auto.js`（纯函数：归一 / 部分更新校验 / 自然日 / 额度 / 审计尾部解析 / 文案）。
+  - 新端点 `GET/POST /api/socialV2/automation`（GET 返回 `automation` / `today` / `limits` / `recent`；
+    POST 部分更新，文案固定三种 400），已加入 `adminOnlyV2Paths`，AI 通道访问被 403。
+  - 审计 `state/social-auto.jsonl`（`kind` = `friendApprove`/`inviteApprove`/`whitelistWrite`/`skip`/`quota`/`notify`，
+    带 `text` 供控制台直接显示）、额度 `state/social-auto.json`；两者都在 `state/`，不入库。
+  - **主动加群做不到**：SnowLuma 的 132 个动作 / 190 条 catalog / 104 个协议命名空间 / 16 个 Api 类里没有
+    搜群或申请加群的接口，唯一逃生口 `send_packet` 是盲发 protobuf，明确不做。查证见 `work/agent-tasks/T-009/research.md`。
+  - 控制台「开关」页新增「社交自动化」卡片（在「说说」卡下面）：五个开关 + 今日额度 + 最近自动动作（右栏两块面板读审计 `text`）。
+  - 自检 `node scripts/test-social-auto.mjs`（98 条断言：fail-closed、额度 `0` 与夹取、三种错误文案、
+    上海跨日、审计尾部时间正序与坏行跳过、文案逐字比对）。详见 [docs/guides/SOCIAL-AUTO.md](docs/guides/SOCIAL-AUTO.md)。
+
 - **AI 自己的日记本（`qq_diary_write` / `qq_diary_list` / `qq_diary_read`）**：每个聊天一个文件夹、
   一天一个 `.md`（`state/diaries/<group_群号|private_QQ号>/<YYYY-MM-DD>.md`，`state/` 不进版本库）。
   同一天可以写多则（按 `## HH:MM · 标题` 分节）；`list` 给日期/则数/摘要，`read` 给某天全文（超长截断并标记）。

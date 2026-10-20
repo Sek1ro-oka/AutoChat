@@ -91,6 +91,7 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
   - MCP 发送工具支持可选 `replyToMessageId`，并新增专用 `qq_reply` 工具：AI 可以先用 `qq_get_group_history` 拿到真实消息 id，再引用/回复某条消息（是否允许 AI 主动使用由人格/策略决定；桥接会检测发送类工具调用并自动跳过该回合的重复自动转发）
   - 一代仿真模式（`reserved`）下，AI 可以只输出 `[SILENT]` 表示“潜水/不接话”，桥接会静默不发送
   - 一代仿真模式（`reserved`）按空格分句：AI 用空格表示拆成多条消息；中英文/数字之间的空格也会被当成分条信号，不想分条就不要加空格（`reserved2` 不适用，分条请用 `qq_send_message` 数组）
+  - **社交自动化（出厂全关）**：桥接自己处理「同意入群邀请 / 进群后加群白名单 / 同意白名单群成员的好友申请 / 同意好友后加私聊白名单」，每个动作有每日额度（默认 5/3/5，`0` 是合法值）并私聊通知 `ownerQQ`；判定一律 fail-closed（只有 `true` 算开），全程写 `state/social-auto.jsonl` 审计。**主动加群做不到**——上游没有搜群/申请加群的接口。控制台「开关」页有开关卡片、今日额度与最近自动动作，详见 [docs/guides/SOCIAL-AUTO.md](docs/guides/SOCIAL-AUTO.md)
 
 ## 前置条件
 
@@ -224,6 +225,12 @@ npm start          # 或双击 start.bat（守护模式：崩溃自动重启，�
 
 ```bash
 npm run test:audit
+```
+
+社交自动化的纯函数回归（配置归一、额度 `0` 合法、三种 400 文案、审计尾部解析，不连 QQ、不碰真实配置）：
+
+```bash
+node scripts/test-social-auto.mjs
 ```
 
 reserved2 的 token 开销优化、消息水位协议、升级及回退说明（该专项分析为本地文档，未随仓库发布。）专项离线回归可运行 `npm run test:token`，已包含在上面的完整回归中。

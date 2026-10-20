@@ -186,5 +186,74 @@ ok(!html.includes('这里的开关只影响桥接运行时'), '「开关只影�
 ok(/history\.replaceState\(/.test(html), 'URL 里的 ?token= 读完后用 replaceState 抹掉');
 ok(!/演示/.test(html), '页面仍无「演示」字样');
 
+// ── 社交自动化卡（T-009）：照抄已确认的设计稿，仍是开关页里的一块，不新开视图 ──
+console.log('## 开关页（社交自动化）');
+for (const id of ['autoCard', 'autoJoinManual', 'autoAcceptInvite', 'autoGroupWhitelist', 'autoFriendFromGroup', 'autoPrivateWhitelist', 'autoBadge', 'autoMsg', 'autoStats', 'autoNotify', 'autoLog']) {
+  const n = (html.match(new RegExp(`id="${id}"`, 'g')) ?? []).length;
+  ok(n === 1, `自动化卡元素 ${id}`, `${n} 处`);
+}
+const qzoneAt = html.indexOf('id="qzoneCard"');
+const autoAt = html.indexOf('id="autoCard"');
+const sandboxAt = html.indexOf('<section class="card" id="sandbox" data-page="sandbox">');
+ok(qzoneAt > -1 && autoAt > qzoneAt && autoAt < sandboxAt, '卡片接在说说卡之后、仍在开关页里', `qzone ${qzoneAt} < auto ${autoAt} < sandbox ${sandboxAt}`);
+ok(!/data-page="auto/.test(html) && !/data-view="auto/.test(html), '没有新开页面 / 侧栏入口');
+const autoBlock = autoAt > -1 && sandboxAt > autoAt ? html.slice(autoAt, sandboxAt) : '';
+ok(!/演示|Demo|模拟|触发测试/.test(autoBlock), '卡片里没有「演示 / Demo / 模拟 / 触发测试」字样');
+ok(!/id="autoSim"|id="simFriend"|id="simInvite"|id="simJoined"|id="simReset"/.test(html), '调试用按钮那行整体没搬过来');
+const markupOnly = html.replace(/<style[\s\S]*?<\/style>/g, '').replace(/<script[\s\S]*?<\/script>/g, '');
+ok(!/演示|Demo/.test(markupOnly), '页面可见文案里没有「演示 / Demo」字样');
+
+ok(/<input type="checkbox" id="autoJoinManual"[^>]*\bdisabled\b/.test(html), '「允许自主加群」勾选框带 disabled');
+ok(html.includes('OneBot / SnowLuma 不支持'), '灰字说明写清 OneBot / SnowLuma 不支持');
+ok(/joinManual\.checked = false; joinManual\.disabled = true;/.test(html), '脚本每次都把占位项按回 未勾 + disabled');
+ok(!/key: 'joinManual'/.test(html), '占位项不在可提交的键里');
+
+ok(/api\('\/api\/socialV2\/automation'\)/.test(html), '加载走 GET /api/socialV2/automation');
+ok(/api\('\/api\/socialV2\/automation', 'POST', body\)/.test(html), '勾选立即 POST 同一路径');
+ok(/body\[change\.key\] = change\.value === true;/.test(html), 'POST 只带被改的那一项（部分更新）');
+ok(/input\.addEventListener\('change', \(\) => \{/.test(html), '勾选/取消直接提交：change 事件，没有保存按钮');
+ok(!html.includes('autoSaveBtn'), '没有额外保存按钮');
+ok(/AUTO_SWITCHES = Object\.freeze\(\[/.test(html) && /key: 'acceptInvite'/.test(html)
+  && /key: 'groupWhitelist'/.test(html) && /key: 'friendFromGroup'/.test(html)
+  && /key: 'privateWhitelist'/.test(html), '四个可用开关的键与端点契约一致');
+
+ok(/id="autoBadge">读取中…</.test(html), '徽标初始 读取中…');
+ok(/setAutoBadge\('已保存', 'g'\)/.test(html), '成功徽标 已保存（绿）');
+ok(/setAutoBadge\('状态未知', 'r'\)/.test(html), '失败/端点缺失徽标 状态未知（红）');
+ok(/if \(!r \|\| r\.ok !== true\) throw new Error/.test(html)
+  && /if \(!lastAuto\) renderAuto\(null\);/.test(html), '端点 404 / 非 ok 响应走降级，不抛到页面外');
+ok(/msg\.className = kind \? 'meta ' \+ kind : 'meta'/.test(html), '#autoMsg 用全局 .ok/.err 上色');
+
+ok(/return '已保存：' \+ changes\.map\(c => c\.label \+ ' = ' \+ \(c\.value \? '开' : '关'\)\)\.join\('、'\)/.test(html), '成功回执 已保存：<项名> = 开/关');
+ok(html.includes("'（不重启即生效）'"), '回执带上「不重启即生效」');
+ok(html.includes("'写入 config.json 失败，这次没有生效'"), '失败回执逐字在');
+ok(/input\.checked = pending \? pending\.value === true : values\[item\.key\] === true;/.test(html), '回填以接口/响应为准，不靠乐观 UI');
+ok(/if \(response\.automation\) \{/.test(html), 'POST 响应里的 automation 才回填勾选框');
+
+ok(/data\.limits\)/.test(html) && /limits\.friendApprove/.test(html) && /limits\.inviteApprove/.test(html)
+  && /limits\.whitelistWrite/.test(html), '三个分母都从接口 limits 取');
+ok(/el\.textContent = '今日：同意好友 ' \+ n\(counts\.friendApprove\)/.test(html)
+  && html.includes("' · 自动入群 '") && html.includes("' · 写入白名单 '"), '读数行 今日：同意好友 X/N · 自动入群 Y/N · 写入白名单 Z/N');
+ok(!/今日：同意好友 0\/5/.test(html), '读数没有写死分母（0/5）');
+
+ok(/recent\.filter\(e => e\.kind === 'notify'\)\.slice\(-2\)/.test(html), '私聊通知取 recent 里 kind=notify 的最后 2 条');
+ok(/const items = recent\.slice\(-5\);/.test(html), '动作日志取 recent 最后 5 条');
+ok(/entry\.ok === false \|\| entry\.kind === 'quota'/.test(html), 'ok===false 与 kind=quota 用警示色');
+ok(html.includes('还没有自动动作') && html.includes('暂无私聊通知'), '两块面板都有空态文案');
+ok(/time\.className = 'auto-log-time'/.test(html) && /time\.textContent = autoEntryTime\(entry\);/.test(html), '日志一行是 HH:mm + 文案');
+
+ok(/if \(currentConsolePage === 'switches'\) await refreshAuto\(\);/.test(html), 'refresh() 仅在开关页拉自动化状态');
+ok(/if \(page === 'switches'\) \{ renderAuto\(lastAuto\); refreshAuto\(\); \}/.test(html), 'setConsolePage 切到开关页时先渲染缓存再拉');
+
+// 样式必须全部挂在 #section-switches 下：T-008 那次全局 input[type=number] 的坑不能再踩一次。
+const autoCssStart = html.indexOf('#section-switches .auto-card{');
+const autoCssEnd = autoCssStart > -1 ? html.indexOf('</style>', autoCssStart) : -1;
+const autoCss = autoCssEnd > autoCssStart ? html.slice(autoCssStart, autoCssEnd) : '';
+const autoSelectors = autoCss.split(/\r?\n/).filter((line) => /^\s*[.#][^{]*\{/.test(line));
+const unscoped = autoSelectors.filter((line) => !line.includes('#section-switches'));
+ok(autoSelectors.length >= 20 && unscoped.length === 0, '自动化样式全部挂在 #section-switches 下', unscoped.slice(0, 3).join(' | ') || `选择器 ${autoSelectors.length} 条`);
+const straySelectors = html.split(/\r?\n/).filter((line) => /^\s*\.auto-/.test(line) || /^\s*#auto[A-Z]/.test(line));
+ok(straySelectors.length === 0, '没有漏掉作用域的 .auto-* / #auto* 顶层选择器', straySelectors.slice(0, 3).join(' | '));
+
 console.log(bad === 0 ? '\n全部通过' : `\n${bad} 项失败`);
 if (bad > 0) process.exit(1);
