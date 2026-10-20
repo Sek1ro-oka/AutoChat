@@ -64,7 +64,9 @@ docs/research/
 docs/qq-bridge-PUBLISH_PLAN.md
 docs/qq-bridge-SECURITY_AUDIT.md
 docs/guides/PROJECT_GUIDE.md
-docs/guides/VOICE.md
+# docs/guides/VOICE.md 不在忽略之列：2026-10-20 重写为「当前实现」版（只含占位符）。
+# 旧版是上一代项目的实现说明（真实 QQ 号/本机路径），这次没有搬运；但 test-voice-system.mjs
+# 和 docs/README.md 都索引它，继续忽略会让 test-audit 恒红。
 
 # 语音库（用户个人音频素材，config.json 的 socialV2.voice.dir 指向此处）
 audio/
