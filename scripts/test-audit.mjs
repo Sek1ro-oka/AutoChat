@@ -103,6 +103,11 @@ const tests = [
   // 十分钟定时器、dryRun 默认 true、两个端点在 adminOnlyV2Paths、applyVent 只在成功分支、
   // 文案会话 8 秒兜底且等待者与黑话学习互不共用。
   'test-affect-vent-run.mjs',
+  // 三个宣泄出口的通道契约（T-012 第七步）：私聊只发 owner、日记 key 带 private: 前缀、
+  // 失败按 qzone→private→diary 降级、全失败不记账、caps 来自 ventLog 当日成功计数、
+  // proactive 概率乘 1 + 0.6×情绪强度。出口函数在 startConsoleServer 闭包里，
+  // import 会真起服务，所以这里只做静态切片断言。
+  'test-affect-channels.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

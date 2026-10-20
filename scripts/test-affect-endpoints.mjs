@@ -167,7 +167,12 @@ check('planVent 的 quiet 来自真实静默判定（inQuietHours + 本地时分
   snapshot.includes('inQuietHours(affect.quietHours, localNow.getHours(), localNow.getMinutes())'));
 check('快照里不再写死 quiet:false', !snapshot.includes('quiet: false'));
 check('快照把 quiet 传给 planVent', snapshot.includes('quiet,'));
-check('planVent 带最近 5 条空间文案', snapshot.includes('qzState.posts.slice(0, 5)'));
+check(
+  'planVent 带最近 5 条空间文案，且取的是 content 字段（qzone-posts.json 的字段名）',
+  snapshot.includes('qzState.posts.slice(0, 5)')
+  && snapshot.includes("typeof post?.content === 'string' ? post.content : ''")
+  && !snapshot.includes('post?.text')
+);
 check('planVent 带 lastVentTs', snapshot.includes('lastVentTs: state.lastVentTs'));
 check('快照不落盘（不调用 atomicWriteJson / writeAffectState）', !snapshot.includes('atomicWriteJson') && !snapshot.includes('writeAffectState('));
 check('快照不发消息（不调用 oneBotAction）', !/oneBotAction/.test(snapshot));

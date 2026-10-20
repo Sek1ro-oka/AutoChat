@@ -133,14 +133,20 @@ check('runAffectVent 签名默认 dryRun = true', /async function runAffectVent\
 check('端点默认 dryRun:true（body.dryRun !== false）', ventEndpoint.includes('body?.dryRun !== false'));
 check('dryRun 分支存在且只回报不发送', runFn.includes('if (dryRun) {') && runFn.includes('dryRun: true'));
 
-// dryRun 分支切片：从 `if (dryRun)` 到真正发送那一行
+// dryRun 分支切片：从 `if (dryRun)` 到第一次真正发送那一行（三个出口任一）
 const drySlice = (() => {
   const start = runFn.indexOf('if (dryRun) {');
-  const end = runFn.indexOf('const published = await publishQzonePost(');
+  const end = runFn.indexOf('const published =', start);
   return start >= 0 && end > start ? runFn.slice(start, end) : '';
 })();
 check('dryRun 分支不写状态文件', drySlice !== '' && !drySlice.includes('writeAffectState') && !drySlice.includes('applyVent'));
-check('dryRun 分支不发送', drySlice !== '' && !drySlice.includes('publishQzonePost('));
+check(
+  'dryRun 分支不发送（三个出口都不调）',
+  drySlice !== ''
+  && !drySlice.includes('publishQzonePost(')
+  && !drySlice.includes('publishVentPrivate(')
+  && !drySlice.includes('publishVentDiary(')
+);
 
 // ── ④ 端点权限 ─────────────────────────────────────────────────────────────
 console.log('④ 两个端点都在 adminOnlyV2Paths');
@@ -182,30 +188,37 @@ const successSlice = (() => {
   return start >= 0 ? runFn.slice(start) : '';
 })();
 check('切到失败分支与成功分支', failSlice !== '' && successSlice !== '');
-check('applyVent 出现在 send 之后', runFn.indexOf('applyVent(') > runFn.indexOf('const published = await publishQzonePost('));
+check('applyVent 出现在 send 之后', runFn.indexOf('applyVent(') > runFn.indexOf('await publishQzonePost('));
 check('applyVent 不在失败分支里', failSlice !== '' && !failSlice.includes('applyVent('));
 check('失败分支返回 reason: send_failed', failSlice.includes("reason: 'send_failed'"));
 check('失败分支不写情绪状态', failSlice !== '' && !failSlice.includes('writeAffectState'));
 check('成功分支才 writeAffectState', successSlice.includes('writeAffectState(next)'));
 check('ventId 用 crypto.randomUUID()', successSlice.includes('crypto.randomUUID()'));
-check('ventLog 的 ok 由调用方补成 true', successSlice.includes('ok: true') && successSlice.includes("channel: 'qzone'"));
+check('ventLog 的 ok 由调用方补成 true', successSlice.includes('channel, ok: true') && successSlice.includes("reason: ''"));
 check(
-  '成功日志格式 [affect] 宣泄 channel=qzone emotion=… step=… tid=…',
-  successSlice.includes('log(`[affect] 宣泄 channel=qzone emotion=${plan.emotion} step=${plan.step} tid=${published.tid}`)')
+  '成功日志格式 [affect] 宣泄 channel=… emotion=… step=…（qzone 带 tid / diary 带 date）',
+  successSlice.includes('log(`[affect] 宣泄 channel=${channel} emotion=${plan.emotion} step=${plan.step}${extra}`)')
+  && successSlice.includes("channel === 'qzone'\n        ? ` tid=${published.tid}`")
+  && successSlice.includes("channel === 'diary'\n          ? ` date=${published.date}`")
 );
-check('返回 ok:true 且带 tid', successSlice.includes('ok: true') && successSlice.includes('tid: published.tid'));
+check('返回 ok:true 且带 tid（仅 qzone）', successSlice.includes('ok: true') && successSlice.includes('...(channel === \'qzone\' ? { tid: published.tid } : {})'));
 
-// 判定链：planVent 失败原样返回；非 qzone 出口明确报 channel_not_ready
+// 判定链：planVent 失败原样返回；出口按 plan.channel 先试，失败按 VENT_CHANNELS 降级
 check('planVent 失败时原样返回 reason', runFn.includes("if (!plan.ok) return { ok: false, reason: plan.reason"));
-check('非 qzone 出口返回 channel_not_ready', runFn.includes("reason: 'channel_not_ready'"));
-check("出口判定用 plan.channel !== 'qzone'", runFn.includes("if (plan.channel !== 'qzone')"));
+check('降级顺序来自 affect-vent.VENT_CHANNELS（不另写数组）', runFn.includes(': [plan.channel, ...VENT_CHANNELS.filter((channel) => channel !== plan.channel)];'));
+check('静默时段只允许日记（不降级到私聊）', runFn.includes("const channelOrder = quiet\n        ? ['diary']"));
+check('caps 不允许的出口跳过并记 daily_cap', runFn.includes('if (capsForChannel[channel] !== true) {') && runFn.includes("attempts.push({ channel, reason: 'daily_cap' })"));
+check('vents 关闭的出口跳过并记 disabled_channel', runFn.includes('if (vents[channel] !== true) {') && runFn.includes("attempts.push({ channel, reason: 'disabled_channel' })"));
+check('出口发送失败后继续降级（不 return）', runFn.includes("attempts.push({ channel, reason: published.reason ?? 'send_failed', layer: published.layer })") && runFn.includes('continue;'));
 check('disabled 早退', runFn.includes("if (affect.enabled === false) return { ok: false, reason: 'disabled' }"));
-// caps：qzone 由 checkQuota 推，private/diary 本步恒 true
+// caps：qzone 由 checkQuota 推；private / diary 由 ventLog 当日成功计数推
 check(
   'caps 由 checkQuota 推出（qzone 真实额度）',
   runFn.includes('const quota = checkQuota({ now, posts: qzState.posts, cfg: qz })') && runFn.includes('qzone: quota.ok === true')
 );
-check('private / diary 本步恒 true', runFn.includes('private: true') && runFn.includes('diary: true'));
+check('private 额度来自 ventLog 当日成功计数 vs dailyCap', runFn.includes("private: ventCountToday(state, 'private', now) < Math.max(0, Number(dailyCap.private) || 0)"));
+check('diary 额度来自 ventLog 当日成功计数 vs dailyCap', runFn.includes("diary: ventCountToday(state, 'diary', now) < Math.max(0, Number(dailyCap.diary) || 0)"));
+check('private / diary 不再恒 true', !runFn.includes('private: true') && !runFn.includes('diary: true'));
 check('qzoneConfigured 来自 cfg.qzone.enabled', runFn.includes('qzoneConfigured: qz.enabled === true'));
 check('静默时段用 inQuietHours', runFn.includes('inQuietHours(affect.quietHours'));
 check('每次现读 config.json', runFn.includes('runtime = loadConfig()'));
@@ -213,12 +226,13 @@ check('每次现读 config.json', runFn.includes('runtime = loadConfig()'));
 check('recentTexts 取 post.content', runFn.includes('post?.content'));
 // 事件摘要在 affect-core 里的情绪字段叫 kind（normalizeEvent），不是 emotion
 check('由头取同情绪事件的 kind 字段', runFn.includes('event?.kind === plan.emotion'));
-// 文案质量闸门在发送之前
+// 文案质量闸门在发送之前，且按通道取上限
 check(
-  'checkVentText 排在 publishQzonePost 之前',
-  runFn.indexOf("checkVentText(text, recentTexts, 'qzone'") > 0
-  && runFn.indexOf("checkVentText(text, recentTexts, 'qzone'") < runFn.indexOf('const published = await publishQzonePost(')
+  'checkVentText 排在发送之前',
+  runFn.indexOf('checkVentText(') > 0
+  && runFn.indexOf('checkVentText(') < runFn.indexOf('await publishQzonePost(')
 );
+check('文案上限按通道取（ventTextMaxChars）', runFn.includes('const maxChars = ventTextMaxChars(channel, qz);'));
 
 // ── ⑥ 文案会话与 8 秒兜底 ──────────────────────────────────────────────────
 console.log('⑥ 文案会话 / 8 秒兜底');
@@ -256,10 +270,54 @@ check('旧文案会话在 turn 结束后清理', eventBranch.includes('frame.ses
 // 纯模块接线：三个文案纯函数必须真的从 affect-text.js 进桥接
 check(
   'bridge 从 affect-text.js 引入三个纯函数',
-  /import \{ cleanVentText, buildVentPrompt, pickFallbackText \} from '\.\/affect-text\.js';/.test(BRIDGE)
+  /import \{ AFFECT_TEXT_MAX_CHARS, cleanVentText, buildVentPrompt, pickFallbackText \} from '\.\/affect-text\.js';/.test(BRIDGE)
 );
 check('generateVentText 用 buildVentPrompt 拼提示词', generateFn.includes('buildVentPrompt({'));
 check('applyVent 已在 affect-core 的 import 列表里', /^\s+applyVent,$/m.test(BRIDGE));
+
+// ── ⑦ 私聊 / 日记出口 + 情绪加成（T-012 第七步） ─────────────────────────────
+console.log('⑦ 私聊 / 日记出口 + 情绪加成');
+
+const privateFn = slice('async function publishVentPrivate(', '/**\n     * 宣泄出口③');
+const diaryFn = slice('async function publishVentDiary(', '    // ── 文案会话：与黑话学习会话同构');
+const maxCharsFn = slice('function ventTextMaxChars(', '/**\n     * 生成一条宣泄文案');
+const proactiveFn = slice('function scheduleProactiveCheckV2(', 'function clearSocialV2Timers(');
+
+check('定义了 publishVentPrivate({ content })', privateFn !== '' && /async function publishVentPrivate\(\{ content \} = \{\}\)/.test(privateFn));
+check('定义了 publishVentDiary({ content, now })', diaryFn !== '' && /async function publishVentDiary\(\{ content, now \} = \{\}\)/.test(diaryFn));
+// 私聊目标只来自 cfg.ownerQQ：函数签名里没有 target，函数体里也只拼 private:${owner}
+check('私聊目标只来自 cfg.ownerQQ', privateFn.includes('const owner = String(cfg.ownerQQ ?? \'\').trim();') && !privateFn.includes('targetId'));
+check('私聊会话 key 为 private:<owner>', privateFn.includes('const key = `private:${owner}`;'));
+check('私聊复用 sendMessagesV2（不自己拼 OneBot / fetch）', privateFn.includes('const sentMessages = await sendMessagesV2(key, [text], [], null, null);') && !/fetch\(|oneBotAction/.test(privateFn));
+check('私聊复用端点的限频口径（sendTimes 每分钟/每小时）', privateFn.includes('st.sendTimes.push(now)') && privateFn.includes('maxPerMinute') && privateFn.includes('maxPerHour'));
+check('私聊失败回滚预占的 sendTimes', privateFn.includes('st.sendTimes = (st.sendTimes || []).filter((t) => t !== now);'));
+check('私聊有 disabled / rate / onebot 三层返回', ["layer: 'disabled'", "layer: 'rate'", "layer: 'onebot'"].every((needle) => privateFn.includes(needle)));
+check('私聊缺少 ownerQQ 直接拒（no_owner）', privateFn.includes("reason: 'no_owner'"));
+// 日记：key 带 private: 前缀、ownerQQ 缺失时 no_owner、走 writeDiaryEntry
+check('日记 key 带 private: 前缀', diaryFn.includes('key: `private:${owner}`'));
+check('日记 ownerQQ 缺失时返回 no_owner（不写 private:undefined）', diaryFn.includes("reason: 'no_owner'") && !diaryFn.includes('private:undefined'));
+check('日记走 writeDiaryEntry({ root: DIARY_ROOT, … mode: \'append\' })', diaryFn.includes('root: DIARY_ROOT') && diaryFn.includes("mode: 'append'") && diaryFn.includes('content: String(content ?? \'\')'));
+check('日记成功返回 date', diaryFn.includes('return { ok: true, date: data.date };'));
+
+// 文案上限：私聊必须比说说短（不能把 qz.maxChars 直接传给所有通道）
+check('ventTextMaxChars 存在且私聊/日记取 affect-text 常量', maxCharsFn.includes('AFFECT_TEXT_MAX_CHARS.private') && maxCharsFn.includes('AFFECT_TEXT_MAX_CHARS.diary') && maxCharsFn.includes('AFFECT_TEXT_MAX_CHARS.qzone'));
+check('generateVentText 用 per-channel 上限', generateFn.includes('maxChars: ventTextMaxChars(channel, qz)'));
+
+// 定时器必须与 runAffectVent 同作用域（在 startConsoleServer 内），否则回调里是 ReferenceError
+const ventDefAt = BRIDGE.indexOf('async function runAffectVent(');
+const timerAt = BRIDGE.indexOf('if (cfg.socialV2?.affect?.enabled !== false) {');
+const httpServerAt = BRIDGE.indexOf('const server = http.createServer(');
+check(
+  '宣泄定时器与 runAffectVent 同作用域（startConsoleServer 内）',
+  ventDefAt > 0 && timerAt > ventDefAt && httpServerAt > timerAt
+);
+
+// proactive：概率乘以 1 + 0.6 * maxIntensity，并 Math.min(1, …) 夹住
+check('proactive 概率乘 1 + 0.6 * 情绪强度', proactiveFn.includes('prob = Math.min(1, prob * (1 + 0.6 * maxIntensity));'));
+check('maxIntensity 取 decayTo 后四维最大值', proactiveFn.includes('decayTo(affectState.emotions[emotionKey], affectNow, affectCfg, emotionKey)'));
+check('加成一档日志带主导情绪与前后概率', proactiveFn.includes('主动检查概率 ${before.toFixed(2)} → ${prob.toFixed(2)}（主导 ${dominant} ${maxIntensity.toFixed(2)}）'));
+check('情绪模块关掉时不加成（enabled !== false）', proactiveFn.includes('if (affectCfg?.enabled !== false)'));
+check('既有短路没被动（proactive.enabled / paused / 模式 / 空闲门槛）', proactiveFn.includes("if (cfg.socialV2?.proactive?.enabled === false) return;") && proactiveFn.includes("if (idle >= idleThreshold && Math.random() < prob"));
 
 // ── 汇总 ───────────────────────────────────────────────────────────────────
 const total = passed + failed;
