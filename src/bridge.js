@@ -118,7 +118,11 @@ import {
   // 上报链路（T-012）：入参归一 / 防刷 / 静默判定，全都只在纯模块里实现。
   inQuietHours,
   normalizeEventInput,
-  shouldSkipEvent
+  shouldSkipEvent,
+  // 落库（T-012 第四步）：归一 + 去重之后才把事件写进状态。
+  // 漏了它不会在测试里暴露——VM harness 是整模块 spread 注入的，
+  // 只有真机 POST /api/socialV2/affect/events 才会报 addEvent is not defined。
+  addEvent
 } from './affect-core.js';
 // 情绪出口的纯规划层：只算「该不该说、走哪个渠道、说多长」，不发送、不写盘。
 // planVent 被 /api/socialV2/affect 用来给面板生成「现在会发生什么」的逐行中文解释。
