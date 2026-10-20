@@ -41,6 +41,10 @@ import * as qzone from '../src/qzone-post.js';
 // 导出名已核对：两个模块互不重名，也不与其它 spread 模块重名（唯一的 nowIso 是既有冲突）。
 import * as affectCore from '../src/affect-core.js';
 import * as affectVent from '../src/affect-vent.js';
+// 文案生成的三件纯函数（T-012 第五步）：cleanVentText / buildVentPrompt / pickFallbackText。
+// bridge.js 顶层单行 import 会被下面按行剥掉，这里补上同名绑定；缺了这一行，
+// 任何走到 generateVentText 的用例都会 ReferenceError。
+import * as affectText from '../src/affect-text.js';
 // 社交自动化（入群邀请 / 好友申请）也是纯逻辑模块（决策、文案、额度、审计格式，零 I/O）：
 // bridge.js 顶层 import 了 16 个导出名，loadConfig 期间就调 normalizeAutomation，少这一行
 // VM 里立刻 ReferenceError → 所有走 VM 的用例一起红。
@@ -187,7 +191,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...stall, ...consoleAuth, ...qzone, ...presetPrompt,
     ...socialAuto,
-    ...affectCore, ...affectVent,
+    ...affectCore, ...affectVent, ...affectText,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),

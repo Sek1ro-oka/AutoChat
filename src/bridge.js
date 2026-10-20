@@ -109,6 +109,9 @@ import {
   decayTo,
   scoreOf,
   canVent,
+  // 宣泄真正发出**成功**之后才调用 applyVent 记账（T-012 第五步）：
+  // 失败的宣泄不该消耗冷却与配额，所以它必须排在发送之后，不能提前。
+  applyVent,
   listCandidates,
   serializeState,
   parseState,
@@ -120,6 +123,10 @@ import {
 // 情绪出口的纯规划层：只算「该不该说、走哪个渠道、说多长」，不发送、不写盘。
 // planVent 被 /api/socialV2/affect 用来给面板生成「现在会发生什么」的逐行中文解释。
 import { planVent, checkVentText } from './affect-vent.js';
+// 文案生成的三件纯函数（T-012 第五步）：清洗模型输出 / 拼提示词 / 保守兜底模板。
+// 单行 import：scripts/audit-bridge-harness.mjs 按行剥顶层 import，单行最不容易出岔子
+// （同名绑定由 harness 的 `...affectText` 注入 VM）。
+import { cleanVentText, buildVentPrompt, pickFallbackText } from './affect-text.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -148,6 +155,10 @@ const SOCIAL_AUTO_STATE_FILE = path.join(STATE_DIR, 'social-auto.json');
 // 情绪状态：四维强度/剂量/冷却 + 最近 50 条事件与最近 50 条宣泄决策（T-012）。
 // 与 qzone-posts.json 一样是「可丢」文件：不存在或损坏都从出厂状态重启，绝不让端点 500。
 const AFFECT_STATE_FILE = path.join(STATE_DIR, 'affect.json');
+// 情绪文案会话（T-012 第五步）：只记住「哪个会话负责写宣泄文案 + 它是哪个 preset 建的」。
+// 与 slang-session.json 同一套思路：preset 变了（或没有元数据）就直接重建会话，
+// 因为「旧会话当初用的是什么权限」无法证明 —— 而这个会话的产出会发到公开空间。
+const AFFECT_VENT_SESSION_FILE = path.join(STATE_DIR, 'affect-vent-session.json');
 
 /**
  * 模式拼写的**唯一**归一入口（输入边界）。
@@ -3986,6 +3997,410 @@ async function main() {
     };
     // 二代会话工具必须仍命中当前模式的白名单/准入；避免白名单移除后旧 agentToken 继续读状态。
     const v2SessionAllowed = isSessionAllowedInCurrentMode;
+    // ═══════════════════════════════════════════════════════════════════════
+    // 情绪宣泄出口（T-012 第五步）：说说发布 helper + 文案会话 + runAffectVent
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * 发一条说说：`/api/qzone/post` 与情绪宣泄共用的**唯一**出口。
+     *
+     * 为什么抽出来：两条路径必须走同一条闸门链，任何一处复制粘贴都会在下次改闸门时
+     * 只改一边（历史上控制台与 MCP 就各抄过一份配额判断）。顺序是硬的：
+     * 开关 → 内容审计 → 滑动窗口配额 → OneBot 发送。
+     *
+     * 任何提前返回都意味着「没发出去」，调用方**不得**记账 —— 情绪宣泄尤其：
+     * 失败的宣泄不该消耗一次冷却，也不该在 ventLog 里留一条成功记录。
+     *
+     * @param {{content?:string, reason?:string}} input
+     * @returns {Promise<{ok:true, tid:string, record:object, todayCount:number}
+     *   |{ok:false, layer:string, reason:string, error:string}>}
+     */
+    async function publishQzonePost({ content, reason = '' } = {}) {
+      const qz = normalizeQzoneConfig(cfg.qzone);
+      // ① 开关闸门：normalizeQzoneConfig 对缺失/脏值一律给 enabled:false，
+      //    所以「没配置」= 功能关着，不是「没配置所以随便发」。
+      if (!qz.enabled) {
+        return { ok: false, layer: 'disabled', reason: 'disabled', error: '说说功能未启用' };
+      }
+      // ② 内容闸门：auditContent 收集全部命中而不是短路，模型改一轮就能全改掉。
+      //    reasons 原样回传（code→人话的映射在 MCP 层，桥接只如实转述）。
+      content = typeof content === 'string' ? content : '';
+      const audit = auditContent(content, { maxChars: qz.maxChars });
+      if (!audit.ok) {
+        return {
+          ok: false,
+          layer: 'audit',
+          reason: 'audit',
+          error: '内容未通过审计',
+          reasons: audit.reasons,
+          hits: audit.hits
+        };
+      }
+      // ③ 频率闸门：现读状态文件（不缓存），滑动窗口（windowHours / windowCap）由纯函数判定；
+      //    retryAfterMs 也从判定结果里取，不在这里另算一个数字。
+      const state = readQzoneState();
+      const now = Date.now();
+      const quota = checkQuota({ now, posts: state.posts, cfg: qz });
+      if (!quota.ok) {
+        // windowCap 为 0 是用户明确按了暂停：别让模型以为「等一会儿就有额度」。
+        const paused = qz.windowCap <= 0;
+        return {
+          ok: false,
+          layer: 'quota',
+          reason: quota.reason ?? 'quota',
+          paused,
+          error: paused
+            ? '说说已暂停（windowCap 为 0）'
+            : `最近 ${qz.windowHours} 小时内已发 ${quota.windowCount} 条，额度用完了`,
+          retryAfterMs: quota.retryAfterMs,
+          todayCount: quota.todayCount,
+          windowCount: quota.windowCount,
+          // windowCap 一并回传：调用方据此区分「发满」与「已暂停」，不用解析文案。
+          windowCap: qz.windowCap
+        };
+      }
+      // ④ OneBot 闸门：成不成功以「拿到 tid」为准 —— HTTP 200 + retcode 0 却没有 tid 不算发出，
+      //    否则状态文件会记下一条根本没落地的说说，还白吃掉一次配额。
+      //    ugc_right 只可能是 1/4/64（pickUgcRight 保证），16/128 需要 target_uins，v1 不支持。
+      //    **它只来自配置**（pickUgcRight 是唯一取值口）：不给调用方留覆盖参数，
+      //    否则下一个调用点就会自己拼一个"更私密"的范围，绕过配置校验。
+      const ugcRight = pickUgcRight(qz);
+      const sent = await qzoneCall(
+        () => oneBotActionNested(cfg, 'send_qzone_msg', { content: content.trim(), ugc_right: ugcRight }, 30000),
+        'send_qzone_msg'
+      );
+      const data = sent.ok ? sent.response?.data : null;
+      const tid = data?.tid ?? data?.data?.tid;
+      if (!sent.ok || tid === undefined || tid === null || String(tid).trim() === '') {
+        const detail = sent.ok
+          ? `返回里没有 tid：${JSON.stringify(sent.response?.body ?? {}).slice(0, 200)}`
+          : String(sent.error?.message ?? sent.error);
+        log(`[qzone] 发布失败: ${detail}`);
+        return { ok: false, layer: 'onebot', reason: 'onebot', error: '发送失败，已记日志', detail };
+      }
+      const record = { tid: String(tid), content: content.trim(), ugcRight, createdAt: now, reason };
+      const todayCount = quota.todayCount + 1;
+      try {
+        writeQzoneState([record, ...state.posts], qz.windowCap);
+      } catch (error) {
+        // 已经发出去了：落盘失败不能反过来说「没发成功」，如实记日志但把 tid 交给调用方。
+        log(`[qzone] 记录落盘失败: ${error?.message ?? error}`);
+      }
+      log(`[qzone] 已发布 tid=${record.tid} ugcRight=${ugcRight} todayCount=${todayCount}`);
+      return { ok: true, tid: record.tid, record, todayCount };
+    }
+
+    // ── 文案会话：与黑话学习会话同构，但状态**完全独立** ──────────────────────
+    // 为什么必须独立：学习会话一次可能要 2 分钟、文案会话 8 秒就兜底，两者混在一个 Map 里，
+    // 文案超时就会把学习中的 turn 吃掉（等待者是 shift 出来的，错位就是串台）。
+    const ventSessions = new Set();   // sessionId -> 文案会话（不映射 QQ、不发送）
+    const ventCollectors = new Map(); // sessionId -> turn collector
+    const ventWaiters = new Map();    // sessionId -> [{resolve,reject,timer}]
+    let ventSessionId = null;
+    // 8 秒兜底：文案是低频后台动作，超时就发模板 —— 宁可句子平一点，
+    // 也不能让十分钟一轮的宣泄检查卡在一个不回来的 turn 上（下一轮还要判冷却与配额）。
+    const AFFECT_VENT_TEXT_TIMEOUT_MS = 8000;
+
+    /** 丢掉当前文案会话（preset 变了 / 落盘记录不可信时）。在途等待者与收集器保留。 */
+    function invalidateAffectVentSession() {
+      const oldId = ventSessionId;
+      ventSessionId = null;
+      if (oldId && !ventWaiters.has(oldId) && !ventCollectors.has(oldId)) ventSessions.delete(oldId);
+      try { fs.unlinkSync(AFFECT_VENT_SESSION_FILE); } catch {}
+    }
+
+    /**
+     * 保证有一个可用的「文案会话」：优先复用落盘记录的 id，其次复用内存里的，
+     * 最后才新建。preset 一律 strict 解析：文案会发到公开空间，
+     * 绝不能落到一个带本地工具的 DSH 默认 preset 上（与 modePreset 同一道理）。
+     */
+    async function ensureAffectVentSession() {
+      const preset = resolvePresetName(cfg.socialV2?.agentPreset || cfg.agentPreset, { strict: true });
+      if (!preset) throw new Error('文案会话缺少已验证的安全 preset，拒绝创建或复用会话');
+      const saved = readJsonSafe(AFFECT_VENT_SESSION_FILE, null);
+      // 旧记录没有 preset 元数据（或 preset 已被改掉），无法证明其权限，必须重新创建。
+      if (saved?.preset !== preset) invalidateAffectVentSession();
+      if (ventSessionId) {
+        ventSessions.add(ventSessionId);
+        api.events.follow(ventSessionId);
+        return ventSessionId;
+      }
+      if (saved?.sessionId && saved.preset === preset) {
+        ventSessionId = String(saved.sessionId);
+        ventSessions.add(ventSessionId);
+        api.events.follow(ventSessionId);
+        await ensureChatModel(ventSessionId);
+        return ventSessionId;
+      }
+      const dir = path.join(STATE_DIR, 'affect-agent');
+      fs.mkdirSync(dir, { recursive: true });
+      const wsValue = unwrap(await api.workspace.create({ path: dir }), 'affect workspace.create');
+      const workspaceTitle = '情绪文案';
+      if (wsValue.created && workspaceTitle) {
+        try { await api.workspace.rename({ workspaceId: wsValue.workspace.workspaceId, title: workspaceTitle }); } catch {}
+      }
+      const params = { workspaceId: wsValue.workspace.workspaceId, agentPreset: preset };
+      const value = unwrap(await api.sessions.create(params), 'affect session.create');
+      ventSessionId = value.sessionId;
+      ventSessions.add(ventSessionId);
+      api.events.follow(ventSessionId);
+      await ensureChatModel(ventSessionId);
+      fs.mkdirSync(STATE_DIR, { recursive: true });
+      atomicWriteJson(AFFECT_VENT_SESSION_FILE, { sessionId: ventSessionId, preset });
+      log(`情绪文案会话已创建：${ventSessionId}`);
+      return ventSessionId;
+    }
+
+    /** 等一个文案 turn 收尾。超时自己摘掉等待者，绝不留悬空 promise。 */
+    function waitVentTurn(sessionId, timeoutMs = AFFECT_VENT_TEXT_TIMEOUT_MS) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          const arr = ventWaiters.get(sessionId) ?? [];
+          const idx = arr.findIndex((w) => w.timer === timer);
+          if (idx >= 0) arr.splice(idx, 1);
+          if (arr.length === 0) ventWaiters.delete(sessionId);
+          reject(new Error(`等待文案会话 turn 超时(${timeoutMs}ms)`));
+        }, timeoutMs);
+        timer.unref?.();
+        const arr = ventWaiters.get(sessionId) ?? [];
+        arr.push({ resolve, reject, timer });
+        ventWaiters.set(sessionId, arr);
+      });
+    }
+
+    /**
+     * 生成一条宣泄文案。**任何**失败（会话建不出来、模型超时、返回空）都退回保守模板，
+     * 并且永远在 8 秒内给出答案：宣泄需要的是「有一句话能发」，不是「等到完美的那句」。
+     *
+     * 返回 `{ text, source }`，source 只有 'llm' | 'template' 两个值（测试与日志都按它分支）。
+     */
+    async function generateVentText({ emotion, step, intensity = 0, causeSummary = '', channel = 'qzone' }) {
+      const qz = normalizeQzoneConfig(cfg.qzone);
+      const attempt = (async () => {
+        const sessionId = await ensureAffectVentSession();
+        const promptText = buildVentPrompt({
+          emotion,
+          label: AFFECT_LABELS[emotion] ?? emotion,
+          intensity,
+          step,
+          causeSummary,
+          channel,
+          maxChars: qz.maxChars
+        });
+        const accepted = await api.sessions.prompt({ sessionId, mode: 'queue', content: [{ type: 'text', text: promptText }] });
+        if (!accepted?.result?.ok) {
+          throw new Error(`文案会话拒绝 prompt：${accepted?.result?.error?.code ?? 'unknown'}`);
+        }
+        const raw = await waitVentTurn(sessionId, AFFECT_VENT_TEXT_TIMEOUT_MS);
+        const text = cleanVentText(raw);
+        if (text === '') throw new Error('文案会话返回空文本');
+        return text;
+      })();
+      // race 输掉之后 attempt 仍可能迟到 reject：先挂一个空 catch 把它吞掉，
+      // 否则进程会冒出一个 unhandledRejection（比超时本身更糟）。
+      attempt.catch(() => {});
+      let timer = null;
+      try {
+        const timeout = new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`文案生成超过 ${AFFECT_VENT_TEXT_TIMEOUT_MS}ms`)),
+            AFFECT_VENT_TEXT_TIMEOUT_MS
+          );
+          timer.unref?.();
+        });
+        const text = await Promise.race([attempt, timeout]);
+        return { text, source: 'llm' };
+      } catch (error) {
+        log(`[affect] 文案生成失败，改用模板：${error?.message ?? error}`);
+        return { text: pickFallbackText(emotion, channel), source: 'template' };
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+
+    /**
+     * 跑一次宣泄判定（`dryRun` 默认 **true**：不传参数永远不会真的往空间发东西）。
+     *
+     * 判定顺序与 GET /api/socialV2/affect 完全一致（同一个 planVent）：
+     *   开关 → 静默时段 → 候选/阈值 → 全局最小间隔 → 按维 canVent → 出口降级阶梯。
+     * 差异只有两处：① 出口被选中之后**继续往下走**（生成文案 → 质量闸门 → 发布）；
+     * ② 成功才写 state/affect.json。
+     *
+     * `force` 只放宽「全局最小间隔」这一道闸门（调试端点用「我现在就想看看会不会发」），
+     * 做法是给 planVent 一份「抹掉 lastVentTs 与 ventLog」的临时状态。其余闸门一律保留：
+     * 开关、静默、阈值、剂量、冷却、以及 qzone 自己的滑动窗口配额（caps 来自 checkQuota，
+     * 不走状态文件）—— 所以它最多提前一次，不会把配额刷穿。
+     *
+     * @param {{dryRun?:boolean, force?:boolean}} [options]
+     */
+    async function runAffectVent({ dryRun = true, force = false } = {}) {
+      // 每次都现读 config.json：控制台可能刚改过阈值/开关，十分钟一轮的定时器
+      // 不能拿着启动那一刻的快照做决定。
+      let runtime;
+      try {
+        runtime = loadConfig();
+      } catch (error) {
+        log(`[affect] 宣泄检查读配置失败：${error?.message ?? error}`);
+        return { ok: false, reason: 'config_error' };
+      }
+      const affect = runtime.socialV2.affect;
+      if (affect.enabled === false) return { ok: false, reason: 'disabled' };
+
+      const now = Date.now();
+      const state = readAffectState(now, affect);
+      // 文件里的强度是「上次写入那一刻」的，先按时长衰减到 now 再判定：
+      // 否则明明早该消气了，还会挂着旧数字去发说说。decayTo 不改入参，所以另建 live 视图。
+      const live = { ...state, emotions: {} };
+      for (const key of AFFECT_EMOTIONS) {
+        live.emotions[key] = decayTo(state.emotions[key], now, affect, key);
+      }
+
+      // 出口额度：qzone 用 qzone-post.checkQuota 现算（纯函数）；
+      // private / diary 本步还没有真实配额，恒为 true（下一站实现）。
+      const qz = normalizeQzoneConfig(runtime.qzone);
+      const qzState = readQzoneState();
+      const quota = checkQuota({ now, posts: qzState.posts, cfg: qz });
+      const qzoneRemaining = Number.isFinite(quota.windowCount)
+        ? Math.max(0, qz.windowCap - quota.windowCount)
+        : 0;
+      const caps = {
+        qzone: quota.ok === true,
+        private: true,
+        diary: true,
+        qzoneConfigured: qz.enabled === true,
+        qzoneRemaining,
+        qzoneRetryAfterMs: quota.ok === true ? 0 : Math.max(0, quota.retryAfterMs ?? 0)
+      };
+
+      // 静默时段按**本地时间**判（inQuietHours 是纯函数，时区知识留在这一层）。
+      const localNow = new Date(now);
+      const quiet = inQuietHours(affect.quietHours, localNow.getHours(), localNow.getMinutes());
+
+      // 最近发过的文案：状态文件里存的是 `content`（qzone-posts.json 的字段名），
+      // 不是 `text` —— 去重闸门靠这几条，取错字段等于永远没有相似度可言。
+      const recentTexts = qzState.posts
+        .slice(0, 5)
+        .map((post) => (typeof post?.content === 'string' ? post.content : ''));
+
+      // force：只放宽「全局最小间隔」这一道闸门，做法是给 planVent 一份抹掉
+      // lastVentTs / ventLog 的临时状态，并且**选项里的 lastVentTs 也必须归零** ——
+      // planVent 对两者取较晚者（Math.max），只清状态副作用等于没清。
+      const planState = force ? { ...live, lastVentTs: 0, ventLog: [] } : live;
+      const plan = planVent({
+        state: planState,
+        cfg: affect,
+        now,
+        quiet,
+        caps,
+        recentTexts,
+        lastVentTs: force ? 0 : state.lastVentTs
+      });
+      const gates = {
+        quiet,
+        caps,
+        force: force === true,
+        detail: plan.detail,
+        notes: plan.notes
+      };
+      // 判定没通过：原样把 reason 与每个出口/每维的拒因交回去（面板要能解释「为什么没发」）。
+      if (!plan.ok) return { ok: false, reason: plan.reason, plan: plan.plan, gates };
+      // 本步只做 qzone。私聊与日记的降级发给后续步骤，这里必须**明确**说「还没实现」，
+      // 而不是悄悄退回 qzone（那会让「降级阶梯」在日志里说谎）。
+      if (plan.channel !== 'qzone') {
+        return { ok: false, reason: 'channel_not_ready', channel: plan.channel, plan: plan.plan, gates };
+      }
+
+      // 文案的「由头」：取最近一条**同情绪**的事件（events 的字段名是 `kind`，不是 emotion，
+      // 由 affect-core.normalizeEvent 固定）；一条都没有就退回最近的那条，再没有就留空。
+      const eventsNewestFirst = [...state.events].reverse();
+      const lastEvent = eventsNewestFirst.find((event) => event?.kind === plan.emotion)
+        ?? eventsNewestFirst[0]
+        ?? null;
+      const causeSummary = typeof lastEvent?.causeSummary === 'string' ? lastEvent.causeSummary : '';
+
+      const generated = await generateVentText({
+        emotion: plan.emotion,
+        step: plan.step,
+        intensity: plan.intensity,
+        causeSummary,
+        channel: plan.channel
+      });
+      let text = generated.text;
+      let source = generated.source;
+      let verdict = checkVentText(text, recentTexts, 'qzone', { maxChars: qz.maxChars });
+      // 模型写的没过质量闸门 → 换模板再验一次（模板自己保证能过）。
+      // 这一步不能省：直接发会被空间那边当垃圾内容，直接放弃又等于「有情绪但一次都没说成」。
+      if (!verdict.ok && source === 'llm') {
+        log(`[affect] 文案未过质量闸门（${verdict.reasons.join(',')}），改用模板`);
+        text = pickFallbackText(plan.emotion, plan.channel);
+        source = 'template';
+        verdict = checkVentText(text, recentTexts, 'qzone', { maxChars: qz.maxChars });
+      }
+      if (!verdict.ok) {
+        // 连模板都过不了（例如与最近一条完全相同）：这条不发，也不记账。
+        log(`[affect] 文案仍被拒（${verdict.reasons.join(',')}），本次不发送`);
+        return { ok: false, reason: 'text_rejected', reasons: verdict.reasons, text, source, plan: plan.plan, gates };
+      }
+
+      // dry-run：只回报「会发生什么」，一个字节都不写（不发送、不写 qzone-posts、不改 affect.json）。
+      if (dryRun) {
+        return {
+          ok: true,
+          dryRun: true,
+          channel: plan.channel,
+          emotion: plan.emotion,
+          step: plan.step,
+          intensity: plan.intensity,
+          text,
+          source,
+          plan: plan.plan,
+          gates
+        };
+      }
+
+      const published = await publishQzonePost({ content: text, reason: `affect:${plan.emotion}` });
+      if (!published.ok) {
+        // 失败的宣泄不改情绪状态：不然一次限流就能把冷却和配额白吃一轮，
+        // 用户会觉得「它明明没发出去，却像发过一样安静了两小时」。
+        log(`[affect] 宣泄发送失败 emotion=${plan.emotion} layer=${published.layer} reason=${published.reason}`);
+        return {
+          ok: false,
+          reason: 'send_failed',
+          detail: { layer: published.layer, reason: published.reason, error: published.error, extras: published },
+          plan: plan.plan,
+          gates
+        };
+      }
+
+      // 成功才记账：ventLog 那条记录由 applyVent 先占位 ok:false（没发出去之前不算成功），
+      // 这里按 ventId 把真实结果补上。
+      const ventId = crypto.randomUUID();
+      let next = applyVent(state, plan.emotion, affect, now, ventId);
+      next = {
+        ...next,
+        ventLog: (next.ventLog ?? []).map((vent) => (
+          vent.id === ventId
+            ? { ...vent, channel: 'qzone', ok: true, reason: '', text }
+            : vent
+        ))
+      };
+      writeAffectState(next);
+      log(`[affect] 宣泄 channel=qzone emotion=${plan.emotion} step=${plan.step} tid=${published.tid}`);
+      return {
+        ok: true,
+        dryRun: false,
+        channel: 'qzone',
+        emotion: plan.emotion,
+        step: plan.step,
+        intensity: plan.intensity,
+        tid: published.tid,
+        text,
+        source,
+        plan: plan.plan,
+        gates
+      };
+    }
+
     const server = http.createServer(async (req, res) => {
       let url;
       try { url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`); }
@@ -4204,7 +4619,12 @@ async function main() {
         // 管理端专用 v2 接口：带 agent token 的请求一律拒绝，防止 MCP 工具越权访问控制台功能
         // /api/socialV2/initial-prompt 也在这里：它是操作者写给 AI 的"环境背景"，
         // 让 AI 自己读/改等于把控制台的管理输入（以及未来可能写入的其它群信息）交给会话主体。
-        const adminOnlyV2Paths = ['/api/socialV2/config', '/api/socialV2/activity', '/api/socialV2/reset', '/api/socialV2/states', '/api/socialV2/wake', '/api/socialV2/initial-prompt', '/api/socialV2/automation'];
+        // 情绪宣泄的两个**写**端点也在这里（T-012 第五步）：
+        //   affect/vent   —— 会（在 dryRun:false 时）真的往 QQ 空间发一条；
+        //   affect/config —— 改写 config.json 里的阈值/开关，等于改运行行为。
+        // 两者都是控制台动作，AI 不该自己触发：AI 的心情由它上报（affect/events），
+        // 「发不发」由桥接的判定与操作者决定。
+        const adminOnlyV2Paths = ['/api/socialV2/config', '/api/socialV2/activity', '/api/socialV2/reset', '/api/socialV2/states', '/api/socialV2/wake', '/api/socialV2/initial-prompt', '/api/socialV2/automation', '/api/socialV2/affect/vent', '/api/socialV2/affect/config'];
         if (req.headers['x-agent-token'] && (adminOnlyV2Paths.includes(url.pathname) || (url.pathname === '/api/socialV2/feedback' && req.method === 'GET') || (url.pathname === '/api/socialV2/tool-log' && req.method === 'GET'))) {
           sendJson({ ok: false, error: '该接口仅控制台可用' }, 403);
           return;
@@ -4334,70 +4754,41 @@ async function main() {
         // 之后，所以鉴权与 CSRF 完全继承控制台那一套，这里不另写一套。
         //
         // 发布：body {content, reason?}
+        // 发布：body { content, reason }。真正的闸门链与落盘都在 publishQzonePost 里
+        // （情绪宣泄也走同一个 helper，见「情绪宣泄出口」那一段），这里只负责解析请求
+        // 并把结果翻译成原来的响应结构 —— 四种失败各回自己的 layer，字段一个不少。
         if (req.method === 'POST' && url.pathname === '/api/qzone/post') {
           const body = await readBody();
-          // ① 开关闸门：normalizeQzoneConfig 对缺失/脏值一律给 enabled:false，
-          //    所以「没配置」= 功能关着，不是「没配置所以随便发」。
-          const qz = normalizeQzoneConfig(cfg.qzone);
-          if (!qz.enabled) {
+          const content = typeof body.content === 'string' ? body.content : '';
+          const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+          const published = await publishQzonePost({ content, reason });
+          if (!published.ok) {
+            if (published.layer === 'audit') {
+              sendJson({ ok: false, layer: 'audit', error: '内容未通过审计', reasons: published.reasons, hits: published.hits });
+              return;
+            }
+            if (published.layer === 'quota') {
+              sendJson({
+                ok: false,
+                layer: 'quota',
+                error: published.error,
+                reason: published.reason,
+                retryAfterMs: published.retryAfterMs,
+                todayCount: published.todayCount,
+                windowCount: published.windowCount,
+                windowCap: published.windowCap
+              });
+              return;
+            }
+            if (published.layer === 'onebot') {
+              sendJson({ ok: false, layer: 'onebot', error: '发送失败，已记日志' });
+              return;
+            }
+            // disabled：功能没开（normalizeQzoneConfig 对缺失/脏值一律给 enabled:false）
             sendJson({ ok: false, layer: 'disabled', error: '说说功能未启用' });
             return;
           }
-          const content = typeof body.content === 'string' ? body.content : '';
-          const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
-          // ② 内容闸门：auditContent 收集全部命中而不是短路，模型改一轮就能全改掉。
-          //    reasons 原样回传（code→人话的映射在 MCP 层，桥接只如实转述）。
-          const audit = auditContent(content, { maxChars: qz.maxChars });
-          if (!audit.ok) {
-            sendJson({ ok: false, layer: 'audit', error: '内容未通过审计', reasons: audit.reasons, hits: audit.hits });
-            return;
-          }
-          // ③ 频率闸门：现读状态文件（不缓存），滑动窗口（windowHours / windowCap）由纯函数判定；
-          //    retryAfterMs 也从判定结果里取，不在这里另算一个数字。
-          const state = readQzoneState();
-          const now = Date.now();
-          const quota = checkQuota({ now, posts: state.posts, cfg: qz });
-          if (!quota.ok) {
-            // windowCap 为 0 是用户明确按了暂停：别让模型以为「等一会儿就有额度」。
-            const paused = qz.windowCap <= 0;
-            sendJson({
-              ok: false,
-              layer: 'quota',
-              error: paused ? '说说已暂停（windowCap 为 0）' : `最近 ${qz.windowHours} 小时内已发 ${quota.windowCount} 条，额度用完了`,
-              reason: quota.reason,
-              retryAfterMs: quota.retryAfterMs,
-              todayCount: quota.todayCount,
-              // windowCap 一并回传：调用方据此区分「发满」与「已暂停」，不用解析文案。
-              windowCount: quota.windowCount,
-              windowCap: qz.windowCap
-            });
-            return;
-          }
-          // ④ OneBot 闸门：成不成功以「拿到 tid」为准 —— HTTP 200 + retcode 0 却没有 tid 不算发出，
-          //    否则状态文件会记下一条根本没落地的说说，还白吃掉一次配额。
-          //    ugc_right 只可能是 1/4/64（pickUgcRight 保证），16/128 需要 target_uins，v1 不支持。
-          const ugcRight = pickUgcRight(qz);
-          const sent = await qzoneCall(() => oneBotActionNested(cfg, 'send_qzone_msg', { content: content.trim(), ugc_right: ugcRight }, 30000), 'send_qzone_msg');
-          const data = sent.ok ? sent.response?.data : null;
-          const tid = data?.tid ?? data?.data?.tid;
-          if (!sent.ok || tid === undefined || tid === null || String(tid).trim() === '') {
-            const detail = sent.ok
-              ? `返回里没有 tid：${JSON.stringify(sent.response?.body ?? {}).slice(0, 200)}`
-              : String(sent.error?.message ?? sent.error);
-            log(`[qzone] 发布失败: ${detail}`);
-            sendJson({ ok: false, layer: 'onebot', error: '发送失败，已记日志' });
-            return;
-          }
-          const record = { tid: String(tid), content: content.trim(), ugcRight, createdAt: now, reason };
-          const todayCount = quota.todayCount + 1;
-          try {
-            writeQzoneState([record, ...state.posts], qz.windowCap);
-          } catch (error) {
-            // 已经发出去了：落盘失败不能反过来说「没发成功」，如实记日志但把 tid 交给调用方。
-            log(`[qzone] 记录落盘失败: ${error?.message ?? error}`);
-          }
-          log(`[qzone] 已发布 tid=${record.tid} ugcRight=${ugcRight} todayCount=${todayCount}`);
-          sendJson({ ok: true, tid: record.tid, record, todayCount });
+          sendJson({ ok: true, tid: published.tid, record: published.record, todayCount: published.todayCount });
           return;
         }
         // 删除：body {tid, operatorQQ}。不看 enabled —— 关掉功能之后仍然要能把以前发出去的清掉。
@@ -4559,6 +4950,87 @@ async function main() {
               retryAfterMs: Number.isFinite(verdict.retryAfterMs) ? verdict.retryAfterMs : 0
             }
           });
+          return;
+        }
+        // 宣泄调试端点：POST，body `{ dryRun }`。**默认 dryRun:true** —— 少写一个字段
+        // 就是「演一遍给我看」，绝不会因为手滑就往空间里真发一条。
+        // 权限：该路径已进 adminOnlyV2Paths（带 agent token 的 AI 调用一律 403，AI 不能自己
+        // 触发发送）。若调用方另外带了 operatorQQ（人工/脚本代填），必须落在 ownerQQ 或
+        // 空间管理员名单里 —— 与 /api/qzone/delete 的「两套身份」同一口径。
+        // `force` 只放宽全局最小间隔（见 runAffectVent），用于调试「现在到底发不发得出去」。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/affect/vent') {
+          const body = await readBody();
+          const dryRun = body?.dryRun !== false;
+          const rawOperator = body?.operatorQQ;
+          const hasOperator = rawOperator !== undefined && rawOperator !== null && rawOperator !== '';
+          // 两种匿名调用方要分开看（与 /api/qzone/delete 同一套口径）：
+          //   控制台（不带 x-agent-call）：身份就是「已经过了控制台令牌关卡」，直接放行；
+          //   智能体调用（带 x-agent-call）：必须自报 operatorQQ，且是 owner 或空间管理员。
+          // 只认数字（字符串 '12345' 不算），避免「看起来一样、类型不对」的绕过。
+          if (req.headers['x-agent-call'] !== undefined || hasOperator) {
+            const operatorQQ = Number(rawOperator);
+            const ownerQQ = Number(cfg.ownerQQ);
+            const qzForAdmin = normalizeQzoneConfig(cfg.qzone);
+            const allowed = Number.isSafeInteger(operatorQQ) && operatorQQ > 0
+              && ((Number.isSafeInteger(ownerQQ) && operatorQQ === ownerQQ) || qzForAdmin.adminQQ.includes(operatorQQ));
+            if (!allowed) {
+              sendJson({ ok: false, error: '需要 owner 或空间管理员' }, 403);
+              return;
+            }
+          }
+          try {
+            sendJson(await runAffectVent({ dryRun, force: body?.force === true }));
+          } catch (error) {
+            log(`[affect] 宣泄端点执行失败: ${error?.message ?? error}`);
+            sendJson({ ok: false, error: '宣泄执行失败，详情见桥接日志' }, 500);
+          }
+          return;
+        }
+        // 情绪配置：POST body 是**部分配置**（只写要改的键），归一之后写 config.json 的
+        // socialV2.affect，再热更新内存里的 cfg.socialV2.affect。
+        // 为什么落盘：只改内存的话重启一次就回到文件里的旧值，控制台上那些输入框
+        // 会「自己弹回去」（与 /api/qzone/config 同一套口径）。
+        // 嵌套段单独合并：normalizeAffectConfig 对缺失的维/出口会回落到**出厂值**，
+        // 直接浅合并会让「只改 anger 的阈值」把另外三维的自定义值一起打回默认。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/affect/config') {
+          const body = await readBody();
+          const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+          const mergeSection = (base, raw) => (isPlainObject(raw) ? { ...base, ...raw } : { ...base });
+          const before = normalizeAffectConfig(cfg.socialV2?.affect ?? {});
+          const patch = isPlainObject(body) ? body : {};
+          const next = normalizeAffectConfig({
+            ...before,
+            ...patch,
+            vents: mergeSection(before.vents, patch.vents),
+            quietHours: mergeSection(before.quietHours, patch.quietHours),
+            dailyCap: mergeSection(before.dailyCap, patch.dailyCap),
+            emotions: Object.fromEntries(AFFECT_EMOTIONS.map((key) => [
+              key,
+              mergeSection(before.emotions[key], patch.emotions?.[key])
+            ]))
+          });
+          const configFile = path.join(ROOT, 'config.json');
+          try {
+            // 读原始文件、只换 socialV2.affect：loadConfig() 返回的是归一化后的 cfg，
+            // 整份写回会把默认值全部 materialize、还会丢未知键。
+            const file = readConfigObject(configFile);
+            file.socialV2 = { ...(file.socialV2 ?? {}), affect: next };
+            // 临时文件 + rename（atomicWriteJson）：不会留下半个 config.json。
+            atomicWriteJson(configFile, file);
+          } catch (error) {
+            log(`[affect] 控制台：写 config.json 失败: ${error?.message ?? error}`);
+            sendJson({ ok: false, error: '读写 config.json 失败，已记日志' }, 500);
+            return;
+          }
+          // 落盘成功之后才改内存：反过来的话会出现「文件没改成、进程内却是新值」，重启后莫名回滚。
+          cfg.socialV2 = { ...(cfg.socialV2 ?? {}), affect: next };
+          const tuned = [];
+          if (before.enabled !== next.enabled) tuned.push(`enabled=${next.enabled}`);
+          if (before.minIntervalMs !== next.minIntervalMs) tuned.push(`minIntervalMs=${next.minIntervalMs}`);
+          if (before.vents.qzone !== next.vents.qzone) tuned.push(`vents.qzone=${next.vents.qzone}`);
+          if (before.quietHours.enabled !== next.quietHours.enabled) tuned.push(`quietHours.enabled=${next.quietHours.enabled}`);
+          if (tuned.length > 0) log(`[affect] 控制台：参数已更新 ${tuned.join(' ')}`);
+          sendJson({ ok: true, configPath: 'config.json', affect: next });
           return;
         }
         // 配置：POST body 支持四键的**部分更新**（enabled / windowHours / windowCap / ugcRight）。
@@ -10556,6 +11028,24 @@ async function main() {
     startSocialLoop();
   }
 
+  // 情绪宣泄检查：每 10 分钟跑一轮「该不该发一条说说」（T-012 第五步）。
+  //
+  // 为什么是 10 分钟而不是跟着情绪半衰期走：判定本身很便宜（纯函数 + 两个小 JSON 文件），
+  // 十分钟的粒度对「愤怒 30 分钟半衰期」完全够用；真按半衰期动态调度反而要多维护一套
+  // 定时器合并逻辑，而它带来的唯一好处只是少读几次盘。
+  // 每轮自己会重新读 config.json（控制台刚关掉的开关下一轮就生效），
+  // 并且 runAffectVent 内部对 disabled / 静默 / 冷却 / 配额各有早退，空转成本可以忽略。
+  // unref：这一轮是后台补充动作，不该拖住进程退出。
+  if (cfg.socialV2?.affect?.enabled !== false) {
+    const affectVentTimer = setInterval(() => {
+      runAffectVent({ dryRun: false }).catch((error) => {
+        log(`[affect] 宣泄检查异常：${error?.message ?? error}`);
+      });
+    }, 10 * 60 * 1000);
+    affectVentTimer.unref?.();
+    log('情绪宣泄检查已安排（每 10 分钟）');
+  }
+
   // 当前角色扮演提示：读 state/current-role.json + roles/<角色>.md，
   // 由桥接注入到 QQ 群消息（群友无法通过对话修改，只能由管理端写该文件）。
   // 缓存 key 为两个文件的 mtime，mtime 未变时直接返回，避免每次同步读文件。
@@ -12422,6 +12912,35 @@ async function main() {
                   }
                   // 旧学习会话 turn 结束后从集合移除，避免残留
                   if (frame.sessionId !== slangLearnerSessionId) learnerSessions.delete(frame.sessionId);
+                }
+              }
+              // 情绪文案会话：与上面黑话学习**同构但完全独立**的一套容器。
+              // 分开的理由见 ensureAffectVentSession 的注释：等待者是 shift 出来的，
+              // 混用一个 Map 会让 8 秒就超时的文案任务把学习中的 turn 吃掉。
+              if (ventSessions.has(frame.sessionId)) {
+                // 同样只在 turn/start 建 collector：迟到的 session/title、model/selection
+                // 不会有 turn/end，顺手建一个就会永远留在 ventCollectors 里吞掉后续事件。
+                let ventCollector = ventCollectors.get(frame.sessionId) ?? null;
+                if (!ventCollector && frame.event.type === 'turn/start') {
+                  ventCollector = createTurnCollector();
+                  ventCollectors.set(frame.sessionId, ventCollector);
+                }
+                const ventEnded = ventCollector ? ventCollector.push(frame.event) : null;
+                if (ventEnded) {
+                  ventCollectors.delete(frame.sessionId);
+                  const ventQueue = ventWaiters.get(frame.sessionId) ?? [];
+                  const ventWaiter = ventQueue.shift();
+                  if (ventQueue.length === 0) ventWaiters.delete(frame.sessionId);
+                  if (ventWaiter) {
+                    clearTimeout(ventWaiter.timer);
+                    if (ventEnded.reason.kind === 'completed' && ventEnded.text.trim()) {
+                      ventWaiter.resolve(ventEnded.text);
+                    } else {
+                      ventWaiter.reject(new Error(`文案会话 turn 未正常完成：${ventEnded.reason.kind}`));
+                    }
+                  }
+                  // 旧文案会话 turn 结束后从集合移除，避免残留
+                  if (frame.sessionId !== ventSessionId) ventSessions.delete(frame.sessionId);
                 }
               }
               continue;

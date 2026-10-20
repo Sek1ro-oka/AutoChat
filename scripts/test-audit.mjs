@@ -96,6 +96,13 @@ const tests = [
   // normalizeEventInput / shouldSkipEvent / inQuietHours 的纯函数边界。
   // 同样只读源码（import bridge 会真起服务）+ 直接 import 纯模块跑。
   'test-affect-events.mjs',
+  // 文案三件纯函数的单测（T-012 第五步）：清洗模型输出、拼提示词、
+  // 兜底模板逐条过 checkVentText。零 IO，纯字符串断言。
+  'test-affect-text.mjs',
+  // 宣泄真发这条链路的静态契约（T-012 第五步）：publishQzonePost 是唯一发送出口、
+  // 十分钟定时器、dryRun 默认 true、两个端点在 adminOnlyV2Paths、applyVent 只在成功分支、
+  // 文案会话 8 秒兜底且等待者与黑话学习互不共用。
+  'test-affect-vent-run.mjs',
 ];
 let failed = 0;
 for (const test of tests) {
