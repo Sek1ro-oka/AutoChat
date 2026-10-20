@@ -47,6 +47,16 @@
 - 本机记录保留条数不再写死 50：按 `max(50, windowCap + 20)` 裁剪，`windowCap` 调大之后
   窗口计数不会被裁剪封顶。
 
+### 修复
+
+- **DSH 2.0.18 起 `{{cwd}}` 不再是已注册的提示词变量**：两个 preset 的 `persona.suffix` 原本写
+  `Your working directory is {{cwd}}.`，新版本只注册 `{{provider}}` / `{{model}}`，装配时抛
+  `unknown prompt variable "{{cwd}}" in section "deployment:persona-suffix"`，机器人每条消息
+  只能回一句「agent 处理出错」。现改成 `suffix: ''`（`dsh/agent-presets/*/agent.cordis.yml`），
+  bundle patch 重新生成；`test-qq-preset-contract.mjs`、`verify-persona-config.mjs`、
+  `verify-dsh-020-adaptation.mjs` 的断言从「必须保留 {{cwd}}」改成「只能出现已注册变量」，
+  以后再往 section 里塞未知变量会直接测试失败（不用等到线上每条消息都报错才发现）。
+
 ### 迁移
 
 - **老配置自动迁移**：`config.json` 里没有 `windowCap`、但有 `dailyCap` 时，`windowCap ← dailyCap`

@@ -66,7 +66,13 @@ for (const p of ['qq-chat', 'qq-chat-v2']) {
   let schemaOk = false;
   try { persona.Config(row.config); schemaOk = true; } catch {}
   check(`preset ${p}: persona.config 通过 DSH schema`, schemaOk);
-  check(`preset ${p}: 保留 {{model}} / {{cwd}} 变量`, /\{\{model\}\}/.test(row.config.prefix) && /\{\{cwd\}\}/.test(row.config.suffix ?? ''));
+  check(`preset ${p}: 保留 {{model}}，且不含未注册的提示词变量`, (() => {
+    if (!/\{\{model\}\}/.test(row.config.prefix)) return false;
+    const text = `${row.config.prefix}\n${row.config.suffix ?? ''}`;
+    const unknown = [...new Set([...text.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1]))]
+      .filter((name) => !['provider', 'model'].includes(name));
+    return unknown.length === 0;
+  })());
 }
 
 // ── 2. 部署侧：DSH 0.1.7 的 preset 机制 ──────────────────────────────────────
