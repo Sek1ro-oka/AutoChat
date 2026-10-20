@@ -98,38 +98,6 @@ import {
   markStickerUsed
 } from './sticker-lib.js';
 
-// 社交自动化模块的可用性探测（只对 src/social-auto.js 这一个模块）。
-// 背景：scripts/audit-bridge-harness.mjs 会在 vm 里跑 bridge.js，而它第一步就把所有顶层 import
-// 剥掉、再按一份固定清单把纯函数模块的导出注入 context（见该文件开头的说明：新增一个纯函数模块
-// 就必须去那里补一行 import + 一行 spread，否则 VM 里全是 ReferenceError）。
-// 那份清单目前还没有 src/social-auto.js，于是 VM 里 normalizeAutomation 等名字根本不存在，
-// loadConfig 会直接 ReferenceError，连带 5 个走 VM 的测试文件一起红。这里用 typeof 探测兜一层：
-// 模块不可用时**社交自动化整体停用**（fail-closed，端点返回 503、事件回调直接 return），
-// 桥接的其它功能照常启动。真机上这个模块永远在，null 分支只有 VM 会走到；
-// 等 harness 补上那两行之后，这段探测就可以连同上面对应的守卫一起删掉。
-const socialAuto = (() => {
-  if (typeof normalizeAutomation !== 'function') return null;
-  return {
-    normalizeAutomation,
-    applyAutomationUpdate,
-    appendAuditLine,
-    auditEntry,
-    parseAuditTail,
-    rollQuotaState,
-    takeQuota,
-    markAlerted,
-    formatApprovedFriend,
-    formatApprovedFriendLog,
-    formatInviteApproved,
-    formatInviteApprovedLog,
-    formatJoinedGroup,
-    formatQuotaExhausted,
-    formatWhitelistAdded,
-    formatWhitelistAddedLog
-  };
-})();
-const socialAutoUnavailable = '社交自动化模块不可用（src/social-auto.js 没加载）';
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const STATE_DIR = path.join(ROOT, 'state');
@@ -995,7 +963,7 @@ function loadConfig() {
   // socialV2.automation：社交自动化（入群邀请 / 好友申请）的五个开关 + 三条日常额度。
   // fail-closed：只有 === true 才算开，认不出的值（"true"、1、yes）一律当关。
   // 额度 0 是合法值——当天一次都不自动做，不能当"没设置"回落成 5。
-  if (socialAuto) cfg.socialV2.automation = socialAuto.normalizeAutomation(cfg.socialV2.automation);
+  cfg.socialV2.automation = normalizeAutomation(cfg.socialV2.automation);
 
   // socialV2.voice：语音发送（把准备好的音频文件当 QQ 语音发出去）。
   // dir 为相对仓库根目录的语音库路径；AI 的 qq_send_voice 默认只能从这个目录取文件，
@@ -3482,10 +3450,8 @@ async function main() {
 
   /** 当日额度状态。文件不存在是常态（第一次跑），按空状态起始；损坏也不让自动化停摆。 */
   function readAutomationQuota(now = Date.now()) {
-    // 模块不可用（VM 里跑）时给一份空状态：GET 端点那之前已经 503，占额度那之前已经 return。
-    if (!socialAuto) return { day: '', counts: { friendApprove: 0, inviteApprove: 0, whitelistWrite: 0 }, alerted: {} };
     const raw = readJsonSafe(SOCIAL_AUTO_STATE_FILE, null);
-    return socialAuto.rollQuotaState(raw, now);
+    return rollQuotaState(raw, now);
   }
 
   /** 写回额度状态（含跨天清零后的新状态）。 */
@@ -3495,9 +3461,8 @@ async function main() {
 
   /** 追加一行审计。审计写失败只记日志——不能让一次已经完成的自动动作因此回滚。 */
   function appendAutomationAudit(record, now = Date.now()) {
-    if (!socialAuto) return null;
     try {
-      return socialAuto.appendAuditLine(SOCIAL_AUTO_AUDIT_FILE, socialAuto.auditEntry(record, now));
+      return appendAuditLine(SOCIAL_AUTO_AUDIT_FILE, auditEntry(record, now));
     } catch (error) {
       log(`社交自动化审计写入失败：${error?.message ?? error}`);
       return null;
@@ -3506,7 +3471,6 @@ async function main() {
 
   /** 读审计尾部：控制台右侧两块面板的唯一数据源。文件不存在/读失败一律 []，绝不让 GET 500。 */
   function readAutomationAuditTail(limit = 10) {
-    if (!socialAuto) return [];
     let text = '';
     try {
       text = fs.readFileSync(SOCIAL_AUTO_AUDIT_FILE, 'utf8');
@@ -3514,13 +3478,12 @@ async function main() {
       if (error?.code !== 'ENOENT') log(`读取社交自动化审计失败：${error?.message ?? error}`);
       return [];
     }
-    return socialAuto.parseAuditTail(text, limit);
+    return parseAuditTail(text, limit);
   }
 
   /** 私聊通知 ownerQQ。notifyOwner 关掉就静默；未配置 ownerQQ 时发不出去，只记日志。 */
   async function notifyOwnerAutomation(text) {
-    if (!socialAuto) return false;
-    const automation = socialAuto.normalizeAutomation(cfg.socialV2?.automation);
+    const automation = normalizeAutomation(cfg.socialV2?.automation);
     if (automation.notifyOwner !== true) return false;
     if (!cfg.ownerQQ) {
       log('社交自动化：未配置 ownerQQ，通知发不出');
@@ -3541,17 +3504,16 @@ async function main() {
    * 0 是合法额度（当天一次都不做），所以这里只认 result.ok，不能拿计数当假值判断。
    */
   async function takeAutomationQuota(kind, now = Date.now()) {
-    if (!socialAuto) return false;
-    const automation = socialAuto.normalizeAutomation(cfg.socialV2?.automation);
+    const automation = normalizeAutomation(cfg.socialV2?.automation);
     const limits = automation.dailyLimits;
-    const result = socialAuto.takeQuota(readAutomationQuota(now), kind, limits, now);
+    const result = takeQuota(readAutomationQuota(now), kind, limits, now);
     if (result.ok) {
       writeAutomationQuota(result.state);
       return true;
     }
     if (result.state.alerted?.[kind] === true) return false; // 今天已经告过警，别再刷屏
-    writeAutomationQuota(socialAuto.markAlerted(result.state, kind));
-    const text = socialAuto.formatQuotaExhausted({ kind, limit: limits[kind] });
+    writeAutomationQuota(markAlerted(result.state, kind));
+    const text = formatQuotaExhausted({ kind, limit: limits[kind] });
     log(`社交自动化：${text}`);
     appendAutomationAudit({ kind: 'quota', ok: false, text });
     await notifyOwnerAutomation(text);
@@ -3619,8 +3581,7 @@ async function main() {
    * 不看申请留言里写的群号——那可以伪造。
    */
   async function handleFriendRequest(event) {
-    if (!socialAuto) return;
-    const automation = socialAuto.normalizeAutomation(cfg.socialV2?.automation);
+    const automation = normalizeAutomation(cfg.socialV2?.automation);
     if (automation.friendFromGroup !== true) return; // 关着就完全不理，不写日志（免得噪音）
     const now = Date.now();
     const flag = String(event?.flag ?? '').trim();
@@ -3676,9 +3637,9 @@ async function main() {
     }
     appendAutomationAudit({
       kind: 'friendApprove', ok: true, qq, groupId: hit.groupId, groupName,
-      text: socialAuto.formatApprovedFriendLog({ qq, groupId: hit.groupId, groupName })
+      text: formatApprovedFriendLog({ qq, groupId: hit.groupId, groupName })
     });
-    await notifyOwnerAutomation(socialAuto.formatApprovedFriend({
+    await notifyOwnerAutomation(formatApprovedFriend({
       qq, groupId: hit.groupId, groupName,
       privateWhitelist: automation.privateWhitelist === true
     }));
@@ -3687,9 +3648,9 @@ async function main() {
       try {
         const result = await appendWhitelist('private', qq);
         if (result.added) {
-          log(socialAuto.formatWhitelistAddedLog({ kind: 'private', id: qq }));
-          appendAutomationAudit({ kind: 'whitelistWrite', ok: true, qq, text: socialAuto.formatWhitelistAddedLog({ kind: 'private', id: qq }) });
-          await notifyOwnerAutomation(socialAuto.formatWhitelistAdded({ kind: 'private', id: qq }));
+          log(formatWhitelistAddedLog({ kind: 'private', id: qq }));
+          appendAutomationAudit({ kind: 'whitelistWrite', ok: true, qq, text: formatWhitelistAddedLog({ kind: 'private', id: qq }) });
+          await notifyOwnerAutomation(formatWhitelistAdded({ kind: 'private', id: qq }));
         }
       } catch (error) {
         const text = `自动写入私聊白名单失败：${error?.message ?? error}`;
@@ -3704,8 +3665,7 @@ async function main() {
    * 前缀拼错了反而同意不了。也不处理「别人申请加入机器人管的群」。
    */
   async function handleGroupInvite(event) {
-    if (!socialAuto) return;
-    const automation = socialAuto.normalizeAutomation(cfg.socialV2?.automation);
+    const automation = normalizeAutomation(cfg.socialV2?.automation);
     if (automation.acceptInvite !== true) return;
     const now = Date.now();
     const flag = String(event?.flag ?? '').trim();
@@ -3725,8 +3685,8 @@ async function main() {
       appendAutomationAudit({ kind: 'inviteApprove', ok: false, groupId, text });
       return;
     }
-    appendAutomationAudit({ kind: 'inviteApprove', ok: true, groupId, text: socialAuto.formatInviteApprovedLog({ groupId }) });
-    await notifyOwnerAutomation(socialAuto.formatInviteApproved({ groupId }));
+    appendAutomationAudit({ kind: 'inviteApprove', ok: true, groupId, text: formatInviteApprovedLog({ groupId }) });
+    await notifyOwnerAutomation(formatInviteApproved({ groupId }));
   }
 
   /**
@@ -3734,8 +3694,7 @@ async function main() {
    * 别人进群不管。已经在白名单里就不重复写、也不烧额度。
    */
   async function handleSelfJoinedGroup(event) {
-    if (!socialAuto) return;
-    const automation = socialAuto.normalizeAutomation(cfg.socialV2?.automation);
+    const automation = normalizeAutomation(cfg.socialV2?.automation);
     if (automation.groupWhitelist !== true) return;
     const selfId = await resolveAutomationSelfId(event);
     if (!selfId) {
@@ -3766,8 +3725,8 @@ async function main() {
       return;
     }
     const groupName = await fetchGroupNameQuiet(groupId);
-    appendAutomationAudit({ kind: 'whitelistWrite', ok: true, groupId, groupName, text: socialAuto.formatWhitelistAddedLog({ kind: 'groups', id: groupId }) });
-    await notifyOwnerAutomation(socialAuto.formatJoinedGroup({ groupId, groupName }));
+    appendAutomationAudit({ kind: 'whitelistWrite', ok: true, groupId, groupName, text: formatWhitelistAddedLog({ kind: 'groups', id: groupId }) });
+    await notifyOwnerAutomation(formatJoinedGroup({ groupId, groupName }));
   }
 
   // ── 本地控制台（独立 Web 面板，不依赖 DSH WebUI） ───────────────────────────
@@ -5476,9 +5435,8 @@ async function main() {
         // ── 社交自动化：五个开关 + 今日额度 + 最近动作（dev-doc §9） ──────────
         // 单独一个端点：不动 /api/socialV2/config 那套很长的归一化逻辑。
         if (req.method === 'GET' && url.pathname === '/api/socialV2/automation') {
-          if (!socialAuto) { sendJson({ ok: false, error: socialAutoUnavailable }, 503); return; }
           const now = Date.now();
-          const automation = socialAuto.normalizeAutomation(cfg.socialV2?.automation);
+          const automation = normalizeAutomation(cfg.socialV2?.automation);
           const today = readAutomationQuota(now);
           sendJson({
             ok: true,
@@ -5490,11 +5448,10 @@ async function main() {
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/automation') {
-          if (!socialAuto) { sendJson({ ok: false, error: socialAutoUnavailable }, 503); return; }
           const body = await readBody();
           // 校验只信这一个纯函数：未知键 / 非布尔 / 空对象三种错误文案都在 social-auto.js 里。
-          const current = socialAuto.normalizeAutomation(cfg.socialV2?.automation);
-          const result = socialAuto.applyAutomationUpdate(current, body);
+          const current = normalizeAutomation(cfg.socialV2?.automation);
+          const result = applyAutomationUpdate(current, body);
           if (!result.ok) {
             sendJson({ ok: false, error: result.error }, 400);
             return;
