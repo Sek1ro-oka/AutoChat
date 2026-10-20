@@ -5,6 +5,27 @@
 
 ## [Unreleased]
 
+### 合入上游 v0.2.0-r4（2026-10-20，合并提交 `008a1c5`）
+
+上游 `a56164e` 与本仓库同基线（`9df6a7e`），本次以 `--no-ff` 合并成 `008a1c5`（32 文件，+3468/−320），
+6 处冲突逐个手工解得（`src/bridge.js` 3、`src/mcp-snowluma-safe.js` 1、`scripts/audit-bridge-harness.mjs` 1、`README.md` 1）。
+用户可见的变化：
+
+- **联网搜索改用与 DSH 同源的 DeepSeek 搜索**：同一个 Anthropic 兼容端点 + `web_search` 服务端工具，凭据按
+  `config.webSearch.apiKey` → 环境变量 `DEEPSEEK_API_KEY` → DSH 的 `.credentials.yaml` 顺序解析；Bing RSS 只在
+  DeepSeek 不可用时兜底，不再默认把群聊关键词发给 Bing。`webSearch.provider` 可强制 `auto` / `deepseek` / `bing`。
+- **图片/表情（含动图 GIF）链路加固**：表情包优先走 QQ CDN 直链、`get_image` 失败时用 `emoji_id` 推 CDN 兜底；
+  下载改为 **IPv4 优先 + 逐地址故障切换**，修掉「DNS 先返回 IPv6、本机没有 IPv6 出口 → 每次白等 20 秒」的根因。
+  单条消息上限见 `socialV2.media`（默认 8MB / 64MP / 5 张）。
+- **会话初始提示词**（二代仿真）：新增 `GET/POST /api/socialV2/initial-prompt`（已进 `adminOnlyV2Paths`），
+  控制台「二代仿真 → 初始提示词」可给某个群/私聊预写环境说明，AI 只在该会话第一次唤醒时收到一次；
+  字数上限 `socialV2.initialPromptMaxChars`（默认 2000）。
+- **`qq_wait_for_messages` 改 5 分钟长轮询**：新增 `agentApiLongPoll()` 走 `node:http`，绕开 undici 的 300 秒
+  `headersTimeout`（上游 issue #24）；本地保留 `body.ok === false` 分支与 `error.body/layer/reason/reasons/retryAfterMs/todayCount` 挂载。
+- **上游 issue 修复**：控制台切模式被 5 秒轮询改回去、回合永久「繁忙」、机器人身份未注入等。
+- **本地技术债**（`0dbaa79`）：`src/bridge.js` 里为 `scripts/audit-bridge-harness.mjs` 的 VM 兜底的
+  `socialAuto` 可用性探测整段删除，harness 补 `import * as socialAuto from '../src/social-auto.js'`。
+
 ### 新增
 
 - **社交自动化（`socialV2.automation`，出厂全关）**：桥接自己处理四类「加好友 / 进群」杂事，不需要模型参与——
