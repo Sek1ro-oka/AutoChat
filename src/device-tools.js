@@ -51,12 +51,18 @@ import {
   defaultRunAdb,
   describeAdbError,
   deviceBudget,
+  gestureZoneText,
   isBlockedApp,
+  isFullscreenWindow,
+  isInGestureZone,
+  isPointInWindow,
   normalizeDeviceConfig,
+  outsideWindowText,
   parseDevices,
   parseDeviceState,
   parseForeground,
   parsePngSize,
+  parseWindowFrame,
   pickDevice,
   recordStep,
   serializeDeviceState,
@@ -73,6 +79,14 @@ export const DEVICE_STATE_FILE = 'device-state.json';
 export const DEVICE_ACTION_LOG = 'device-actions.jsonl';
 /** 截图目录（在 state/ 下面）。 */
 export const DEVICE_SHOT_DIR = 'device';
+/**
+ * 前台窗口快照（T-026）：**本模块写、桥接只读**。
+ *
+ * 为什么要落盘：prompt 的 `device` 块是桥接拼的（另一个进程），它拿不到这里的内存缓存，
+ * 而模型只有从 prompt 里才知道「这个应用只是个浮窗」。文件很小（一个矩形 + 全屏标记），
+ * 每次刷新窗口信息时覆盖写；桥接一次 GET /api/socialV2/prompt 只读它，不写。
+ */
+export const DEVICE_WINDOW_FILE = 'device-window.json';
 /** 授权文件（T-024）：**桥接写、本模块只读**。文件名与判定规则都来自 src/device-grant.js。 */
 export { DEVICE_GRANT_FILE };
 
@@ -87,6 +101,10 @@ const MAX_TYPE_LENGTH = 200;
 const LIST_APPS_MAX = 80;
 // 动作日志单行上限：避免把整段文本（可能含用户隐私）写进日志。
 const MAX_LOG_TEXT = 40;
+// 前台窗口矩形的缓存时长（T-026）：同一台设备、同一个包 2 秒内复用同一份 `dumpsys` 结果。
+// 视觉闭环是「点一下 → 0.8 秒 → 截图 → 再点」，2 秒刚好覆盖一轮，又不至于拿十几秒前的
+// 旧窗口去判「这一下点在哪」。
+const WINDOW_CACHE_MS = 2000;
 
 // ── 小工具 ──────────────────────────────────────────────────────────────────
 /** 只认对象（数组 / null / 字符串一律当空）。 */
@@ -324,6 +342,84 @@ export function createDeviceTools({
     return { width: lastShot.width, height: lastShot.height };
   }
 
+  /**
+   * 前台窗口矩形的缓存（T-026）：`{ serial, package, at, frame }`。
+   *
+   * 缓存键带上**包名**：切到另一个 App 时立刻作废，绝不会拿上一个应用（比如全屏的 B 站）的
+   * 矩形去判这一个（PC 模式浮窗的小黑盒）的点。`at` 用单调递增的注入时钟比较，
+   * 时钟回拨（测试里拨过去）一律当过期重读，宁可多跑一次 dumpsys 也不拿旧窗口判错。
+   */
+  let windowCache = null;
+
+  /**
+   * 读当前前台应用的窗口矩形（`dumpsys window windows` → `parseWindowFrame`），带 2 秒缓存。
+   *
+   * 为什么要单独读一次而不是复用 `dumpsys window`：那一份只取 `mCurrentFocus`（黑名单闸门），
+   * 窗口矩形在 `windows` 段里；把两件事拆开，哪一份解析失败都不影响另一件。
+   * 读不到 / 解析不出一律 `null`（调用方按「不知道窗口」放行）。
+   */
+  async function readWindowFrame(cfg, serial, pkg, at) {
+    if (typeof pkg !== 'string' || pkg === '') return null;
+    const cached = windowCache;
+    if (cached && cached.serial === serial && cached.package === pkg
+      && at - cached.at >= 0 && at - cached.at < WINDOW_CACHE_MS) {
+      return cached.frame;
+    }
+    const res = await runAdb(['-s', serial, 'shell', 'dumpsys', 'window', 'windows'], {
+      adbPath: cfg.adbPath,
+      timeoutMs: SHELL_TIMEOUT_MS,
+    });
+    const frame = res && res.ok === true ? parseWindowFrame(res.stdout, pkg) : null;
+    // 解析失败也缓存：这一屏（这个包）就是读不出窗口，别在 2 秒内反复跑 dumpsys。
+    windowCache = { serial, package: pkg, at, frame };
+    return frame;
+  }
+
+  /**
+   * 把「现在这个前台窗口长什么样」写进 `state/device-window.json` —— **桥接只读**，
+   * prompt 的 `device` 块靠它说「窗口在 (l,t)-(r,b)，只在窗口里点」。
+   *
+   * 写失败只影响提示词里少一句话，绝不影响动作本身（所以吞掉异常、不发 warn 刷屏）。
+   * 没有矩形时写 `{ package, at }`（没有 `fullscreen` 字段 = 「不知道」），
+   * 桥接侧 `windowPromptHint` 见到不是 `fullscreen:false` 就一个字都不加。
+   */
+  function saveWindowInfo(pkg, frame, screen, at) {
+    try {
+      fs.mkdirSync(stateDir, { recursive: true });
+      const data = frame
+        ? {
+          package: pkg,
+          at,
+          left: frame.left,
+          top: frame.top,
+          right: frame.right,
+          bottom: frame.bottom,
+          width: frame.width,
+          height: frame.height,
+          fullscreen: isFullscreenWindow(frame, screen),
+        }
+        : { package: pkg, at };
+      fs.writeFileSync(path.join(stateDir, DEVICE_WINDOW_FILE), JSON.stringify(data), 'utf8');
+    } catch {
+      // 见上：提示词块少一句话，不影响动作。
+    }
+  }
+
+  /**
+   * 读前台窗口 + 判全屏 + 更新提示词快照。
+   *
+   * 返回 `{ frame, fullscreen }`；不知道前台是谁 / dumpsys 里没有这个包的窗口 / 读不到 → `null`。
+   * `screen` 允许为 `null`（读不到屏幕尺寸）：这时 `isFullscreenWindow` 给 `false`，
+   * 但「窗口外的点」依旧能判（全屏应用的矩形本来就覆盖全屏，不会被误拒）。
+   */
+  async function describeWindow(cfg, serial, pkg, screen, at) {
+    if (typeof pkg !== 'string' || pkg === '') return null;
+    const frame = await readWindowFrame(cfg, serial, pkg, at);
+    saveWindowInfo(pkg, frame, screen, at);
+    if (!frame) return null;
+    return { frame, fullscreen: isFullscreenWindow(frame, screen) };
+  }
+
   /** 读状态：文件不存在 / 坏 JSON → 全新状态（今天还没玩）。 */
   function loadState(at) {
     let raw = '';
@@ -498,15 +594,16 @@ export function createDeviceTools({
    * 留痕但**不记账**：被拦的一下没有真的动设备，扣额度等于「误站到微信屏」反复白扣钱 ——
    * 账本要反映真实动作数。放行的 home 是真的按了一下，所以照常记步。
    *
-   * 返回 `{ blocked, known }`：`blocked` 为 null = 放行，非 null 是可直接返回给模型的失败对象；
+   * 返回 `{ blocked, known, pkg }`：`blocked` 为 null = 放行，非 null 是可直接返回给模型的失败对象；
    * `known:false` 表示前台读不到 / 解析不出（放行，但调用方要把这件事写进动作日志）。
+   * `pkg` 是这次读到的前台包名（读不到为 null）—— 窗口闸门（T-026）要用它去查窗口矩形。
    */
   async function foregroundBlock(cfg, serial, at, actionType) {
     // home 是逃生口：不读前台、不拦，也不改记账（这一步仍然会算一步）。
-    if (actionType === 'home') return { blocked: null, known: true };
+    if (actionType === 'home') return { blocked: null, known: true, pkg: null };
     const fg = await readForeground(cfg, serial);
-    if (fg.pkg === null) return { blocked: null, known: false };
-    if (!isBlockedApp(fg.pkg, cfg)) return { blocked: null, known: true };
+    if (fg.pkg === null) return { blocked: null, known: false, pkg: null };
+    if (!isBlockedApp(fg.pkg, cfg)) return { blocked: null, known: true, pkg: fg.pkg };
     appendLog({ ts: at, action: actionType, blocked: 'blocked_foreground', foreground: fg.pkg });
     return {
       blocked: {
@@ -517,7 +614,66 @@ export function createDeviceTools({
         blocked: true,
       },
       known: true,
+      pkg: fg.pkg,
     };
+  }
+
+  /**
+   * 窗口闸门（T-026）：PC 模式浮窗的应用，只许在**窗口矩形内**动手。
+   *
+   * 真机验收（TB375FC）：小黑盒在 ZUI PC 模式下是 `[737,0]-[2208,1840]` 的浮窗，而截图是整屏
+   * 2944x1840 —— 模型照截图给的坐标有两类会出事：
+   * - 点在窗口外（x=543 / 455）→ 落到桌面层，毫无反应；
+   * - 点在底部 1604–1840 → 触发手势导航，把 App 切走（真机上真的发生了）。
+   * 所以这里挡两种情况，理由分开给：`outside_window`（坐标要落在窗口里）与
+   * `gesture_zone`（往上挪一点）。被拒的一下**没有真的动设备，不记步**，只留痕。
+   *
+   * **全屏应用（B 站那类）行为完全不变**：窗口矩形覆盖整屏时直接放行，一个点都不额外拦
+   * —— 手势区对全屏应用同样是合法的可点区域（点底部的按钮是正常操作）。
+   *
+   * fail-open：不知道前台是谁 / `dumpsys` 里没有这个包的窗口 / 读不到 → 放行。与黑名单闸门
+   * 同一取舍：看不见的东西不能当成罪证，否则换一台 ROM 就一步都走不动。
+   *
+   * 返回 `null`（放行）或可直接回给模型的失败对象。
+   */
+  async function windowBlock(cfg, serial, pkg, screen, points, at, actionType) {
+    const info = await describeWindow(cfg, serial, pkg, screen, at);
+    if (!info || info.fullscreen) return null;
+    const rect = {
+      left: info.frame.left,
+      top: info.frame.top,
+      right: info.frame.right,
+      bottom: info.frame.bottom,
+      width: info.frame.width,
+      height: info.frame.height,
+      fullscreen: false,
+    };
+    const outside = points.find((point) => !isPointInWindow(point, info.frame));
+    if (outside) {
+      appendLog({ ts: at, action: actionType, blocked: 'outside_window', ...rect });
+      return {
+        ok: false,
+        reason: 'outside_window',
+        message: outsideWindowText(info.frame, outside),
+        window: rect,
+        blocked: true,
+      };
+    }
+    // 手势区只在「有屏幕尺寸」时判：没有屏幕高度就算不出这一条在哪。
+    if (screen) {
+      const gesture = points.find((point) => isInGestureZone(point, screen));
+      if (gesture) {
+        appendLog({ ts: at, action: actionType, blocked: 'gesture_zone', x: gesture.x, y: gesture.y, ...rect });
+        return {
+          ok: false,
+          reason: 'gesture_zone',
+          message: gestureZoneText(gesture, screen),
+          window: rect,
+          blocked: true,
+        };
+      }
+    }
+    return null;
   }
 
   /** 前台读不到时给动作日志留个记号（放行是刻意的，「悄悄放行」不是）。 */
@@ -586,6 +742,8 @@ export function createDeviceTools({
       blockedApps: [...cfg.blockedApps],
       // 没连上 / 没解析出来时是 null；连上后由 dumpsys window 现读（模型据此判断自己停在哪一屏）。
       foreground: null,
+      // 窗口模式（T-026）的矩形同理：没连上时先占位，连上后由 dumpsys window windows 现读。
+      foregroundWindow: null,
       day: state.day,
     };
     if (!cfg.enabled) {
@@ -616,6 +774,9 @@ export function createDeviceTools({
       ?? (sizeRes && sizeRes.ok === true ? parseWmSize(sizeRes.stdout) : null);
     // 前台包名：解析不出就是 null（老 ROM / dumpsys 被裁），这时不给模型编一个名字。
     const foreground = focusRes && focusRes.ok === true ? parseForeground(focusRes.stdout) : null;
+    // 前台窗口矩形（T-026）：PC 模式浮窗时告诉模型「这个应用只占一块」，并顺手把快照写给
+    // 桥接的 prompt 块。读不到 / 解析不出就是 null —— status 照常回，不因为窗口读不出而失败。
+    const windowInfo = await describeWindow(cfg, found.serial, foreground, screen, at);
 
     return {
       ...base,
@@ -628,6 +789,11 @@ export function createDeviceTools({
       battery: { level: battery.level, status: battery.status, state: battery.state },
       screen: screen ?? { width: null, height: null },
       foreground,
+      // 窗口模式（浮窗）时是 `{left, top, right, bottom, width, height, fullscreen:false}`；
+      // 全屏应用 `fullscreen:true`；读不到窗口就是 null。模型据此知道「能点在哪一块」。
+      foregroundWindow: windowInfo
+        ? { ...windowInfo.frame, fullscreen: windowInfo.fullscreen }
+        : null,
     };
   }
 
@@ -733,6 +899,10 @@ export function createDeviceTools({
     const fg = await foregroundBlock(cfg, found.serial, at, 'tap');
     if (fg.blocked) return fg.blocked;
 
+    // 窗口闸门（T-026）：PC 模式浮窗只许在窗口里点，底部手势区一律拒；全屏应用直接放行。
+    const windowFail = await windowBlock(cfg, found.serial, fg.pkg, size, [{ x, y }], at, 'tap');
+    if (windowFail) return windowFail;
+
     const res = await runAdb(['-s', found.serial, 'shell', 'input', 'tap', String(x), String(y)], {
       adbPath: cfg.adbPath,
       timeoutMs: SHELL_TIMEOUT_MS,
@@ -779,6 +949,19 @@ export function createDeviceTools({
 
     const fg = await foregroundBlock(cfg, found.serial, at, 'swipe');
     if (fg.blocked) return fg.blocked;
+
+    // 窗口闸门（T-026）：滑动的**两个端点**都要在窗口里 —— 起点在窗口外会落到桌面，
+    // 终点/起点压到底部手势区会把应用切走（真机上都发生过）。
+    const windowFail = await windowBlock(
+      cfg,
+      found.serial,
+      fg.pkg,
+      size,
+      [{ x: x1, y: y1 }, { x: x2, y: y2 }],
+      at,
+      'swipe',
+    );
+    if (windowFail) return windowFail;
 
     const res = await runAdb(
       ['-s', found.serial, 'shell', 'input', 'swipe', String(x1), String(y1), String(x2), String(y2), String(durationMs)],
@@ -1076,7 +1259,7 @@ export function registerDeviceTools(server, opts = {}) {
 
   server.tool(
     'device_tap',
-    `在平板屏幕上点一下，坐标是截图里的像素坐标（越界会自动夹到屏幕内）。点之前先 device_screenshot 看准位置；点完再截一张确认效果。${BOUNDARY}`,
+    `在平板屏幕上点一下，坐标是截图里的像素坐标（越界会自动夹到屏幕内）。点之前先 device_screenshot 看准位置；点完再截一张确认效果。窗口模式（PC 模式浮窗）的应用只允许点在窗口矩形内：点窗口外会返回 outside_window（落到桌面、没反应），点到屏幕最底部的手势区会返回 gesture_zone（会把应用切走）；全屏应用不受这两条限制。${BOUNDARY}`,
     {
       x: z.coerce.number().describe('横坐标（像素，按截图宽度）'),
       y: z.coerce.number().describe('纵坐标（像素，按截图高度）'),
@@ -1086,7 +1269,7 @@ export function registerDeviceTools(server, opts = {}) {
 
   server.tool(
     'device_swipe',
-    `在平板上滑一下：从 (x1,y1) 滑到 (x2,y2)，durationMs 100–2000 毫秒（默认 300）。用来滚动列表、翻页、拖动滑块。${BOUNDARY}`,
+    `在平板上滑一下：从 (x1,y1) 滑到 (x2,y2)，durationMs 100–2000 毫秒（默认 300）。用来滚动列表、翻页、拖动滑块。窗口模式的应用要求两个端点都在窗口矩形内（窗口外 → outside_window，底部手势区 → gesture_zone）；全屏应用不受这两条限制。${BOUNDARY}`,
     {
       x1: z.coerce.number().describe('起点横坐标'),
       y1: z.coerce.number().describe('起点纵坐标'),

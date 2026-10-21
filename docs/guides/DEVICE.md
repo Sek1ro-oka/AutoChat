@@ -141,10 +141,12 @@ prompt 的 `device.tools` 是空数组，`enabledTools` 里也没有 `device_*`�
 | `state/device-grant.json` | 平板授权：谁授权（`grantedBy`）、在哪个会话（`viaKey`）、起止时间、本轮分钟/步数、撤销时间（`revokedAt`） |
 | `state/device-state.json` | 当天已用分钟/步数、上次动作时间、暂停截止时间、手动暂停原因 |
 | `state/device-actions.jsonl` | 每步一行：时间、动作、坐标/按键/包名、结果、`foreground` |
+| `state/device-window.json` | 前台窗口快照（`package` + 矩形 `left/top/right/bottom/width/height` + `fullscreen`）：工具层每次读 `dumpsys window windows` 时覆盖写，桥接只读着往 prompt 里补「窗口在哪」 |
 | `state/device/` | 截图 PNG |
 
-四份都在 `.gitignore` 里，不会进仓库。`device-grant.json` 由桥接写（管理员说「去玩平板」/「别玩了」时），
-工具层只读；**手删它 = 立刻失去授权**，这是有意的复位手段。
+五份都在 `.gitignore` 里，不会进仓库。`device-grant.json` 由桥接写（管理员说「去玩平板」/「别玩了」时），
+工具层只读；**手删它 = 立刻失去授权**，这是有意的复位手段。`device-window.json` 反过来：
+工具层写、桥接只读，删掉只会让 prompt 少一句「只在窗口里点」，不影响动作。
 
 ## 真机冒烟
 
@@ -174,6 +176,8 @@ node scripts/smoke-device.mjs --grant
 | Windows 能看见平板，但 `adb devices` 永远空 | 常见！见下一条 |
 | 设备管理器里只有 `WPD / 联想小新Pad Pro 12.7`，驱动 `WUDFWpdMtp` | 平板只以 **MTP（文件传输）** 身份出现，**没有 ADB 接口**。正常的调试状态是复合设备，除了 WPD 还会多出一个 `MI_01`。这不是线/口/驱动的问题，是平板侧开关没生效：关掉再打开「USB 调试」，或改 USB 用途为「文件传输/MIDI」后再试 |
 | 动作全被拒、理由是「前台是 xx」 | 说明平板现在停在黑名单应用上。用 `device_key home` 回桌面，或手动退到桌面 |
+| 动作返回 `outside_window` | 这个应用是**窗口模式（PC 模式浮窗）**，不是全屏：坐标落在它的窗口矩形外面，点下去会落到桌面层、什么都不会发生。看 `device_status` 的 `foregroundWindow`（`fullscreen:false` 时带 `left/top/right/bottom`），只在这个矩形里给坐标 |
+| 动作返回 `gesture_zone` | 坐标落在屏幕最底部的手势导航区（高度 `min(80, 屏幕高×6%)`，2944x1840 上就是最下面 80px）。这一条是系统手势区，点/滑会触发导航、把应用切走；按文案里给的安全 y 往上挪再点 |
 | 日志里出现 `foreground:"unknown"` | 这台 ROM 的 `dumpsys window` 没有 `mCurrentFocus`（可能锁屏或厂商改了字段）。功能放行，但你可以顺手补个解析规则 |
 | 有两台设备 | 只认第一台 `device` 状态的；同时连多台请先拔掉多余的 |
 
@@ -183,6 +187,14 @@ node scripts/smoke-device.mjs --grant
   `1840x2944`），横屏应用的实际显示与输入空间却是旋转后的 `2944x1840`。实现会记住最近一次
   截图的尺寸并用它夹坐标（还没截过图才退回 `wm size`），所以**旋转屏幕后先截一张图再点击/滑动**，
   否则会沿用上一张的坐标系。
+- **PC 模式浮窗只在窗口里点**：小黑盒这类应用在 ZUI PC 模式下是**浮窗**（真机 TB375FC 实测
+  `frame=[737,0]-[2208,1840]`，1471x1840），而截图是整屏 2944x1840 —— 模型照截图给坐标，
+  点在窗口外会落到桌面层（毫无反应），点在底部 1604–1840 会触发手势导航把 App 切走。
+  现在 `device_tap` / `device_swipe` 会读前台窗口矩形：**端点落在窗口外 → `outside_window`、
+  落在最底部手势区 → `gesture_zone`**，两者都不下发、不记步、只留痕；`device_status` 的
+  `foregroundWindow` 给出矩形与 `fullscreen`，prompt 的 `device` 块在窗口模式下也会补一句
+  「窗口在 (l,t)-(r,b)，只在窗口里点」。窗口矩形缓存 2 秒（切 App 立刻按新窗口判），
+  **全屏应用（B 站那类）行为完全不变**：不额外拒绝任何点。读不到窗口信息时一律放行（fail-open）。
 - **不支持中文输入**：`adb shell input text` 只吃 ASCII。要输入中文只能改成点击选词。
 - **不做定时自动去玩**：没有 boredom / 定时器。什么时候玩由「管理员说一句 + 模型当轮决定」——
   授权口令只会落一份 `state/device-grant.json`，然后那句话照常唤醒模型；**群聊里如果唤醒条件

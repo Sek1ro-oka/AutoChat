@@ -3,8 +3,9 @@
 // 覆盖（对应任务要求的「≥90 条断言」）：
 // 配置钳制 / adb devices 解析（多设备、unauthorized、offline、噪声行） / 设备选择 /
 // 坐标夹取 / 截图宽高解析（PNG IHDR） / 包名校验 / risky 分类 / **黑名单（内核不可移除、并入、优先级）** /
-// **dumpsys window 前台包名解析** / 预算边界（第 60 步放行、第 61 步拦、30 分钟、
-// 跨日重置、暂停、冷却） / 状态序列化 / adb 错误文案 / 提示词块。
+// **dumpsys window 前台包名解析** / **窗口矩形与手势区（PC 模式浮窗，T-026）** /
+// 预算边界（第 60 步放行、第 61 步拦、30 分钟、跨日重置、暂停、冷却） / 状态序列化 /
+// adb 错误文案 / 提示词块（含窗口模式那一句）。
 //
 // 跑法：node scripts/test-device-core.mjs
 import {
@@ -26,17 +27,25 @@ import {
   deviceDayKey,
   devicePromptBlock,
   expandEnvPath,
+  gestureZoneHeight,
+  gestureZoneText,
   isBlockedApp,
+  isFullscreenWindow,
+  isInGestureZone,
+  isPointInWindow,
   normalizeDeviceConfig,
+  outsideWindowText,
   parseDevices,
   parseDeviceState,
   parseForeground,
   parsePngSize,
+  parseWindowFrame,
   pauseDevice,
   pickDevice,
   recordStep,
   serializeDeviceState,
   validateAppPackage,
+  windowPromptHint,
 } from '../src/device-core.js';
 
 // ── 测试脚手架 ──────────────────────────────────────────────────────────────
@@ -432,6 +441,165 @@ function expectApps(list) {
   check('乱码输入不抛 → null', parseForeground('mCurrentFocus=Window{{{{ u0 !!!/???}') === null);
 }
 
+// ── 7.6 窗口矩形 / 手势区（T-026） ────────────────────────────────────────────
+// 真机 TB375FC（Android 16，横屏 2944x1840）的 `dumpsys window windows` 片段：
+// 小黑盒在 ZUI PC 模式下是 [737,0]-[2208,1840] 的浮窗，桌面是全屏。
+const SCREEN_2944 = { width: 2944, height: 1840 };
+const WINDOW_MODE_DUMP = [
+  'WINDOW MANAGER WINDOWS (dumpsys window windows):',
+  '  Display: mDisplayId=0',
+  '  Window #1 Window{8f2c34a u0 com.max.xiaoheihe/com.max.xiaoheihe.MainActivity}:',
+  '    mDisplayId=0 mSession=Session{1234 u0 10123:com.max.xiaoheihe}',
+  '    mOwnerUid=10123 package=com.max.xiaoheihe',
+  '    mFrames: containing=[0,0][2944,1840] parent=[0,0][2944,1840]',
+  '    mLastFrames: containing=[0,0][2944,1840] parent=[0,0][2944,1840]',
+  '    Frames: containing=[0,0][2944,1840] parent=[0,0][2944,1840] display=[0,0][2944,1840]',
+  '      frame=[737,0][2208,1840] last=[737,0][2208,1840] insetsChanged=false',
+  '    mAttrs={(0,0)(fill x fill) ty=BASE_APPLICATION}',
+  '  Window #2 Window{9a1b2 u0 com.android.launcher3/com.android.launcher3.Launcher}:',
+  '    Frames: containing=[0,0][2944,1840] parent=[0,0][2944,1840] display=[0,0][2944,1840]',
+  '      frame=[0,0][2944,1840] last=[0,0][2944,1840]',
+].join('\n');
+
+{
+  // ── parseWindowFrame 正例 ──
+  equal('窗口模式：取到浮窗矩形（1471x1840）', parseWindowFrame(WINDOW_MODE_DUMP, 'com.max.xiaoheihe'), {
+    left: 737, top: 0, right: 2208, bottom: 1840, width: 1471, height: 1840,
+  });
+  equal('全屏应用：取到整屏矩形', parseWindowFrame(WINDOW_MODE_DUMP, 'com.android.launcher3'), {
+    left: 0, top: 0, right: 2944, bottom: 1840, width: 2944, height: 1840,
+  });
+  check('宽度按 right-left 算（右边界是开区间）', parseWindowFrame(WINDOW_MODE_DUMP, 'com.max.xiaoheihe').width === 2208 - 737);
+  check('包名前后的空白会被 trim', parseWindowFrame(WINDOW_MODE_DUMP, '  com.max.xiaoheihe  ')?.left === 737);
+
+  // ── parseWindowFrame 反例 ──
+  check('dumpsys 里没有这个包 → null', parseWindowFrame(WINDOW_MODE_DUMP, 'com.example.game') === null);
+  check('相似包名不误伤（精确匹配）', parseWindowFrame(WINDOW_MODE_DUMP, 'com.max.xiaoheihe.pad') === null);
+  check('空串 → null', parseWindowFrame('', 'com.max.xiaoheihe') === null);
+  check('纯空白 → null', parseWindowFrame('   \n  ', 'com.max.xiaoheihe') === null);
+  check('非字符串 → null', parseWindowFrame(null, 'com.max.xiaoheihe') === null && parseWindowFrame(undefined, 'com.max.xiaoheihe') === null);
+  check('包名空串 / 非字符串 → null', parseWindowFrame(WINDOW_MODE_DUMP, '') === null && parseWindowFrame(WINDOW_MODE_DUMP, null) === null);
+  check('乱码输入不抛 → null', parseWindowFrame('Window #1 Window{{{ u0 ???', 'com.max.xiaoheihe') === null);
+
+  // 段里有包名但没有矩形（只有 mFrames / 没有 frame=）→ null。
+  const noFrame = [
+    '  Window #1 Window{1 u0 com.example.game/.Main}:',
+    '    mFrames: containing=[0,0][2944,1840] parent=[0,0][2944,1840]',
+    '    mLastFrames: containing=[0,0][2944,1840] parent=[0,0][2944,1840]',
+  ].join('\n');
+  check('有窗口段但没有 frame 行 → null', parseWindowFrame(noFrame, 'com.example.game') === null);
+  check('mFrames / mLastFrames 不算 frame 行', parseWindowFrame(`${noFrame}\n    Frames: containing=[0,0][2944,1840]`, 'com.example.game') === null);
+
+  // 同包多窗口：取最后一个有矩形的段（dumpsys 按 z 序输出，靠后的更靠上）。
+  const multiWindow = [
+    '  Window #1 Window{1 u0 com.example.game/.Main}:',
+    '    Frames: containing=[0,0][1280,800]',
+    '      frame=[0,0][1280,800]',
+    '  Window #2 Window{2 u0 com.example.game/.Dialog}:',
+    '    Frames: containing=[0,0][1280,800]',
+    '      frame=[200,300][900,700]',
+  ].join('\n');
+  equal('同包多窗口取最后一个匹配', parseWindowFrame(multiWindow, 'com.example.game'), {
+    left: 200, top: 300, right: 900, bottom: 700, width: 700, height: 400,
+  });
+
+  // 别的包的 frame 不能被算到这个包头上。
+  const neighborOnly = [
+    '  Window #1 Window{1 u0 com.other.app/.Main}:',
+    '    Frames: containing=[0,0][1280,800]',
+    '      frame=[10,20][300,400]',
+    '  Window #2 Window{2 u0 com.example.game/.Main}:',
+    '    mFrames: containing=[0,0][1280,800]',
+  ].join('\n');
+  check('别的包的矩形不算自己的 → null', parseWindowFrame(neighborOnly, 'com.example.game') === null);
+
+  // 老 ROM：只有 `mFrame=[l,t][r,b]`。
+  const oldRom = [
+    '  Window #3 Window{3 u0 com.example.game/.Main}:',
+    '    mFrame=[0,0][1280,800] mHasSurface=true',
+  ].join('\n');
+  equal('老 ROM 的 mFrame 也能认', parseWindowFrame(oldRom, 'com.example.game'), {
+    left: 0, top: 0, right: 1280, bottom: 800, width: 1280, height: 800,
+  });
+
+  // 多屏 / 负坐标：左边界可以是负的。
+  const negative = [
+    '  Window #4 Window{4 u0 com.example.game/.Main}:',
+    '    Frames: containing=[-100,0][200,300]',
+    '      frame=[-100,0][200,300]',
+  ].join('\n');
+  equal('负坐标（多屏）原样保留', parseWindowFrame(negative, 'com.example.game'), {
+    left: -100, top: 0, right: 200, bottom: 300, width: 300, height: 300,
+  });
+
+  // 空 / 反向矩形算解析失败。
+  const reversed = '  Window #5 Window{5 u0 com.example.game/.Main}:\n      frame=[900,900][100,100]\n';
+  check('反向矩形 → null', parseWindowFrame(reversed, 'com.example.game') === null);
+  const zero = '  Window #6 Window{6 u0 com.example.game/.Main}:\n      frame=[100,100][100,100]\n';
+  check('零面积矩形 → null', parseWindowFrame(zero, 'com.example.game') === null);
+
+  check('CRLF 行尾也能解析', parseWindowFrame(WINDOW_MODE_DUMP.replace(/\n/g, '\r\n'), 'com.max.xiaoheihe')?.right === 2208);
+  check('没有窗口段（只有 mCurrentFocus）→ null', parseWindowFrame('mCurrentFocus=Window{1 u0 com.max.xiaoheihe/.Main}\n', 'com.max.xiaoheihe') === null);
+
+  // ── isFullscreenWindow ──
+  const floating = parseWindowFrame(WINDOW_MODE_DUMP, 'com.max.xiaoheihe');
+  const fullscreen = parseWindowFrame(WINDOW_MODE_DUMP, 'com.android.launcher3');
+  check('浮窗不是全屏', isFullscreenWindow(floating, SCREEN_2944) === false);
+  check('与屏幕等大 = 全屏', isFullscreenWindow(fullscreen, SCREEN_2944) === true);
+  check('右下角差 1px 仍算全屏（frame 右/下是开区间）', isFullscreenWindow({ left: 0, top: 0, right: 2943, bottom: 1839 }, SCREEN_2944) === true);
+  check('比屏幕更大也算全屏', isFullscreenWindow({ left: -10, top: -10, right: 3000, bottom: 1900 }, SCREEN_2944) === true);
+  check('左上角不贴 (0,0) 就不是全屏', isFullscreenWindow({ left: 1, top: 0, right: 2944, bottom: 1840 }, SCREEN_2944) === false);
+  check('屏幕尺寸读不到 → 不算全屏（保守）', isFullscreenWindow(fullscreen, null) === false && isFullscreenWindow(fullscreen, { width: 0, height: 0 }) === false);
+  check('frame 为 null / 缺字段 → false', isFullscreenWindow(null, SCREEN_2944) === false && isFullscreenWindow({ left: 0 }, SCREEN_2944) === false);
+
+  // ── gestureZoneHeight / isInGestureZone ──
+  check('手势区高度上限 80（1840 高 → 80）', gestureZoneHeight(SCREEN_2944) === 80);
+  check('1080 高按 6% → 65', gestureZoneHeight({ width: 1920, height: 1080 }) === 65);
+  check('500 高按 6% → 30', gestureZoneHeight({ width: 900, height: 500 }) === 30);
+  check('屏幕高读不到 → 0', gestureZoneHeight(null) === 0 && gestureZoneHeight({ width: 100, height: 0 }) === 0);
+
+  check('手势区上沿算手势区（y=1760）', isInGestureZone({ x: 1179, y: 1760 }, SCREEN_2944) === true);
+  check('手势区上沿再上一像素就不算（y=1759）', isInGestureZone({ x: 1179, y: 1759 }, SCREEN_2944) === false);
+  check('屏幕最底一行算手势区（y=1839）', isInGestureZone({ x: 0, y: 1839 }, SCREEN_2944) === true);
+  check('屏幕下方（y=1840）不算', isInGestureZone({ x: 0, y: 1840 }, SCREEN_2944) === false);
+  check('真机那次事故的坐标 (1179,1796) 会被拦', isInGestureZone({ x: 1179, y: 1796 }, SCREEN_2944) === true);
+  check('1080 高：y=1015 是手势区、1014 不是', isInGestureZone({ x: 10, y: 1015 }, { width: 1920, height: 1080 }) === true
+    && isInGestureZone({ x: 10, y: 1014 }, { width: 1920, height: 1080 }) === false);
+  check('横向越界不算手势区（交给夹取）', isInGestureZone({ x: 2944, y: 1800 }, SCREEN_2944) === false
+    && isInGestureZone({ x: -1, y: 1800 }, SCREEN_2944) === false);
+  check('屏幕 / 点非法 → false', isInGestureZone(null, SCREEN_2944) === false
+    && isInGestureZone({ x: 1, y: 1800 }, null) === false
+    && isInGestureZone({ x: 'a', y: 1800 }, SCREEN_2944) === false);
+
+  // ── isPointInWindow（左/上闭、右/下开） ──
+  check('窗口内 → true', isPointInWindow({ x: 1500, y: 900 }, floating) === true);
+  check('左上角边界算窗口内', isPointInWindow({ x: 737, y: 0 }, floating) === true);
+  check('右边界（x=2208）已经是窗口外', isPointInWindow({ x: 2208, y: 900 }, floating) === false);
+  check('下边界（y=1840）已经是窗口外', isPointInWindow({ x: 1500, y: 1840 }, floating) === false);
+  check('真机打偏的两点都在窗口外', isPointInWindow({ x: 543, y: 1097 }, floating) === false
+    && isPointInWindow({ x: 455, y: 392 }, floating) === false);
+  check('点 / 矩形非法 → false', isPointInWindow(null, floating) === false && isPointInWindow({ x: 1, y: 1 }, null) === false);
+
+  // ── 话术 ──
+  const outText = outsideWindowText(floating, { x: 543, y: 1097 });
+  check('窗口外话术带矩形', outText.includes('(737,0)-(2208,1840)'), outText);
+  check('窗口外话术带用户给的坐标', outText.includes('(543,1097)'));
+  check('窗口外话术说「落到桌面」', outText.includes('桌面'));
+  const gestureText = gestureZoneText({ x: 1179, y: 1796 }, SCREEN_2944);
+  check('手势区话术带屏幕高与手势区高度', gestureText.includes('1840') && gestureText.includes('80'), gestureText);
+  check('手势区话术给出安全 y（1759）', gestureText.includes('1759'));
+
+  // ── 提示词块里的窗口那句话 ──
+  const windowSnapshot = { ...floating, fullscreen: false };
+  const hint = windowPromptHint(windowSnapshot);
+  check('窗口模式提示带矩形', hint.includes('(737,0)-(2208,1840)'), hint);
+  check('窗口模式提示带尺寸', hint.includes('1471x1840'));
+  check('窗口模式提示说「只在窗口里面点」', hint.includes('只在窗口里面点'));
+  check('全屏 → 一个字都不加', windowPromptHint({ ...fullscreen, fullscreen: true }) === '');
+  check('没有窗口快照 → 空串', windowPromptHint(null) === '' && windowPromptHint(undefined) === '');
+  check('旧快照 / 坏快照 → 空串', windowPromptHint({ left: 737 }) === '' && windowPromptHint({ fullscreen: false }) === '');
+}
+
 // ── 8. deviceBudget ───────────────────────────────────────────────────────
 {
   const cfg = normalizeDeviceConfig({});
@@ -695,6 +863,24 @@ function expectApps(list) {
     TODAY,
   );
   check('提示词块带白名单内容', JSON.stringify(whitelisted.apps) === '["com.a.game"]');
+
+  // 窗口模式（T-026）：MCP 侧写的 state/device-window.json 由桥接读出来当第 4 个参数传进来。
+  const snapshot = { left: 737, top: 0, right: 2208, bottom: 1840, width: 1471, height: 1840, fullscreen: false };
+  const windowBlock = devicePromptBlock(normalizeDeviceConfig({}), createDeviceState(TODAY), TODAY, snapshot);
+  check('窗口模式：hint 补上窗口矩形', windowBlock.hint.includes('窗口在 (737,0)-(2208,1840)'), windowBlock.hint);
+  check('窗口模式：hint 说「只在窗口里面点」', windowBlock.hint.includes('只在窗口里面点'));
+  check('窗口模式：原有的额度那句话还在', windowBlock.hint.includes('今天还剩 30 分钟 / 60 步'));
+  const fullBlock = devicePromptBlock(normalizeDeviceConfig({}), createDeviceState(TODAY), TODAY, { ...snapshot, fullscreen: true });
+  check('全屏应用：hint 一个字都不变', fullBlock.hint === block.hint);
+  check('不传窗口快照：hint 与老行为一致', block.hint === devicePromptBlock(normalizeDeviceConfig({}), createDeviceState(TODAY), TODAY).hint);
+  check('没有窗口信息时 hint 里没有窗口话术', !block.hint.includes('窗口模式'));
+  const windowNoLimit = devicePromptBlock(
+    normalizeDeviceConfig({}),
+    { ...createDeviceState(TODAY), usedMs: 30 * MIN },
+    TODAY,
+    snapshot,
+  );
+  check('额度用完：只说不能玩，不补窗口话术', windowNoLimit.hint.includes('不能玩') && !windowNoLimit.hint.includes('窗口模式'));
 }
 
 // ── 14. defaultRunAdb（不连设备：故意给一个不存在的 adb） ─────────────────

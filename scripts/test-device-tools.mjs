@@ -7,7 +7,8 @@
 // swipe（时长钳制、参数校验、截图宽高） /
 // type（ASCII 编码、中文拒绝、敏感词、超长） / key（back/home 映射） /
 // open_app（白名单、黑名单、包名校验、monkey 报错） / **黑名单前台闸门（五个动作）** /
-// **list_apps（解析/过滤/截断/黑名单标记）** / 记账与不记账 / adb 报错映射 / 工具注册。
+// **list_apps（解析/过滤/截断/黑名单标记）** / **窗口闸门（PC 模式浮窗，T-026）** /
+// 记账与不记账 / adb 报错映射 / 工具注册。
 //
 // 跑法：node scripts/test-device-tools.mjs
 import fs from 'node:fs';
@@ -22,6 +23,7 @@ import {
   DEVICE_SHOT_DIR,
   DEVICE_STATE_FILE,
   DEVICE_TOOL_NAMES,
+  DEVICE_WINDOW_FILE,
   createDeviceTools,
   encodeAdbText,
   parseBattery,
@@ -931,6 +933,198 @@ const YESTERDAY_FULL = { day: '2026-03-14', usedMs: 30 * MIN, steps: 60, lastTs:
   // ⑨ 授权与预算互不替代：额度用完，授权在也照样拒
   const noBudget = await makeEnv({ seed: todayState({ usedMs: 30 * MIN, steps: 60 }) }).tools.deviceTap({ x: 9, y: 9 });
   check('授权在、额度用完 → daily_budget（不是 not_granted）', noBudget.reason === 'daily_budget', noBudget);
+}
+
+// ── 15. 窗口感知（T-026）：PC 模式浮窗只许在窗口里点 ────────────────────────
+// 真机取证（TB375FC / Android 16）：小黑盒在 ZUI PC 模式下是 [737,0]-[2208,1840] 的浮窗，
+// 截图却是整屏 2944x1840。模型照截图给的坐标有两类会出事：窗口外（落到桌面、没反应）与
+// 底部手势区（把 App 切走）。全屏应用（B 站那类）必须一点都不受影响。
+{
+  const PKG = 'com.max.xiaoheihe';
+  const FOCUS = (pkg) => `mCurrentFocus=Window{1a2 u0 ${pkg}/${pkg}.MainActivity}\n`;
+
+  /** 一段 `dumpsys window windows`：给某个包一个窗口矩形。 */
+  function windowDump(pkg, [l, t, r, b]) {
+    return [
+      'WINDOW MANAGER WINDOWS (dumpsys window windows):',
+      `  Window #1 Window{8f2c u0 ${pkg}/${pkg}.MainActivity}:`,
+      '    Frames: containing=[0,0][2944,1840] parent=[0,0][2944,1840] display=[0,0][2944,1840]',
+      `      frame=[${l},${t}][${r},${b}] last=[${l},${t}][${r},${b}]`,
+    ].join('\n');
+  }
+
+  /**
+   * 路由：屏幕按真机横屏 2944x1840；`dumpsys window` 给焦点行、`dumpsys window windows`
+   * 给窗口段。假 adb 是按「命令串包含关键字」路由的，所以同一个 key 要按 argv 分流
+   * （`dumpsys window windows` 也包含 `dumpsys window`，顺序在前者会被后者吃掉）。
+   */
+  function windowRoutes({ focus, win }) {
+    return {
+      'wm size': okReply('Physical size: 2944x1840\n'),
+      'dumpsys window': (argv) => (argv.includes('windows') ? okReply(win) : okReply(focus)),
+    };
+  }
+
+  const FLOATING = windowDump(PKG, [737, 0, 2208, 1840]);
+  const FULLSCREEN = windowDump('com.example.bili', [0, 0, 2944, 1840]);
+
+  // ① 点在窗口外：拒绝、带矩形、不调 adb、不记步
+  const outEnv = makeEnv({ seed: todayState(), routes: windowRoutes({ focus: FOCUS(PKG), win: FLOATING }) });
+  const outTap = await outEnv.tools.deviceTap({ x: 543, y: 1097 });
+  check('窗口模式：窗口外的点被拒（outside_window）', outTap.ok === false && outTap.reason === 'outside_window', outTap);
+  check('窗口外文案带窗口矩形', String(outTap.message).includes('(737,0)-(2208,1840)'), outTap.message);
+  check('窗口外文案带用户给的坐标', String(outTap.message).includes('(543,1097)'));
+  check('窗口外文案说清「落到桌面」', String(outTap.message).includes('桌面'));
+  check('窗口外被拒不调 input tap', outEnv.runAdb.count('input tap') === 0);
+  check('窗口外被拒不记步', (outEnv.readState()?.steps ?? 0) === 0);
+  check('窗口外被拒写动作日志', outEnv.actionLog().includes('outside_window'));
+  check('回执回带窗口矩形（fullscreen:false）', outTap.window?.left === 737 && outTap.window?.fullscreen === false, outTap.window);
+
+  const leftEdgeOut = await makeEnv({
+    seed: todayState(),
+    routes: windowRoutes({ focus: FOCUS(PKG), win: FLOATING }),
+  }).tools.deviceTap({ x: 736, y: 900 });
+  check('窗口左边界再往左 1px 就是窗口外', leftEdgeOut.reason === 'outside_window', leftEdgeOut);
+
+  // ② 点在底部手势区：拒绝、提示往上挪、不调 adb、不记步
+  const gestureEnv = makeEnv({ seed: todayState(), routes: windowRoutes({ focus: FOCUS(PKG), win: FLOATING }) });
+  const gestureTap = await gestureEnv.tools.deviceTap({ x: 1179, y: 1796 });
+  check('窗口模式：手势区被拒（gesture_zone）', gestureTap.ok === false && gestureTap.reason === 'gesture_zone', gestureTap);
+  check('手势区文案说会把应用切走', String(gestureTap.message).includes('切走'));
+  check('手势区文案给出安全 y', String(gestureTap.message).includes('1759'));
+  check('手势区被拒不调 input tap', gestureEnv.runAdb.count('input tap') === 0);
+  check('手势区被拒不记步', (gestureEnv.readState()?.steps ?? 0) === 0);
+  check('手势区被拒写动作日志', gestureEnv.actionLog().includes('gesture_zone'));
+  const zoneTopEnv = makeEnv({ seed: todayState(), routes: windowRoutes({ focus: FOCUS(PKG), win: FLOATING }) });
+  check('手势区上沿 y=1760 就被拒', (await zoneTopEnv.tools.deviceTap({ x: 1500, y: 1760 })).reason === 'gesture_zone');
+  const zoneSafeEnv = makeEnv({ seed: todayState(), routes: windowRoutes({ focus: FOCUS(PKG), win: FLOATING }) });
+  check('手势区上方一像素 y=1759 放行', (await zoneSafeEnv.tools.deviceTap({ x: 1500, y: 1759 })).ok === true);
+
+  // ③ 窗口内：正常下发、正常记步
+  const inEnv = makeEnv({ seed: todayState(), routes: windowRoutes({ focus: FOCUS(PKG), win: FLOATING }) });
+  const inTap = await inEnv.tools.deviceTap({ x: 1500, y: 900 });
+  check('窗口模式：窗口内正常下发', inTap.ok === true, inTap);
+  check('adb 收到窗口内的坐标', inEnv.runAdb.last('input tap')?.line.includes('input tap 1500 900') === true);
+  check('窗口内点击照常记一步', inEnv.readState()?.steps === 1);
+  check('回执 screen 仍是截图坐标空间（整屏）', inTap.screen.width === 2944 && inTap.screen.height === 1840);
+
+  // ④ 全屏应用：行为完全不变（底边、贴边、滑到底部都放行）
+  const fullEnv = makeEnv({ seed: todayState(), routes: windowRoutes({ focus: FOCUS('com.example.bili'), win: FULLSCREEN }) });
+  const bottomTap = await fullEnv.tools.deviceTap({ x: 1179, y: 1796 });
+  check('全屏应用：底部手势区的点照常放行', bottomTap.ok === true, bottomTap);
+  check('全屏应用：adb 真的收到了这一下', fullEnv.runAdb.last('input tap')?.line.includes('input tap 1179 1796') === true);
+  fullEnv.advance(1500);
+  const cornerTap = await fullEnv.tools.deviceTap({ x: 2943, y: 1839 });
+  check('全屏应用：右下角贴边的点也放行', cornerTap.ok === true, cornerTap);
+  fullEnv.advance(1500);
+  const fullSwipe = await fullEnv.tools.deviceSwipe({ x1: 1472, y1: 1700, x2: 1472, y2: 1830 });
+  check('全屏应用：滑到底部手势区也放行', fullSwipe.ok === true, fullSwipe);
+  check('全屏应用：滑动没有被任何窗口闸门改写坐标', fullSwipe.clamped === false && fullSwipe.y2 === 1830);
+
+  // ⑤ 滑动：两个端点都要在窗口里
+  const swipeOutEnv = makeEnv({ seed: todayState(), routes: windowRoutes({ focus: FOCUS(PKG), win: FLOATING }) });
+  const swipeOut = await swipeOutEnv.tools.deviceSwipe({ x1: 1500, y1: 900, x2: 300, y2: 900 });
+  check('窗口模式：滑动终点在窗口外被拒', swipeOut.ok === false && swipeOut.reason === 'outside_window', swipeOut);
+  check('滑动被窗口外拦住时不调 adb', swipeOutEnv.runAdb.count('input swipe') === 0);
+  const swipeGestureEnv = makeEnv({ seed: todayState(), routes: windowRoutes({ focus: FOCUS(PKG), win: FLOATING }) });
+  const swipeGesture = await swipeGestureEnv.tools.deviceSwipe({ x1: 1500, y1: 900, x2: 1500, y2: 1800 });
+  check('窗口模式：滑动终点落在手势区被拒', swipeGesture.ok === false && swipeGesture.reason === 'gesture_zone', swipeGesture);
+  check('手势区滑动被拒也不调 adb', swipeGestureEnv.runAdb.count('input swipe') === 0);
+  const swipeOkEnv = makeEnv({ seed: todayState(), routes: windowRoutes({ focus: FOCUS(PKG), win: FLOATING }) });
+  const swipeOk = await swipeOkEnv.tools.deviceSwipe({ x1: 1500, y1: 1400, x2: 1500, y2: 800 });
+  check('窗口模式：窗口内的滑动正常下发', swipeOk.ok === true, swipeOk);
+  check('窗口内滑动记一步', swipeOkEnv.readState()?.steps === 1);
+
+  // ⑥ fail-open：读不到窗口信息就当不知道，放行（与黑名单闸门同一取舍）
+  const noWinEnv = makeEnv({ seed: todayState(), routes: { 'wm size': okReply('Physical size: 2944x1840\n') } });
+  const noWinTap = await noWinEnv.tools.deviceTap({ x: 543, y: 1097 });
+  check('读不到窗口信息 → 放行（fail-open）', noWinTap.ok === true, noWinTap);
+  const brokenWinEnv = makeEnv({
+    seed: todayState(),
+    routes: windowRoutes({ focus: FOCUS(PKG), win: 'garbage without any window section\n' }),
+  });
+  check('dumpsys 解析不出窗口 → 放行', (await brokenWinEnv.tools.deviceTap({ x: 543, y: 1097 })).ok === true);
+  const adbErrWinEnv = makeEnv({
+    seed: todayState(),
+    routes: {
+      'wm size': okReply('Physical size: 2944x1840\n'),
+      'dumpsys window': (argv) => (argv.includes('windows') ? failReply('error: device offline') : okReply(FOCUS(PKG))),
+    },
+  });
+  const adbErrTap = await adbErrWinEnv.tools.deviceTap({ x: 543, y: 1097 });
+  check('读窗口的 adb 报错也不拦动作（窗口只是加分项）', adbErrTap.ok === true, adbErrTap);
+
+  // ⑦ 读不到屏幕尺寸：窗口外的点照样拒（矩形本身就是证据），手势区不判（算不出来）
+  const noScreenEnv = makeEnv({
+    seed: todayState(),
+    routes: {
+      'wm size': failReply('error: nope'),
+      'dumpsys window': (argv) => (argv.includes('windows') ? okReply(FLOATING) : okReply(FOCUS(PKG))),
+    },
+  });
+  const noScreenOut = await noScreenEnv.tools.deviceTap({ x: 100, y: 900 });
+  check('没有屏幕尺寸时窗口外仍然拒', noScreenOut.ok === false && noScreenOut.reason === 'outside_window', noScreenOut);
+  noScreenEnv.advance(1200);
+  const noScreenBottom = await noScreenEnv.tools.deviceTap({ x: 1500, y: 1796 });
+  check('没有屏幕尺寸时手势区不判（放行）', noScreenBottom.ok === true, noScreenBottom);
+
+  // ⑧ 缓存：2 秒内不重复跑 dumpsys；超过 2 秒重读
+  const cacheEnv = makeEnv({ seed: todayState(), routes: windowRoutes({ focus: FOCUS(PKG), win: FLOATING }) });
+  await cacheEnv.tools.deviceTap({ x: 1500, y: 900 });
+  cacheEnv.advance(1500);
+  await cacheEnv.tools.deviceTap({ x: 1600, y: 900 });
+  check('2 秒内复用窗口矩形（只跑一次 dumpsys）', cacheEnv.runAdb.count('window windows') === 1, cacheEnv.runAdb.count('window windows'));
+  cacheEnv.advance(2100);
+  await cacheEnv.tools.deviceTap({ x: 1700, y: 900 });
+  check('超过 2 秒重新读窗口', cacheEnv.runAdb.count('window windows') === 2, cacheEnv.runAdb.count('window windows'));
+
+  // ⑨ 缓存按包名：切 App 立刻重读，不会拿上一个应用的矩形判这一个
+  let focus = FOCUS(PKG);
+  let win = FLOATING;
+  const switchEnv = makeEnv({
+    seed: todayState(),
+    routes: {
+      'wm size': okReply('Physical size: 2944x1840\n'),
+      'dumpsys window': (argv) => (argv.includes('windows') ? okReply(win) : okReply(focus)),
+    },
+  });
+  await switchEnv.tools.deviceTap({ x: 1500, y: 900 });
+  switchEnv.advance(1200);
+  focus = FOCUS('com.example.bili');
+  win = FULLSCREEN;
+  const switchedTap = await switchEnv.tools.deviceTap({ x: 543, y: 1097 });
+  check('切到全屏应用后立刻按新窗口判（x=543 放行）', switchedTap.ok === true, switchedTap);
+  check('切包后重新读了窗口', switchEnv.runAdb.count('window windows') === 2, switchEnv.runAdb.count('window windows'));
+
+  // ⑩ device_status 的 foregroundWindow + 给 prompt 的快照
+  const statusEnv = makeEnv({ seed: todayState(), routes: windowRoutes({ focus: FOCUS(PKG), win: FLOATING }) });
+  const status = await statusEnv.tools.deviceStatus();
+  check('status 回带 foregroundWindow', status.foregroundWindow?.left === 737, status.foregroundWindow);
+  check('foregroundWindow 标 fullscreen:false', status.foregroundWindow?.fullscreen === false);
+  check('foregroundWindow 带宽高', status.foregroundWindow?.width === 1471 && status.foregroundWindow?.height === 1840);
+  check('foregroundWindow 与 foreground 指向同一个应用', status.foreground === PKG);
+  check('status 的 screen 仍是整屏', status.screen.width === 2944 && status.screen.height === 1840);
+  check('窗口模式不影响 status 的额度与授权', status.ok === true && status.canPlay === true && status.leftSteps === 60);
+
+  const fullStatusEnv = makeEnv({ seed: todayState(), routes: windowRoutes({ focus: FOCUS('com.example.bili'), win: FULLSCREEN }) });
+  const fullStatus = await fullStatusEnv.tools.deviceStatus();
+  check('全屏应用的 foregroundWindow 标 fullscreen:true', fullStatus.foregroundWindow?.fullscreen === true, fullStatus.foregroundWindow);
+
+  const noWinStatus = await makeEnv({ seed: todayState() }).tools.deviceStatus();
+  check('读不到窗口时 foregroundWindow 是 null', noWinStatus.foregroundWindow === null, noWinStatus.foregroundWindow);
+
+  // 给桥接 prompt 用的快照（state/device-window.json）：本模块写、桥接只读
+  const snapshotFile = path.join(statusEnv.dir, DEVICE_WINDOW_FILE);
+  check('status 写下给 prompt 用的窗口快照', fs.existsSync(snapshotFile));
+  const snapshot = JSON.parse(fs.readFileSync(snapshotFile, 'utf8'));
+  check('快照带 package 与矩形', snapshot.package === PKG && snapshot.left === 737 && snapshot.right === 2208, snapshot);
+  check('快照带 fullscreen:false（桥接据此才补那句话）', snapshot.fullscreen === false);
+  const fullSnapshot = JSON.parse(fs.readFileSync(path.join(fullStatusEnv.dir, DEVICE_WINDOW_FILE), 'utf8'));
+  check('全屏应用的快照 fullscreen:true', fullSnapshot.fullscreen === true, fullSnapshot);
+  check('窗口快照不影响步数账本（status 仍是 0 步）', statusEnv.readState()?.steps === 0, statusEnv.readState());
+
+  // ⑪ 窗口闸门不记账：被拒的几下都没有真的动设备
+  check('被窗口闸门拒的几步都没有记账', (outEnv.readState()?.steps ?? 0) === 0 && (gestureEnv.readState()?.steps ?? 0) === 0);
 }
 
 // ── 清理与结果 ──────────────────────────────────────────────────────────────

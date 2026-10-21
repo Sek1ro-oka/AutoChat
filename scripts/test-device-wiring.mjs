@@ -182,7 +182,9 @@ check('device 块在 replyTiming 之前（仍在同一个 payload 里）', lineO
 const deviceBlock = sliceBetween(bridge, 'device: (() => {', 'replyTiming: replyTimingV2(st),');
 check('device 块切片存在', deviceBlock.length > 200, deviceBlock.length);
 check('禁用时短路成 { enabled: false }（整段不注入）', deviceBlock.includes('if (!deviceEnabled) return { enabled: false };'));
-check('现算额度：devicePromptBlock(cfg.device, readDeviceState(), nowMs)', deviceBlock.includes('const block = devicePromptBlock(cfg.device, readDeviceState(), nowMs);'));
+check('现算额度：devicePromptBlock(cfg.device, readDeviceState(), nowMs, 窗口快照)', deviceBlock.includes('const block = devicePromptBlock(cfg.device, readDeviceState(), nowMs, readJsonSafe(DEVICE_WINDOW_FILE, null));'));
+check('窗口快照来自 state/device-window.json（T-026，与 device-tools 的 DEVICE_WINDOW_FILE 同路径）', bridge.includes("const DEVICE_WINDOW_FILE = path.join(STATE_DIR, 'device-window.json');"));
+check('窗口快照只读不写（MCP 写、桥接读）', !bridge.includes('writeFileSync(DEVICE_WINDOW_FILE'));
 check('用 { ...block, tools } 合并（devicePromptBlock 只给 enabled/apps/budget/hint）', deviceBlock.includes('...block,'));
 check('tools 数组是八个工具名', deviceBlock.includes("tools: ['device_status', 'device_screenshot', 'device_tap', 'device_swipe', 'device_type', 'device_key', 'device_open_app', 'device_list_apps']"));
 const promptTools = (deviceBlock.match(/'(device_\w+)'/g) ?? []).map((s) => s.slice(1, -1));

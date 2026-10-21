@@ -314,6 +314,13 @@ const DEVICE_STATE_FILE = path.join(STATE_DIR, 'device-state.json');
 // 这是有意的复位手段。
 const DEVICE_GRANT_STATE_FILE = path.join(STATE_DIR, DEVICE_GRANT_FILE);
 
+// 平板前台窗口快照（T-026）：同样是「MCP 写、桥接只读」，形状
+// { package, at, left, top, right, bottom, width, height, fullscreen }，由 device-tools 在
+// 读 `dumpsys window windows` 时覆盖写。窗口模式（ZUI PC 模式浮窗）下 prompt 的 device 块
+// 靠它说「窗口在 (l,t)-(r,b)，只在窗口里点」—— 模型看截图是整屏，不给矩形就一定会点歪。
+// 路径必须和 MCP 的落盘位置逐字一致（state/device-window.json）。
+const DEVICE_WINDOW_FILE = path.join(STATE_DIR, 'device-window.json');
+
 // ── 生图 / 发图（T-017）：三份落盘位置 + 两个体积上限 ─────────────────────────
 // 图片本体（state/images/）、索引（哪张图在哪个文件）、额度账本（谁在什么时候画了 /
 // 存了 / 换了）刻意分成三份：它们的生命周期不同 —— 账本是「24 小时窗口」的事实来源，
@@ -8751,7 +8758,9 @@ async function main() {
             device: (() => {
               if (!deviceEnabled) return { enabled: false };
               const nowMs = Date.now();
-              const block = devicePromptBlock(cfg.device, readDeviceState(), nowMs);
+              // 窗口快照（T-026）：只读一次文件，窗口模式下 devicePromptBlock 会把它拼进 hint
+              // （全屏 / 读不到 / 旧格式都一个字不加，与 T-025 及以前完全一致）。
+              const block = devicePromptBlock(cfg.device, readDeviceState(), nowMs, readJsonSafe(DEVICE_WINDOW_FILE, null));
               const summary = grantSummary(readDeviceGrant(), nowMs);
               if (!summary.active) {
                 return {

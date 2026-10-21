@@ -607,6 +607,176 @@ export function parseForeground(stdout) {
   return null;
 }
 
+// ── 窗口矩形（PC 模式浮窗，T-026） ──────────────────────────────────────────
+/**
+ * 真机取证（TB375FC / Android 16，2026-10-21）：小黑盒 `com.max.xiaoheihe` 在 ZUI PC 模式下
+ * 是**浮窗** —— `dumpsys window windows` 里 `frame=[737,0]-[2208,1840]`（1471x1840），不是全屏；
+ * 截图却是整屏 2944x1840。模型照截图给坐标，于是点在窗口外（落到桌面层、毫无反应）或点进
+ * 底部手势区（触发导航、把 App 切走）。坐标换算本身没错，错的是「工具不知道目标只是个窗口」。
+ */
+
+// 窗口段头：`  Window #4 Window{8f2c34a u0 com.foo/.Main}:`（也兼容不带 `#N` 的旧格式）。
+// 只认行首的 `Window`（全大写的 `WINDOW MANAGER WINDOWS` 段标题不会命中），且要求后面有 `{`。
+const WINDOW_HEADER_RE = /^\s*Window\b[^\n]*\{/;
+// `Frames:` 这个键：`\b` 天然排除 `mFrames:` / `mLastFrames:`（那两个的 F 前面是单词字符）。
+const WINDOW_FRAMES_RE = /\bFrames:/;
+// 真正的矩形：`frame=[737,0][2208,1840]`（允许空格与负坐标，多屏时 left/top 可以是负的）。
+const WINDOW_FRAME_RE = /frame=\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]/;
+// 老 ROM 没有 `Frames:` 段，只有 `mFrame=[l,t][r,b]`（注意大小写：`mFrame` 的 F 是大写，
+// 上面的 `frame=` 不会误命中它）。
+const WINDOW_OLD_FRAME_RE = /mFrame=\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]/;
+
+/** 手势导航区的高度上限（像素）：底部这一条是系统手势区，点/滑会把应用切走。 */
+const GESTURE_ZONE_MAX_PX = 80;
+/** 手势区高度占屏幕高度的比例（矮屏用比例，免得 80px 吃掉太多可用区域）。 */
+const GESTURE_ZONE_RATIO = 0.06;
+
+/** 四个数字 → 矩形；反向 / 零面积的矩形算解析失败（`null`）。 */
+function toWindowFrame(left, top, right, bottom) {
+  if (![left, top, right, bottom].every((value) => Number.isFinite(value))) return null;
+  if (right <= left || bottom <= top) return null;
+  return { left, top, right, bottom, width: right - left, height: bottom - top };
+}
+
+/**
+ * 在一个窗口段里找矩形：优先 `Frames:` 块，退回老格式 `mFrame=`。
+ *
+ * 为什么不是「只认 Frames: 那一行」：真机上 `Frames:` 行给的是 containing/parent/display，
+ * 真正的窗口矩形在紧接着的下一行（`frame=[...] last=[...]`），所以从 `Frames:` 那一行起
+ * **往后看 3 行**（再多就可能吃到下一段的 `frame=`）。
+ */
+function frameFromWindowBlock(lines) {
+  const framesAt = lines.findIndex((line) => WINDOW_FRAMES_RE.test(line));
+  if (framesAt >= 0) {
+    const end = Math.min(lines.length, framesAt + 3);
+    for (let i = framesAt; i < end; i += 1) {
+      const hit = WINDOW_FRAME_RE.exec(lines[i]);
+      if (hit) return toWindowFrame(Number(hit[1]), Number(hit[2]), Number(hit[3]), Number(hit[4]));
+    }
+  }
+  for (const line of lines) {
+    const hit = WINDOW_OLD_FRAME_RE.exec(line);
+    if (hit) return toWindowFrame(Number(hit[1]), Number(hit[2]), Number(hit[3]), Number(hit[4]));
+  }
+  return null;
+}
+
+/**
+ * 解析 `dumpsys window windows` 的 stdout → 该包窗口的矩形（**永不抛**）。
+ *
+ * 返回 `{ left, top, right, bottom, width, height }`，找不到 / 解析失败返回 `null`：
+ * 窗口信息只是「别点歪」的加分项，绝不能因为一段 dumpsys 看不懂就把点击整个拦下。
+ *
+ * 容错策略（按真机输出逐条对齐）：
+ * - 先按窗口段头切段（`Window #N Window{...}`），只在**段头里能认出这个包**的段里找矩形，
+ *   这样 `mOwnerUid=… package=com.foo` 之类的旁注不会把别人的窗口算进来；
+ * - 同一个包可能有多个窗口（主窗 + 弹窗 + 输入法）：**取最后一个有矩形的段** —— dumpsys 按
+ *   z 序输出，靠后的更靠上，按它判「点在哪」更接近用户看到的那个窗口；
+ * - `Frames:` 里的 `frame=` 优先，老 ROM 退回 `mFrame=`；两处都没有 = 这个包没有可点的窗口
+ *   （例如只剩一个不可见的 surface）→ `null`；
+ * - `right <= left` / `bottom <= top` 的空窗口、非数字、非字符串输入一律 `null`；
+ * - `width = right - left`（真机 `[737,0]-[2208,1840]` 报的就是 1471x1840，右/下是开区间）。
+ */
+export function parseWindowFrame(dumpsysWindowsText, packageName) {
+  const text = typeof dumpsysWindowsText === 'string' ? dumpsysWindowsText : '';
+  const pkg = toText(packageName).trim();
+  if (text.trim() === '' || pkg === '') return null;
+
+  const blocks = [];
+  let current = null;
+  for (const line of text.split(/\r?\n/)) {
+    if (WINDOW_HEADER_RE.test(line)) {
+      if (current) blocks.push(current);
+      current = { header: line, lines: [] };
+    } else if (current) {
+      current.lines.push(line);
+    }
+  }
+  if (current) blocks.push(current);
+
+  let found = null;
+  for (const block of blocks) {
+    // 段头里认包名：`Window{8f2c34a u0 com.max.xiaoheihe/com.max.xiaoheihe.MainActivity}`。
+    // 只做**精确**比较（与 isBlockedApp 同口径）：`com.max.xiaoheihe` 与
+    // `com.max.xiaoheihe.pad` 是两个包，模糊匹配只会把别人的窗口框套在这一步上。
+    if (packageFromFocusText(block.header) !== pkg) continue;
+    const frame = frameFromWindowBlock(block.lines);
+    if (frame) found = frame;
+  }
+  return found;
+}
+
+/**
+ * 这个窗口是不是「全屏」：左上角贴到 (0,0)、右下角覆盖到屏幕右下角即算。
+ *
+ * 右/下留 1px 余量（`>= width - 1`）：`dumpsys` 的 frame 右/下是开区间，个别 ROM 报
+ * `[0,0][2943,1839]` 也还是全屏。屏幕尺寸读不到（`screen` 为 null）时返回 `false` ——
+ * 判不了就按「窗口」处理，后面还有「窗口外的点」这道安全网（全屏应用的矩形本来就覆盖全屏，
+ * 不会被误拒）。
+ */
+export function isFullscreenWindow(frame, screen) {
+  if (!isPlainObject(frame)) return false;
+  const width = toScreenSize(screen?.width);
+  const height = toScreenSize(screen?.height);
+  if (width === null || height === null) return false;
+  const left = toFiniteNumber(frame.left);
+  const top = toFiniteNumber(frame.top);
+  const right = toFiniteNumber(frame.right);
+  const bottom = toFiniteNumber(frame.bottom);
+  if (![left, top, right, bottom].every((value) => Number.isFinite(value))) return false;
+  return left <= 0 && top <= 0 && right >= width - 1 && bottom >= height - 1;
+}
+
+/**
+ * 点是不是落在窗口矩形内（左/上闭、右/下开，与 `dumpsys` 的 frame 语义一致）。
+ *
+ * `width = right - left` 的前提也是这个半开区间：`x === right` 已经是窗口右边的第一个像素，
+ * 属于窗口外。
+ */
+export function isPointInWindow(point, frame) {
+  if (!isPlainObject(point) || !isPlainObject(frame)) return false;
+  const x = toFiniteNumber(point.x);
+  const y = toFiniteNumber(point.y);
+  const left = toFiniteNumber(frame.left);
+  const top = toFiniteNumber(frame.top);
+  const right = toFiniteNumber(frame.right);
+  const bottom = toFiniteNumber(frame.bottom);
+  if (![x, y, left, top, right, bottom].every((value) => Number.isFinite(value))) return false;
+  return x >= left && x < right && y >= top && y < bottom;
+}
+
+/** 底部手势区的高度（像素）：`min(80, round(屏幕高 * 0.06))`；屏幕高读不到给 0。 */
+export function gestureZoneHeight(screen) {
+  const height = toScreenSize(screen?.height);
+  if (height === null) return 0;
+  const byRatio = Math.round(height * GESTURE_ZONE_RATIO);
+  return Math.max(0, Math.min(GESTURE_ZONE_MAX_PX, byRatio));
+}
+
+/**
+ * 点是不是落在**底部手势区**（屏幕最下面那一条系统手势导航区）。
+ *
+ * 真机 2944x1840 上 `min(80, round(1840*0.06)=110) = 80`，于是 y ∈ [1760, 1839] 都算手势区：
+ * 验收时 (1179,1796) 就是这样把小黑盒切走的。矮屏按 6% 收缩（1080 高 → 65px），
+ * 免得 80px 在小平板上吃掉太多可点区域。
+ *
+ * 只看 y（手势条横贯整屏宽）；x 不在屏幕内返回 false —— 横向越界由 clampPoint 负责，
+ * 不该在这里被解释成「手势区」。
+ */
+export function isInGestureZone(point, screen) {
+  if (!isPlainObject(point)) return false;
+  const width = toScreenSize(screen?.width);
+  const height = toScreenSize(screen?.height);
+  if (width === null || height === null) return false;
+  const x = toFiniteNumber(point.x);
+  const y = toFiniteNumber(point.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+  if (x < 0 || x >= width) return false;
+  const zone = gestureZoneHeight(screen);
+  if (zone < 1) return false;
+  return y >= height - zone && y <= height - 1;
+}
+
 // ── 状态 ────────────────────────────────────────────────────────────────────
 /**
  * 状态字段级兜底：`parseDeviceState` / `deviceBudget` / `recordStep` / `serializeDeviceState`
@@ -862,6 +1032,68 @@ export function blockedOpenText(pkg) {
   return `${shown}在黑名单里，永远不由我打开（黑名单是内置的，改配置也删不掉）。`;
 }
 
+/** 坐标 / 尺寸转文本：非数字给 `?`，避免话术里出现 `NaN` 或 `undefined`（坐标可以是负数）。 */
+function numText(value) {
+  const n = toFiniteNumber(value);
+  return Number.isFinite(n) ? String(Math.trunc(n)) : '?';
+}
+
+/** 窗口矩形的短写法：`(737,0)-(2208,1840)`（话术与提示词块共用，格式不会漂）。 */
+function windowRectText(frame) {
+  const left = toFiniteNumber(frame?.left);
+  const top = toFiniteNumber(frame?.top);
+  const right = toFiniteNumber(frame?.right);
+  const bottom = toFiniteNumber(frame?.bottom);
+  if (![left, top, right, bottom].every((value) => Number.isFinite(value))) return '';
+  return `(${Math.trunc(left)},${Math.trunc(top)})-(${Math.trunc(right)},${Math.trunc(bottom)})`;
+}
+
+/**
+ * 点在窗口外 → 一句话（工具层原样回给模型）。
+ *
+ * 必须说清「不是坐标算错了，是这个应用只占一块」：模型收到 `outside_window` 之后最容易犯的错
+ * 是「同一个点再点一次」或「往左挪 50px 再试」，而那两种都还是窗口外。
+ */
+export function outsideWindowText(frame, point) {
+  const rect = windowRectText(frame) || '(未知)';
+  const size = isPlainObject(frame) ? `${numText(frame.width)}x${numText(frame.height)}` : '';
+  return `这个应用是窗口模式（浮窗），窗口在 ${rect}${size === '' ? '' : `（${size}）`} 之内；`
+    + `你要点的 (${numText(point?.x)},${numText(point?.y)}) 在窗口外面 —— 点下去会落到桌面层，什么都不会发生。`
+    + '先截图看清窗口的范围，只在窗口里面点。';
+}
+
+/** 点落在底部手势区 → 一句话（提示把 y 往上挪，别把应用切走）。 */
+export function gestureZoneText(point, screen) {
+  const height = toScreenSize(screen?.height) ?? 0;
+  const zone = gestureZoneHeight(screen);
+  const safeY = Math.max(0, height - zone - 1);
+  return `(${numText(point?.x)},${numText(point?.y)}) 落在屏幕底部的手势导航区`
+    + `（屏幕高 ${height}，最下面 ${zone} 像素是系统手势区）：`
+    + '在这一条里点或滑会触发手势导航，把应用切走。把 y 往上挪到 '
+    + `${safeY} 以内再点。`;
+}
+
+/**
+ * 窗口模式下给 prompt 补的一句话（全屏 / 读不到窗口时返回空串）。
+ *
+ * 入参就是 MCP 侧写在 `state/device-window.json` 里的那份快照（桥接只读）。只认
+ * `fullscreen === false` 的**明确窗口模式**：`true`（全屏）与「没有这个字段」（旧快照 /
+ * 写失败）都当全屏，绝不因为一个坏字段就往提示词里塞一句假话。
+ */
+export function windowPromptHint(window) {
+  if (!isPlainObject(window)) return '';
+  if (window.fullscreen !== false) return '';
+  const rect = windowRectText(window);
+  if (rect === '') return '';
+  const width = toFiniteNumber(window.width);
+  const height = toFiniteNumber(window.height);
+  const size = Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
+    ? `（${Math.trunc(width)}x${Math.trunc(height)}）`
+    : '';
+  return `这个应用现在是窗口模式（浮窗），窗口在 ${rect}${size}之间，只在窗口里面点/滑：`
+    + '窗口外的点会落到桌面层、不会有任何反应；屏幕最底下一条是系统手势区，碰了会把应用切走。';
+}
+
 /**
  * 提示词块：桥接把它拼进系统提示，模型才知道「我现在有手有眼、还能玩多久」。
  *
@@ -869,19 +1101,26 @@ export function blockedOpenText(pkg) {
  * - 否则给 `apps` 白名单（空数组 = 不限制包名）、`blocked` 黑名单（内核永远在里面）、
  *   当日剩余额度、一句行为约束。`leftMinutes` 用 **ceil**（还能玩 29 分 10 秒 → 说 30 分钟，
  *   乐观但不撒谎），`leftSteps` 精确到步。
+ * - `window`（可选，T-026）是 MCP 侧写在 `state/device-window.json` 的前台窗口快照：
+ *   只有**明确是窗口模式**（`fullscreen === false`，如小黑盒 PC 模式浮窗 [737,0]-[2208,1840]）
+ *   时才在 hint 末尾补一句「窗口在 (l,t)-(r,b)，只在窗口里点」；全屏应用与旧快照一字不改。
  */
-export function devicePromptBlock(cfg, state, now) {
+export function devicePromptBlock(cfg, state, now, window = null) {
   const config = normalizeDeviceConfig(cfg);
   if (!config.enabled) return { enabled: false };
 
   const budget = deviceBudget(state, config, now);
   const leftMinutes = Math.ceil(budget.leftMs / MINUTE_MS);
+  // 窗口模式那半句只加在「现在能玩」这一支：不能玩时说的是「为什么不能玩」，再补一句窗口
+  // 只会把真正的原因挤到后面。
+  const windowHint = budget.ok ? windowPromptHint(window) : '';
   const hint = budget.ok
     ? `想玩平板就自己玩一会儿：一次只做一步，做完先截图看效果。只玩不越界（不改系统设置、不装/卸应用、`
       + `不支付、不登录、不删东西）；中文打不了字，用点击代替打字。`
       + '支付宝、微信、QQ、Play 商店、系统设置这类界面一出现，任何动作都会被拒（等它被切走再继续）；'
       + '万一自己撞进去了，唯一能自救的动作是 device_key home（只回桌面，不碰里面的东西；back 不行）。'
       + `今天还剩 ${leftMinutes} 分钟 / ${budget.leftSteps} 步。`
+      + windowHint
     : `现在不能玩平板：${budgetReasonText(budget.reason, budget)}`;
   return {
     enabled: true,
