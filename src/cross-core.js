@@ -27,16 +27,27 @@ export const CROSS_MAX_LIMIT = 200;
 export const CROSS_DEFAULT_SINCE_MS = 24 * 60 * 60 * 1000;
 
 /** 出厂配置。`enabled: true` 是用户明确要的（clarify 里「出厂就开」）。 */
-export const CROSS_DEFAULTS = Object.freeze({ enabled: true, bufferPerConversation: 500 });
+export const CROSS_DEFAULTS = Object.freeze({
+  enabled: true,
+  bufferPerConversation: 500,
+  // T-020：prompt 里自动带上的「同组最近消息」。5 条 × 2 小时是用户拍板的默认值
+  // （够看清刚才聊了什么，又不至于把整段历史灌进上下文）；设 0 等于关掉自动带。
+  recentPerKey: 5,
+  recentHours: 2
+});
 
 /**
  * 各项合法区间：`bufferPerConversation` 50–2000（50 是「至少能翻几条」的下限，
  * 2000 是「一个会话的文件别把内存撑爆」的上限）；`limit` 1–200。
+ * `recentPerKey` 0–20 / `recentHours` 0–72：0 都表示「不在 prompt 里自动带」，
+ * 上限防手滑写出一个把整个缓冲灌进上下文的配置。
  * 超界一律钳制，不报错 —— 配置是用户手写的，写错不该让服务起不来。
  */
 export const CROSS_LIMITS = Object.freeze({
   bufferPerConversation: Object.freeze([50, 2000]),
-  limit: Object.freeze([1, CROSS_MAX_LIMIT])
+  limit: Object.freeze([1, CROSS_MAX_LIMIT]),
+  recentPerKey: Object.freeze([0, 20]),
+  recentHours: Object.freeze([0, 72])
 });
 
 // 会话 key 的唯一合法形态（与 src/diary-store.js:15-23、social-v2.json 的 conversations 一致）。
@@ -205,6 +216,8 @@ export function normalizeCrossConfig(raw) {
       CROSS_DEFAULTS.bufferPerConversation,
       CROSS_LIMITS.bufferPerConversation
     ),
+    recentPerKey: clampIntTo(source.recentPerKey, CROSS_DEFAULTS.recentPerKey, CROSS_LIMITS.recentPerKey),
+    recentHours: clampIntTo(source.recentHours, CROSS_DEFAULTS.recentHours, CROSS_LIMITS.recentHours),
     groups
   };
 }

@@ -122,6 +122,20 @@ check('buffer 小数向下取整、数字字符串被接受、坏值回落 500',
   && normalizeCrossConfig({ bufferPerConversation: 'x' }).bufferPerConversation === 500
   && normalizeCrossConfig({ bufferPerConversation: Number.POSITIVE_INFINITY }).bufferPerConversation === 500);
 
+// T-020：prompt 自动带同组最近消息的两个旋钮（默认 5 条 / 2 小时，0 表示关掉）。
+check('recentPerKey 默认 5、边界 0/20、坏值回落',
+  normalizeCrossConfig({}).recentPerKey === 5
+  && normalizeCrossConfig({ recentPerKey: 0 }).recentPerKey === 0
+  && normalizeCrossConfig({ recentPerKey: 21 }).recentPerKey === 20
+  && normalizeCrossConfig({ recentPerKey: -3 }).recentPerKey === 0
+  && normalizeCrossConfig({ recentPerKey: 'x' }).recentPerKey === 5);
+check('recentHours 默认 2、边界 0/72、坏值回落',
+  normalizeCrossConfig({}).recentHours === 2
+  && normalizeCrossConfig({ recentHours: 0 }).recentHours === 0
+  && normalizeCrossConfig({ recentHours: 100 }).recentHours === 72
+  && normalizeCrossConfig({ recentHours: -1 }).recentHours === 0
+  && normalizeCrossConfig({ recentHours: null }).recentHours === 2);
+
 const cfgGroups = normalizeCrossConfig({
   groups: {
     'group:119212385': 2,

@@ -10,7 +10,8 @@
 //   ③ 四个写入钩子都调用 recordCrossMessage（且传的是截断前原文）；
 //   ④ 三个端点存在、鉴权分工正确（写端点进 adminOnlyV2Paths，recall 不进）；
 //   ⑤ recall 的 gid=0 返回 200 空结果 + 「没有找到」，限流是 5 分钟 3 次 / 429；
-//   ⑥ prompt 的 cross 块只有 key/label/count/lastAt，不含正文；唤醒提示阈值 ≥2 / ≥3。
+//   ⑥ prompt 的 cross 块：元数据 + T-020 的「同组最近几条正文」（带出处、按时间正序），
+//      gid 0 不共享；唤醒提示阈值 ≥2 / ≥3。
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -240,17 +241,29 @@ console.log('\n── 组六：prompt 元数据与唤醒提示 ─────�
 
 const promptBlock = sliceBetween(bridge, 'cross: (() => {', 'replyTiming: replyTimingV2');
 check('prompt 有 cross 字段', promptBlock !== '');
-check('prompt cross 含 enabled/group/others/hint',
+check('prompt cross 含 enabled/group/others/recent/hint',
   promptBlock.includes('enabled: true') && promptBlock.includes('group: gid')
-  && promptBlock.includes('others,') && promptBlock.includes('hint:'));
-check('prompt others 只映射 key/label/count/lastAt',
-  promptBlock.includes('key: o.key') && promptBlock.includes('label: humanKeyLabel(o.key)')
+  && promptBlock.includes('others,') && promptBlock.includes('recent,') && promptBlock.includes('hint:'));
+check('prompt others 只映射 key/label/count/lastAt，label 走名字表',
+  promptBlock.includes('key: o.key') && promptBlock.includes('identityKey(identityState, k)?.label')
   && promptBlock.includes('count: o.count') && promptBlock.includes('lastAt: o.lastAt'));
-check('prompt cross 不含消息正文（无 text 字段）',
-  !/text\s*:/.test(promptBlock) && !promptBlock.includes('o.text') && !promptBlock.includes('.text'));
+check('prompt recent 带正文但只取同组最近 N 条：字段 key/label/ts/from/text',
+  promptBlock.includes('recentPerKey') && promptBlock.includes('recentHours')
+  && promptBlock.includes('slice(-recentPerKey)')
+  && promptBlock.includes('key: other.key') && promptBlock.includes('label: other.label')
+  && promptBlock.includes('ts: Number(e.ts) || 0') && promptBlock.includes('from: fromLabel')
+  && promptBlock.includes('text: String(e.text ?? \'\').slice(0, 200)'));
+check('私聊入站的泛称 sender 换成名字表里的名字',
+  promptBlock.includes("rawFrom === '私聊'") && promptBlock.includes('identityKey(identityState, e.fromQq')
+  && promptBlock.includes('from: fromLabel'));
+check('prompt recent 按时间正序（旧→新）', promptBlock.includes('recent.sort((a, b) => a.ts - b.ts)'));
+check('prompt 正文只来自同组成员（不跨组泄漏）',
+  promptBlock.includes('crossStore.conversations[other.key]')
+  && promptBlock.includes('if (!cfg.socialV2?.cross?.enabled || gid <= 0) return { enabled: false }'));
 check('gid<=0 / disabled 时 enabled:false',
   promptBlock.includes('return { enabled: false }'));
-check('prompt hint 指向 qq_recall', promptBlock.includes('要回忆细节用 qq_recall'));
+check('prompt hint 同时指向 qq_recall 与「同组互发不需要额外权限」',
+  promptBlock.includes('用 qq_recall 查') && promptBlock.includes('同组互发不需要额外权限'));
 
 const hintFn = extractFunction(bridge, 'function buildCrossHintLineV2(');
 check('buildCrossHintLineV2 存在', hintFn !== '');
@@ -278,6 +291,21 @@ check('saveSocialV2State 持久化三个新字段',
   bridge.includes('wakeSeq: st.wakeSeq || 0,')
   && bridge.includes('crossHintTs: st.crossHintTs || 0,')
   && bridge.includes('crossHintWake: st.crossHintWake || 0,'));
+
+// ── 组七：工具清单（T-020 现场根因） ────────────────────────────────────────
+console.log('\n── 组七：互通/名字表/情绪上报必须出现在 enabledTools ──────');
+
+check('toolMap 登记 recall / lookup / affectReport',
+  bridge.includes("recall: 'qq_recall'")
+  && bridge.includes("lookup: 'qq_lookup'")
+  && bridge.includes("affectReport: 'qq_affect_report'"));
+check('三个工具各自跟总开关走（关掉不列进清单）',
+  bridge.includes("const crossEnabled = cfg.socialV2?.cross?.enabled !== false;")
+  && bridge.includes("const identityEnabled = cfg.socialV2?.identity?.enabled !== false;")
+  && bridge.includes("const affectEnabled = cfg.socialV2?.affect?.enabled !== false;")
+  && bridge.includes("!(flag === 'recall' && !crossEnabled)")
+  && bridge.includes("!(flag === 'lookup' && !identityEnabled)")
+  && bridge.includes("!(flag === 'affectReport' && !affectEnabled)"));
 
 console.log(`\n结果：${passed}/${passed + failures.length} passed`);
 if (failures.length) {

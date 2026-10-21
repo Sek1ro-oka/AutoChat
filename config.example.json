@@ -384,6 +384,8 @@
     "cross": {
       "enabled": true,
       "bufferPerConversation": 500,
+      "recentPerKey": 5,
+      "recentHours": 2,
       "groups": {}
     },
     "identity": {

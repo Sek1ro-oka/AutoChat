@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+### 同组消息自动进上下文 + 补齐工具清单（2026-10-21，T-020）
+
+- **修好「私聊读不进群聊消息」**：prompt 的 `enabledTools` 之前漏登记 `qq_recall` / `qq_lookup` / `qq_affect_report`，模型看不到能力清单里的检索工具，只能说「读不到别处的消息」。现在三项按各自总开关（`socialV2.cross` / `socialV2.identity` / `socialV2.affect`）出现在清单里。
+- **同组消息自动带上**：`GET /api/socialV2/prompt` 的 `cross` 块新增 `recent`——同一互通编号的其它会话最近消息（每个会话默认 5 条、只取 2 小时内），每条带 `key`/`label`/`ts`/`from`/`text`（正文截 200 字），按时间正序。只列同组，编号 `0` 仍然一个字都不给。
+- **出处用名字不用号码**：`others`/`recent` 的 `label` 走名字映射表（`群名（群 123…）` / `昵称（QQ 456…）`），查不到才回退号码。
+- **新配置**：`socialV2.cross.recentPerKey`（0–20，默认 5，`0` = 不在 prompt 里带）、`socialV2.cross.recentHours`（0–72，默认 2）。
+- 跨会话发送不受影响：同编号互发仍然可用（`agentTokenCoversSend`），不同编号/`0` 仍然 403。
+
 ### 暂停生图渠道（2026-10-21）
 
 - 新增细分开关 `socialV2.images.generateEnabled`（缺省 `true`）：设为 `false` 只停 `qq_draw_image`，发图 / 存表情 / 换头像三条腿继续可用（换头像仍可吃收藏表情或图片链接）。

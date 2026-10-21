@@ -8298,7 +8298,13 @@ async function main() {
             drawImage: 'qq_draw_image',
             sendImage: 'qq_send_image',
             saveSticker: 'qq_save_sticker',
-            setAvatar: 'qq_set_avatar'
+            setAvatar: 'qq_set_avatar',
+            // 跨会话互通（T-016 / T-018 / T-020）：模型必须**在清单里看到**这三个工具，
+            // 否则它只会说「我读不到群消息」——T-020 的现场就是这么来的：能力都在，
+            // 清单里没登记，模型不知道能查。总开关分别是 cross / identity / affect。
+            recall: 'qq_recall',
+            lookup: 'qq_lookup',
+            affectReport: 'qq_affect_report'
           };
           const tools = cfg.socialV2?.tools ?? {};
           const stickerToolFlags = new Set(['listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker']);
@@ -8314,9 +8320,14 @@ async function main() {
           // 生图单独一档：渠道质量不行时只关 qq_draw_image，发图 / 存表情 / 换头像
           // 三条腿继续出现在清单里（换头像还可以吃链接或收藏表情）。
           const drawEnabled = imagesEnabled && cfg.socialV2?.images?.generateEnabled !== false;
+          // 互通 / 名字表 / 情绪上报三个工具各自跟总开关走：关掉的那一档不列进清单，
+          // 免得模型对着 403 反复试。
+          const crossEnabled = cfg.socialV2?.cross?.enabled !== false;
+          const identityEnabled = cfg.socialV2?.identity?.enabled !== false;
+          const affectEnabled = cfg.socialV2?.affect?.enabled !== false;
           const enabledTools = [];
           for (const [flag, name] of Object.entries(toolMap)) {
-            if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled()) && !(profileToolFlags.has(flag) && !profileEnabled) && !(imageToolFlags.has(flag) && (!imagesEnabled || (flag === 'drawImage' && !drawEnabled)))) enabledTools.push(name);
+            if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled()) && !(profileToolFlags.has(flag) && !profileEnabled) && !(imageToolFlags.has(flag) && (!imagesEnabled || (flag === 'drawImage' && !drawEnabled))) && !(flag === 'recall' && !crossEnabled) && !(flag === 'lookup' && !identityEnabled) && !(flag === 'affectReport' && !affectEnabled)) enabledTools.push(name);
           }
           sendJson({
             ok: true,
@@ -8407,9 +8418,11 @@ async function main() {
               }
               return identityPromptBlock(identityStateNow(), key, { speakers, speakerLimit: 8 });
             })(),
-            // 跨会话互通（T-016）：只给「同组还有谁、各有几条、最后一条何时」的元数据。
-            // **绝不**把别的会话的消息正文塞进 prompt —— 那会让当前对话的第三方内容
-            // 无提示地泄漏；要看细节让模型自己调 qq_recall（带出处提示，且有频率上限）。
+            // 跨会话互通（T-016 / T-020）：同组的会话既能互发，也能互看。
+            // T-020 起按用户要求把「同组最近几条正文」直接列进 prompt：只限同一互通编号
+            // （gid 0 = 不共享，等于关闭），每条都带出处（哪个会话、谁说的、什么时候），
+            // 更早或更细的仍要模型自己调 qq_recall（带频率上限）。
+            // 标签走名字映射表（T-018）：群名/好友名比裸号码好认，查不到才回退号码。
             cross: (() => {
               const groups = cfg.socialV2?.cross?.groups ?? {};
               const gid = groupOf(groups, key);
@@ -8418,13 +8431,46 @@ async function main() {
               // 所以先把同组成员读进 store（loadCrossChannel 有 20 个会话的 LRU 缓存）。
               for (const member of membersOf(groups, gid)) loadCrossChannel(member);
               const idx = crossIndex(crossStore, { key, groups, gid, now: Date.now() });
-              const others = idx.others.map((o) => ({ key: o.key, label: humanKeyLabel(o.key), count: o.count, lastAt: o.lastAt }));
+              const identityState = identityStateNow();
+              const labelOfKey = (k) => identityKey(identityState, k)?.label || humanKeyLabel(k);
+              const others = idx.others.map((o) => ({ key: o.key, label: labelOfKey(o.key), count: o.count, lastAt: o.lastAt }));
+              const recentPerKey = Math.max(0, Number(cfg.socialV2?.cross?.recentPerKey ?? 5));
+              const recentHours = Math.max(0, Number(cfg.socialV2?.cross?.recentHours ?? 2));
+              const recent = [];
+              if (recentPerKey > 0 && recentHours > 0) {
+                const since = Date.now() - recentHours * 3600_000;
+                for (const other of others) {
+                  const entries = crossStore.conversations[other.key]?.entries ?? [];
+                  const slice = entries.filter((e) => Number(e?.ts) >= since).slice(-recentPerKey);
+                  for (const e of slice) {
+                    // 私聊入站的 sender 常常只有「私聊」这种泛称；有 QQ 号就换成名字表里的
+                    // 名字（`private:<qq>`），否则模型看到的是一串没有主语的「私聊：…」。
+                    const rawFrom = String(e.from ?? '').trim();
+                    const genericFrom = rawFrom === '' || rawFrom === '私聊' || rawFrom === '群聊';
+                    const fromLabel = e.isSelf
+                      ? '我'
+                      : (genericFrom
+                        ? (identityKey(identityState, e.fromQq ? `private:${String(e.fromQq)}` : '')?.name || rawFrom || '对方')
+                        : rawFrom);
+                    recent.push({
+                      key: other.key,
+                      label: other.label,
+                      ts: Number(e.ts) || 0,
+                      from: fromLabel,
+                      text: String(e.text ?? '').slice(0, 200)
+                    });
+                  }
+                }
+                // 时间正序：模型读起来就是「刚才发生了什么」，不会把新旧颠倒。
+                recent.sort((a, b) => a.ts - b.ts);
+              }
               return {
                 enabled: true,
                 group: gid,
                 others,
+                recent,
                 hint: others.length
-                  ? '同组还有其它会话；要回忆细节用 qq_recall，不必每轮都查。'
+                  ? 'recent 是同组其它会话最近的消息（带出处，已经在眼前）；要更早或更细的用 qq_recall 查；要说话就用带 key 的发送工具，同组互发不需要额外权限。'
                   : '这个会话暂时没有和别的会话互通。'
               };
             })(),
