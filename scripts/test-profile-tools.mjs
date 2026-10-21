@@ -202,6 +202,24 @@ for (const p of ['/api/avatar', '/api/socialV2/profile', '/api/socialV2/profile/
   check(`bridge 有 '${p}' 端点`, bridge.includes(`url.pathname === '${p}'`));
 }
 
+// ── 组七：模型怎么知道有这几个工具（提示词可发现性） ──────────────────────
+// 事故背景：桥接和 MCP 都升级了，但 DSH 里常驻的 MCP 子进程还是旧的（没有新工具），
+// 模型于是说「找不到按钮」。工具本身有描述，可发现性靠 qq_get_prompt 的 payload 兜底：
+// 提示词里必须直接点名这四个工具，并把「不用问 owner」写清楚。
+console.log('── 组七：提示词里点名资料工具 ──────────────────────────────');
+for (const [flag, name] of [['getProfile', 'qq_get_profile'], ['setNickname', 'qq_set_nickname'], ['setSignature', 'qq_set_signature'], ['setGroupCard', 'qq_set_group_card']]) {
+  check(`toolMap 把 ${flag} 映到 ${name}`, bridge.includes(`${flag}: '${name}'`));
+}
+check('profile.enabled === false 时四个工具从 enabledTools 消失（不是只拒调用）',
+  bridge.includes("const profileToolFlags = new Set(['getProfile', 'setNickname', 'setSignature', 'setGroupCard']);")
+  && bridge.includes('!(profileToolFlags.has(flag) && !profileEnabled)'));
+const profilePrompt = sliceBetween(bridge, '            profile: (() => {', '            replyTiming: replyTimingV2(st)');
+check('prompt payload 有独立 profile 块', profilePrompt.length > 0, profilePrompt.slice(0, 120));
+check('profile 块点名四个工具', ['qq_get_profile', 'qq_set_nickname', 'qq_set_signature', 'qq_set_group_card'].every((n) => profilePrompt.includes(n)));
+check('profile 块写明「自己想改就改，不用问谁」', profilePrompt.includes('自己想改就改，不用问谁'));
+check('profile 块的额度从配置推导（不写死 4/5）',
+  profilePrompt.includes('profile?.nickname?.windowHours') && profilePrompt.includes('profile?.nickname?.windowCap'));
+
 console.log(`\n结果：${passed}/${passed + failures.length} passed`);
 if (failures.length > 0) {
   console.log('失败项：');

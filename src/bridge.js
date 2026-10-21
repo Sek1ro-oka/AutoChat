@@ -7216,13 +7216,23 @@ async function main() {
             stickerNote: 'qq_sticker_note',
             collectSticker: 'qq_collect_sticker',
             getSelfImage: 'qq_get_self_image',
-            sendVoice: 'qq_send_voice / qq_list_voices'
+            sendVoice: 'qq_send_voice / qq_list_voices',
+            // 自我资料（T-014）：模型看自己的资料、改昵称/签名/群名片。总开关是
+            // socialV2.profile.enabled，`socialV2.tools.<flag> === false` 只是单工具软开关。
+            getProfile: 'qq_get_profile',
+            setNickname: 'qq_set_nickname',
+            setSignature: 'qq_set_signature',
+            setGroupCard: 'qq_set_group_card'
           };
           const tools = cfg.socialV2?.tools ?? {};
           const stickerToolFlags = new Set(['listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker']);
+          // 改资料功能整体关掉时，四个工具**从工具清单里消失**（不是只把调用拒掉）：
+          // 模型看不到就不会去试，省得它对着 403 反复调。
+          const profileToolFlags = new Set(['getProfile', 'setNickname', 'setSignature', 'setGroupCard']);
+          const profileEnabled = cfg.socialV2?.profile?.enabled !== false;
           const enabledTools = [];
           for (const [flag, name] of Object.entries(toolMap)) {
-            if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled())) enabledTools.push(name);
+            if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled()) && !(profileToolFlags.has(flag) && !profileEnabled)) enabledTools.push(name);
           }
           sendJson({
             ok: true,
@@ -7249,6 +7259,22 @@ async function main() {
               reportTool: 'qq_affect_report',
               hint: '情绪上报：qq_affect_report（不保证会发说说）'
             },
+            // 自我资料（T-014 / T-015）：模型每次拉 prompt 都能看到「这些是本能的动作」，
+            // 不用等谁给按钮、也不用问 owner —— 改不改由它自己决定，额度由桥接判。
+            profile: (() => {
+              if (!profileEnabled) return { enabled: false };
+              const hours = Number(cfg.socialV2?.profile?.nickname?.windowHours) || 4;
+              const cap = Number(cfg.socialV2?.profile?.nickname?.windowCap) || 5;
+              return {
+                enabled: true,
+                self: {
+                  nickname: selfDisplayName || null,
+                  userId: selfUserId || null
+                },
+                tools: ['qq_get_profile', 'qq_set_nickname', 'qq_set_signature', 'qq_set_group_card'],
+                hint: `改自己的资料：qq_set_nickname / qq_set_signature / qq_set_group_card，看自己：qq_get_profile。${hours} 小时内最多 ${cap} 次、两次之间至少 60 秒；自己想改就改，不用问谁。`
+              };
+            })(),
             replyTiming: replyTimingV2(st),
             unreadCount: st.unread.length,
             recentCount: st.recentMessages.length,
