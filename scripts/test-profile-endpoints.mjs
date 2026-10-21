@@ -49,6 +49,27 @@ function sendBlockBefore(text, marker) {
   const start = text.lastIndexOf('sendJson({', end);
   return start < 0 ? '' : text.slice(start, end + marker.length);
 }
+/**
+ * 从 `functionName(` 的声明处切出整个函数源码（花括号配平）。
+ *
+ * 为什么要抠源码：profileWaitText / sameProfileValue 这些 helper 定义在
+ * startConsoleServer 的闭包里，模块级没法 import；但它们是纯函数，把源码取出来
+ * 用 new Function 跑一遍就能做真断言，而不是只对着字符串猜。模板串里的 `${x}`
+ * 花括号成对出现，配平计数不受影响。
+ */
+function extractFunction(text, header) {
+  const start = text.indexOf(header);
+  if (start < 0) return '';
+  let depth = 0;
+  for (let i = text.indexOf('{', start); i >= 0 && i < text.length; i += 1) {
+    if (text[i] === '{') depth += 1;
+    else if (text[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return '';
+}
 
 const bridge = read('src/bridge.js');
 
@@ -178,6 +199,30 @@ for (const field of ['reason: quota.reason', 'retryAfterMs: quota.retryAfterMs',
 }
 check('quotaFor 带 groupId（群名片按群记账）', handleBody.includes("kind === 'groupCard' ? groupId : undefined"));
 
+// 429 文案的时长格式化：真机 smoke 抓到过「约 23 小时 60 分」——ceil 只能进到 59 分，
+// 满 60 必须再进一位成小时。这里把 profileWaitText 的源码抠出来真跑一遍：
+// 它是纯函数（只碰 Math），从 bridge 源码里 eval 出来不影响任何运行态。
+const waitText = extractFunction(bridge, 'function profileWaitText(');
+let profileWaitText;
+try {
+  profileWaitText = new Function(`${waitText}\nreturn profileWaitText;`)();
+} catch {
+  profileWaitText = undefined;
+}
+check('profileWaitText 满 60 分时进位到小时（不出现「X 小时 60 分」）',
+  waitText.includes('if (minutes >= 60) { hours += 1; minutes = 0; }'));
+check('profileWaitText 的 hours/minutes 可进位（let 而非 const）',
+  /\blet hours = Math\.floor/.test(waitText) && /\blet minutes = Math\.ceil/.test(waitText));
+if (typeof profileWaitText === 'function') {
+  check('profileWaitText(86399993) → 24 小时', profileWaitText(86399993) === '24 小时', profileWaitText(86399993));
+  check('profileWaitText(21599581) → 6 小时', profileWaitText(21599581) === '6 小时', profileWaitText(21599581));
+  check('profileWaitText(45000) → 1 分钟', profileWaitText(45000) === '1 分钟', profileWaitText(45000));
+  check('profileWaitText(0) → 空串', profileWaitText(0) === '');
+  check('任何取值都不含「60 分」', [1, 59999, 3599999, 86399993, 86400000].every((ms) => !profileWaitText(ms).includes('60 分')));
+} else {
+  check('profileWaitText 能从 bridge 源码里取出并执行', false);
+}
+
 // ⑤ 读旧值：失败不阻断（degraded:true，oldValue 记空串）。
 check('旧值读不到时 degraded = true 且不阻断', handleBody.includes('degraded = true') && handleBody.includes("oldValue = ''"));
 check('昵称/签名旧值走 readProfileInfo（get_stranger_info）',
@@ -189,8 +234,14 @@ check('成功响应按需带 degraded:true', handleBody.includes('...(degraded ?
 // ⑥ OneBot：三个 action 名必须与 research.md 一致。
 check("昵称调 set_qq_profile { nickname }", handleBody.includes("profileOneBot('set_qq_profile', { nickname: target })"));
 check("签名调 set_self_longnick { longNick }", handleBody.includes("profileOneBot('set_self_longnick', { longNick: target })"));
-check("群名片调 set_group_card { group_id, user_id, card }",
-  handleBody.includes("profileOneBot('set_group_card', { group_id: groupId, user_id: selfId, card: target })"));
+check("群名片调 set_group_card { group_id, user_id, card: wireCard }",
+  handleBody.includes("profileOneBot('set_group_card', { group_id: groupId, user_id: selfId, card: wireCard })"));
+// 真机 smoke 结论：SnowLuma 的 protobuf 编码器在 targetName 为空串时省略整个字段，
+// 服务端回 OIDB 1007 / retcode=100。清除只能发半角空格，状态与日志仍记空串。
+check('清空群名片时线上发半角空格（wireCard 映射）',
+  handleBody.includes("const wireCard = target === '' ? ' ' : target;"));
+check('群名片旧值读回后归一（纯空白 → 空串，不把空格写进状态）',
+  handleBody.includes("oldValue = typeof member?.card === 'string' ? cleanProfileText(member.card) : '';"));
 check('OneBot 失败 502 onebot_error（不抛 500）', handleBody.includes("reason: 'onebot_error'") && handleBody.includes('}, 502)'));
 
 // ⑦ 读回：昵称/名片不一致 → not_applied + pending:true 且不记账；签名读不到字段 → 只降级。

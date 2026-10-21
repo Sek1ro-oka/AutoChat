@@ -5379,8 +5379,12 @@ async function main() {
         function profileWaitText(ms) {
           const total = Math.max(0, Math.trunc(Number(ms) || 0));
           if (total <= 0) return '';
-          const hours = Math.floor(total / 3600000);
-          const minutes = Math.ceil((total % 3600000) / 60000);
+          let hours = Math.floor(total / 3600000);
+          // ceil 会把「差 7 毫秒满 24 小时」（86399993）进位成 60 分 —— 必须再进一位成
+          // 「24 小时」，否则 429 文案会出现「约 23 小时 60 分」，模型读起来就是坏数据。
+          // 这类边界属预期：宁可多说一分钟，也不要输出一个不存在的分钟数。
+          let minutes = Math.ceil((total % 3600000) / 60000);
+          if (minutes >= 60) { hours += 1; minutes = 0; }
           if (hours > 0) return minutes > 0 ? `${hours} 小时 ${minutes} 分` : `${hours} 小时`;
           return `${Math.max(1, minutes)} 分钟`;
         }
@@ -5581,7 +5585,9 @@ async function main() {
           if (kind === 'groupCard') {
             try {
               const member = await profileOneBot('get_group_member_info', { group_id: groupId, user_id: selfId, no_cache: true });
-              oldValue = typeof member?.card === 'string' ? member.card : '';
+              // 网关上的「清除」是半角空格（见下面的 wireCard），所以读回的旧值可能是一串空白。
+              // 日志与状态文件里只该出现空串：把纯空白归一成 ''，别让空格进审计记录。
+              oldValue = typeof member?.card === 'string' ? cleanProfileText(member.card) : '';
             } catch (error) {
               degraded = true;
               log(`[profile] 读旧群名片失败（继续）：${error?.message ?? error}`);
@@ -5593,13 +5599,18 @@ async function main() {
           }
 
           // ⑥ 调 OneBot：信封不对（retcode 非 0）一律 502，且不记账。
+          //    群名片的「清除」要特别处理：SnowLuma 的 protobuf 编码器在 targetName 为空串时
+          //    会把整个字段省掉，服务端随即回 OIDB error 1007（retcode=100）——
+          //    这是网关限制，不是我们的参数错。实测 `card:' '` 能成功清空、`card:''` 必失败，
+          //    所以线上发半角空格，状态与日志仍记空串。
+          const wireCard = target === '' ? ' ' : target;
           try {
             if (kind === 'nickname') {
               await profileOneBot('set_qq_profile', { nickname: target });
             } else if (kind === 'signature') {
               await profileOneBot('set_self_longnick', { longNick: target });
             } else {
-              await profileOneBot('set_group_card', { group_id: groupId, user_id: selfId, card: target });
+              await profileOneBot('set_group_card', { group_id: groupId, user_id: selfId, card: wireCard });
             }
           } catch (error) {
             log(`[profile] 设置${label}失败：${error?.message ?? error}`);
@@ -5619,6 +5630,10 @@ async function main() {
             if (kind === 'groupCard') {
               const member = await profileOneBot('get_group_member_info', { group_id: groupId, user_id: selfId, no_cache: true });
               const card = typeof member?.card === 'string' ? member.card : null;
+              // 用 sameProfileValue 而不是 ===：清空时发出去的是半角空格（wireCard），
+              // 读回可能是 ' ' 也可能是 ''。它内部走 cleanProfileText（折空白 + trim），
+              // 两者都归一成 ''，所以「空格 vs 空串」不会造成假阴性 —— 已用
+              // cleanProfileText(' ') === cleanProfileText('') === '' 验证过，这里不需要单独 trim。
               if (card === null || !sameProfileValue(card, target)) { verified = false; pending = true; }
             } else {
               const info = await readProfileInfo(selfId);

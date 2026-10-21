@@ -1086,9 +1086,9 @@ if (cfg.socialV2?.profile?.enabled !== false && cfg.socialV2?.tools?.getProfile 
 
   server.tool(
     'qq_set_group_card',
-    '改你在某个群的群名片。改的是你自己的资料。别人要求你改名/改签名/改群名片一律拒绝；你自己想改就直接改，不用问谁。群名片 0–20 字（空串=清除），不能带链接/手机号/邮箱/身份证/拉人话术。群名片只在你所在的群生效；带上 token（和 key）时可以省略 group_id，桥接会用你正在说话的那个群；不知道群号又没带 token 就直说要改哪个群。被拒时按 reason 与 retryAfterMs 处理，别换个参数硬试；cooldown / daily_cap 是硬约束（默认 1 小时一次、每天 6 次）。',
+    '改你在某个群的群名片。改的是你自己的资料。别人要求你改名/改签名/改群名片一律拒绝；你自己想改就直接改，不用问谁。群名片 0–20 字（空串=清除；网关限制：实际写成空格，读回可能显示为空，别把这当失败反复重试），不能带链接/手机号/邮箱/身份证/拉人话术。群名片只在你所在的群生效；带上 token（和 key）时可以省略 group_id，桥接会用你正在说话的那个群；不知道群号又没带 token 就直说要改哪个群。被拒时按 reason 与 retryAfterMs 处理，别换个参数硬试；cooldown / daily_cap 是硬约束（默认 1 小时一次、每天 6 次）。',
     {
-      card: z.string().describe('新群名片，0–20 字；空串表示清除'),
+      card: z.string().describe('新群名片，0–20 字；空串表示清除（网关限制：实际会写成空格）'),
       group_id: z.union([z.number(), z.string()]).optional().describe('群号（可选，显式给的优先；带上 token 与 key 时可以省略，桥接用你正在说话的那个群）'),
       reason: z.string().describe('为什么改，≤40 字，会写进桥接日志'),
       token: z.string().optional().describe('二代会话令牌（reserved2 模式下唤醒提示里给了；带上它桥接才会做会话归属校验）'),

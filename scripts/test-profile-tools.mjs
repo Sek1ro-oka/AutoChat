@@ -100,6 +100,13 @@ for (const [tool, label, text] of [
 check('qq_set_nickname 描述带 2–12 字与「不能以数字开头」', nicknameTool.includes('2–12 字') && nicknameTool.includes('不能以数字开头'));
 check('qq_set_signature 描述带 0–60 字与「空串=清除」', signatureTool.includes('0–60 字') && signatureTool.includes('空串=清除'));
 check('qq_set_group_card 描述带 0–20 字', groupCardTool.includes('0–20 字'));
+// 真机 smoke 结论：网关清空群名片要发半角空格（空 targetName 被编码器省略 → OIDB 1007），
+// 读回也可能显示为空。描述里必须说清这一点，否则模型会把「空」误判成失败、反复重试。
+check('qq_set_group_card 描述说明空串=清除但实际写成空格', groupCardTool.includes('空串=清除；网关限制：实际写成空格'));
+check('qq_set_group_card 描述提醒读回可能显示为空、别反复重试',
+  groupCardTool.includes('读回可能显示为空') && groupCardTool.includes('别把这当失败反复重试'));
+check('qq_set_group_card 的 card 参数说明同步网关限制',
+  groupCardTool.includes("describe('新群名片，0–20 字；空串表示清除（网关限制：实际会写成空格）')"));
 check('qq_set_group_card 描述含「群名片只在你所在的群生效」', groupCardTool.includes('群名片只在你所在的群生效'));
 // 描述必须与实现一致：不显式给 group_id 时，桥接靠 key 推断群号，而没有 key
 // （即没带 token）时它给不出群号 → 会让模型「直说要改哪个群」，而不是含糊地省略。
