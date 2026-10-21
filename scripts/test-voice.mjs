@@ -170,7 +170,8 @@ console.log('## 安全边界（AI 通道来源限制）');
   ok(/allowAbsolutePath/.test(fn), 'AI 通道检查 allowAbsolutePath');
   const sendRoute = bridge.slice(bridge.indexOf("url.pathname === '/api/socialV2/send-voice'"), bridge.indexOf("url.pathname === '/api/socialV2/send-sticker'"));
   ok(sendRoute.includes('v2SessionAllowed(key)'), '语音发送校验会话白名单');
-  ok(sendRoute.includes('agentTokenOk(key, token)'), '语音发送校验 agent token');
+  // T-018：发送类端点统一走 agentTokenCoversSend —— 本会话令牌，或同一互通编号的会话令牌。
+  ok(sendRoute.includes('agentTokenCoversSend(key, token)'), '语音发送校验 agent token（含同组跨会话）');
   ok(sendRoute.includes('shouldBlockSilentReply(key)'), '语音发送尊重静默模式');
   ok(sendRoute.includes('voiceBudgetCheck'), '语音发送走语音限流');
 }

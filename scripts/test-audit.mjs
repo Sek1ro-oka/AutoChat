@@ -152,6 +152,19 @@ const tests = [
   // 生图的 MCP 工具（T-017 第四步）：四个工具名与描述红线、取图走 base64 JSON、
   // url 白名单、启用判据与不登记 TOOL_CONFIG_FLAGS、429/403 映射。只读源码。
   'test-image-tools.mjs',
+  // 名字映射表的纯函数（T-018 第一步）：配置钳制、状态归一与序列化、好友/群/成员三类
+  // upsert 与上限淘汰、apply 三表顺序、按名字/群名/号码/成员名片查找、提示词块、行文案。
+  'test-identity-core.mjs',
+  // 名字映射与跨会话发言的接线（T-018 第二步）：两个端点的鉴权与形状、adminOnly 名单、
+  // agentTokenCoversSend 的同组判定、7 个发送端点、prompt identity 块、定时刷新与
+  // enabled=false 短路。import bridge 会真起服务，只读源码。
+  'test-identity-endpoints.mjs',
+  // 工具 qq_lookup（T-018 第三步）：注册位置、参数、请求路径与 token、空结果/429/403 文案、
+  // 启用判据。只读源码。
+  'test-identity-tools.mjs',
+  // 控制台「名字映射」面板（T-018 第四步）：导航与 section、搜索防抖、刷新 POST、
+  // 视图守卫与 15 秒节流、五列表格与空态。只读 HTML。
+  'test-console-identity.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

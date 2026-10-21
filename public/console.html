@@ -1938,6 +1938,61 @@ button:active:not(:disabled) {
 #section-cross .cross-hint { margin:0; font-size:12px; color:var(--muted) }
 #section-cross .cross-buffer { margin-top:8px; font-size:11px; color:var(--muted-soft) }
 
+/* ===== 名字映射（T-018）=====
+   骨架照跨渠道互通（T-016）：固定高度的滑动窗口 + sticky 表头 + 行内网格。
+   区别只在这张表是只读的「名字 → key」映射，五列里没有输入框。
+   作用域全部挂在 #section-identity 下，深色主题吃同名变量的另一套值。 */
+#section-identity .identity-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:14px }
+/* 搜索框吃掉剩余宽度：主样式里 input 默认 width:100%，靠 flex-basis 压回来。 */
+#section-identity input.identity-query { flex:1 1 260px; min-width:0 }
+#section-identity .identity-stats {
+  margin-top:12px; font-size:12px; color:var(--text-secondary); font-variant-numeric:tabular-nums
+}
+#section-identity .identity-window {
+  margin-top:10px; max-height:340px; overflow-y:auto;
+  border:1px solid var(--border-subtle); border-radius:12px; background:var(--surface)
+}
+#section-identity .identity-head,
+#section-identity .identity-row {
+  display:grid; grid-template-columns:64px minmax(0,1fr) 108px minmax(0,150px) 88px;
+  gap:10px; align-items:center; padding:8px 12px
+}
+#section-identity .identity-head {
+  position:sticky; top:0; z-index:1;
+  background:var(--surface-subtle); border-bottom:1px solid var(--border-subtle);
+  font-size:11px; color:var(--muted-soft); letter-spacing:.02em
+}
+#section-identity .identity-head > :nth-child(3),
+#section-identity .identity-head > :nth-child(5) { text-align:center }
+#section-identity .identity-row { border-bottom:1px solid var(--border-subtle) }
+#section-identity .identity-row:last-child { border-bottom:0 }
+/* 同一个 key 不止一行（群 + 它的成员都指向 group:<群号>）：左侧强调线帮忙扫读。 */
+#section-identity .identity-row.is-dupe { box-shadow:inset 3px 0 0 var(--accent) }
+#section-identity .identity-row.is-dupe .identity-key { color:var(--accent) }
+#section-identity .identity-kind { display:flex }
+#section-identity .identity-tag {
+  flex:0 0 auto; padding:0 7px; border-radius:999px; border:1px solid var(--border-subtle);
+  font-size:11px; line-height:1.7; color:var(--muted); background:var(--surface-chip-strong)
+}
+#section-identity .identity-tag.g { color:var(--ok); border-color:var(--ok) }
+#section-identity .identity-tag.p { color:var(--warn-fg); border-color:var(--warn-fg) }
+#section-identity .identity-tag.m { color:var(--accent); border-color:var(--accent) }
+#section-identity .identity-name {
+  font-size:13px; font-weight:600; color:var(--text); min-width:0; overflow-wrap:anywhere
+}
+#section-identity .identity-group { display:block; margin-top:2px; font-size:11px; font-weight:400; color:var(--muted-soft) }
+#section-identity .identity-number {
+  font-size:12px; color:var(--text-secondary); text-align:center;
+  font-variant-numeric:tabular-nums; overflow-wrap:anywhere
+}
+#section-identity .identity-key { font-size:11px; color:var(--muted-soft); overflow-wrap:anywhere }
+#section-identity .identity-time {
+  font-size:12px; color:var(--text-secondary); text-align:center; font-variant-numeric:tabular-nums
+}
+#section-identity .identity-empty {
+  padding:18px 14px; text-align:center; font-size:12px; line-height:1.8; color:var(--muted-soft)
+}
+
 /* ── 社交自动化（T-009）─────────────────────────────────────────────────────
    结构与样式照抄用户已经确认过的设计稿（work/agent-tasks/T-009/demo/index.html），
    只做两处适配：卡片跟在说说卡后面，所以 margin-top 取 22px 与兄弟卡片对齐；
@@ -2380,6 +2435,7 @@ button:active:not(:disabled) {
       <button data-view="slang" class="nav-item"><span class="nav-icon" aria-hidden="true">▤</span>黑话词库</button>
       <button data-view="affect" class="nav-item"><span class="nav-icon" aria-hidden="true">☺</span>情绪</button>
       <button data-view="cross" class="nav-item"><span class="nav-icon" aria-hidden="true">⇄</span>跨渠道互通</button>
+      <button data-view="identity" class="nav-item"><span class="nav-icon" aria-hidden="true">⌗</span>名字映射</button>
       <div class="nav-label">管理</div>
       <button data-view="usage" class="nav-item"><span class="nav-icon" aria-hidden="true">◧</span>令牌与花费</button>
       <button data-view="access" class="nav-item"><span class="nav-icon" aria-hidden="true">⊙</span>访问与安全</button>
@@ -3572,6 +3628,20 @@ button:active:not(:disabled) {
       </div>
       <div class="cross-buffer" id="crossBufferNote">每个会话最多保留 — 条</div>
     </section>
+
+    <section id="section-identity" data-page="identity" class="card span-all">
+      <h2 data-note="停在这一页时才读取名字表">名字映射</h2>
+      <div class="meta">好友、群、群里见过的人。数据来自好友列表/群列表/消息，后台每 6 小时刷新。</div>
+      <div class="identity-actions">
+        <input id="identityQuery" class="identity-query" type="search" placeholder="输入名字、群名、QQ 号或群号…" autocomplete="off" aria-label="搜索名字、群名、QQ 号或群号">
+        <button id="identityRefresh" class="primary" type="button">刷新名字表</button>
+      </div>
+      <div class="identity-stats" id="identityStats" role="status" aria-live="polite">好友 — · 群 — · 成员 —</div>
+      <div class="identity-window">
+        <div class="identity-head" aria-hidden="true"><span>类型</span><span>名字</span><span>号码</span><span>key</span><span>最后活跃</span></div>
+        <div id="identityList"><div class="identity-empty">读取中…</div></div>
+      </div>
+    </section>
       </div>
       <div class="overview-footnote" data-page="overview"><span id="accessSummary">正在读取访问范围…</span><button class="text-button" data-view="access">管理访问范围 →</button></div>
       <footer class="page-footer"><span>QQ Bridge · 连接日常，保持自主</span><span id="lastUpdated">等待首次同步</span></footer>
@@ -3714,6 +3784,9 @@ async function refresh() {
     // 跨渠道互通（T-016）：同样只停在这一页才拉；5 秒节流，离开即停。
     // refreshCross 自己吞异常（错误画在列表里并弹 toast），不会把这一趟 /api/status 拖成「连接中断」。
     if (currentConsolePage === 'cross') refreshCross();
+    // 名字映射（T-018）：同样只停在这一页才拉；15 秒节流（refreshIdentity 内部判），离开即停。
+    // refreshIdentity 自己吞异常（错误画在列表里并弹 toast），不会把这一趟 /api/status 拖成「连接中断」。
+    if (currentConsolePage === 'identity') refreshIdentity();
     const presetSel = document.getElementById('closedPreset');
     if (presetSel && document.activeElement !== presetSel) presetSel.value = s.closedAgentPreset || '';
   } catch (e) { document.getElementById('statusText').textContent = '连接中断 · 请检查桥接服务'; setConnectionError(e); }
@@ -6089,6 +6162,7 @@ const consolePages = {
   slang: ['黑话词库', '读懂群聊里的，言外之意。', '从候选到确认，让 AI 逐渐熟悉大家的表达习惯。'],
   affect: ['情绪', '它现在什么心情，为什么还没开口。', '四种情绪的强度与阈值、最近遇到的事、宣泄决策卡在哪一步，以及可以手动拨的调试开关。'],
   cross: ['跨渠道互通', '同一个编号，就是同一个圈子。', '把群和私聊分进同一组，让 AI 记得住你在别处说过的话。'],
+  identity: ['名字映射', '这台机器认识的每一个人和群。', '按名字找人，拿到能直接发消息的 key。'],
   usage: ['令牌与花费', '每一次思考，都算得清楚。', '实时查看 AI 的 token 消耗与花费，可下钻到每个群、每个好友、每一轮对话。'],
   access: ['访问与安全', '明确边界，安心连接。', '管理允许对话的对象、管理员权限与控制台访问凭证。'],
   operations: ['调试与运维', '让桥接，始终井然有序。', '测试消息、引导 AI，或维护桥接进程与会话工作区。'],
@@ -6135,6 +6209,10 @@ function setConsolePage(page, { updateHash = true, focus = false, target = '' } 
   // 跨渠道互通：先用上一份快照画一遍，再强拉一次；进入即清掉没保存的草稿，
   // 与情绪页同一口径——离开再回来等于放弃那笔改动，输入框重新对齐服务端真值。
   if (page === 'cross') { crossDraft.clear(); crossRenderedSig = null; paintCross(); refreshCross(true); }
+  // 名字映射：先用上一份快照画一遍，再强拉一次；离开时把还没到点的输入防抖清掉，
+  // 免得切走 300ms 后又打一次接口。
+  if (page === 'identity') { identityRenderedSig = null; paintIdentity(); refreshIdentity(true); }
+  else if (identityTimer) { clearTimeout(identityTimer); identityTimer = 0; }
   document.querySelectorAll('[data-page]').forEach(el => { el.hidden = el.dataset.page !== page; });
   // 视图已经可见，再让沙盘脚本开始跑（它只会在第一次进入时真正插入一次）。
   if (page === 'sandbox') initSandbox();
@@ -7489,6 +7567,241 @@ async function crossSave() {
 }
 document.getElementById('crossList').addEventListener('input', crossOnInput);
 document.getElementById('crossSave').addEventListener('click', crossSave);
+
+// ── 名字映射（T-018）────────────────────────────────────────────────────────
+// 数据只有一个来源：GET /api/socialV2/identity?q=&limit=50。桥接给的是「这台机器
+// 认识的人」：好友 / 群 / 群里见过的人；每行都带能直接发消息的 key。
+// 后台每 6 小时自己同步一次，这一页只读；「刷新名字表」是手动触发一次同步刷新。
+// 只在停在 #identity 时才拉（与跨渠道面板同一套约定），15 秒节流，切走即停。
+let lastIdentity = null;
+let identityFetchedAt = 0;
+let identityLoading = false;
+let identityAgain = false;
+let identityReadError = '';
+let identityErrorShown = '';
+let identityBusy = false;
+let identityQuery = '';
+let identityTimer = 0;
+// 当前 DOM 是按哪一版结果画的（类型 / key / 名字 / 号码）。签名没变就只就地更新
+// 「最后活跃」这一格，不重建整张表 —— 重建会把用户正在拖的滚动条弹回顶部。
+let identityRenderedSig = null;
+const IDENTITY_LIMIT = 50;
+const IDENTITY_POLL_MS = 15000;
+const IDENTITY_DEBOUNCE_MS = 300;
+const IDENTITY_KIND_LABEL = { private: '好友', group: '群', member: '群成员' };
+const IDENTITY_KIND_CLASS = { private: 'p', group: 'g', member: 'm' };
+
+// 「只在当前视图才轮询」：refresh() 那趟 3 秒轮询里已经按 currentConsolePage 守着，
+// 这里再判一次，保证任何别处的调用都不会在后台偷偷打接口。
+function identityViewActive() {
+  return currentConsolePage === 'identity';
+}
+function identityRows() {
+  return lastIdentity && Array.isArray(lastIdentity.rows) ? lastIdentity.rows : [];
+}
+function identityKindOf(row) {
+  if (row && row.kind === 'group') return 'group';
+  if (row && row.kind === 'member') return 'member';
+  return 'private';
+}
+// key 优先用接口给的；旧版桥接没给就按 qq/gid 现拼，保证每行都能拿去发消息。
+function identityKeyOf(row) {
+  if (!row) return '';
+  if (typeof row.key === 'string' && row.key !== '') return row.key;
+  if (row.qq !== null && row.qq !== undefined && row.qq !== '') return 'private:' + row.qq;
+  if (row.gid !== null && row.gid !== undefined && row.gid !== '') return 'group:' + row.gid;
+  return '';
+}
+function identityNameOf(row) {
+  const name = row && typeof row.name === 'string' ? row.name : '';
+  if (name !== '') return name;
+  return row && typeof row.label === 'string' ? row.label : '';
+}
+function identityNumberOf(row) {
+  if (!row) return '';
+  const value = row.qq !== null && row.qq !== undefined && row.qq !== '' ? row.qq : row.gid;
+  return value === null || value === undefined ? '' : String(value);
+}
+// 最后活跃：桥接的完整行带 lastSeenAt；只按 lookup 的形状回来时也认 lastAt / updatedAt。
+function identitySeenAt(row) {
+  if (!row) return 0;
+  for (const value of [row.lastSeenAt, row.lastAt, row.updatedAt]) {
+    const at = Number(value);
+    if (Number.isFinite(at) && at > 0) return at;
+  }
+  return 0;
+}
+// 时间口径与跨渠道面板一致：刚刚 / N 分钟前 / N 小时前 / 昨天 / N 天前 / —。
+function identityAgo(lastAt) {
+  return crossAgo(lastAt);
+}
+function identityCount(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+}
+function paintIdentityStats() {
+  const el = document.getElementById('identityStats');
+  if (!el) return;
+  if (lastIdentity === null) { el.textContent = '好友 — · 群 — · 成员 —'; return; }
+  const counts = lastIdentity.counts && typeof lastIdentity.counts === 'object' ? lastIdentity.counts : {};
+  const show = (value) => (identityCount(value) === null ? '—' : String(identityCount(value)));
+  let text = '好友 ' + show(counts.privates) + ' · 群 ' + show(counts.groups) + ' · 成员 ' + show(counts.members);
+  const shown = identityRows().length;
+  if (shown > 0) text += ' · 当前显示 ' + shown + ' 行';
+  const updatedAt = identityCount(lastIdentity.updatedAt);
+  if (updatedAt !== null && updatedAt > 0) text += ' · 更新于 ' + identityAgo(updatedAt);
+  el.textContent = text;
+}
+// 同一个 key 出现多次（群 + 它的成员都指向 group:<群号>）就标记出来，整行高亮。
+function identitySharedKeys(rows) {
+  const counts = new Map();
+  rows.forEach((row) => {
+    const key = identityKeyOf(row);
+    if (key !== '') counts.set(key, (counts.get(key) || 0) + 1);
+  });
+  const shared = new Set();
+  counts.forEach((count, key) => { if (count > 1) shared.add(key); });
+  return shared;
+}
+function identityRowHtml(row, shared) {
+  const kind = identityKindOf(row);
+  const key = identityKeyOf(row);
+  const name = identityNameOf(row);
+  const number = identityNumberOf(row);
+  const groupName = row && typeof row.groupName === 'string' ? row.groupName : '';
+  return '<div class="identity-row' + (shared ? ' is-dupe' : '') + '" data-key="' + esc(key) + '">'
+    + '<div class="identity-kind"><span class="identity-tag ' + IDENTITY_KIND_CLASS[kind] + '">' + IDENTITY_KIND_LABEL[kind] + '</span></div>'
+    + '<div class="identity-name">' + esc(name)
+    + (kind === 'member' && groupName !== '' ? '<span class="identity-group">在 ' + esc(groupName) + '</span>' : '')
+    + '</div>'
+    + '<div class="identity-number">' + esc(number === '' ? '—' : number) + '</div>'
+    + '<div class="identity-key">' + esc(key === '' ? '—' : key) + '</div>'
+    + '<div class="identity-time">' + esc(identityAgo(identitySeenAt(row))) + '</div>'
+    + '</div>';
+}
+function identitySignature(rows) {
+  return rows.map((row) => [identityKindOf(row), identityKeyOf(row), identityNameOf(row), identityNumberOf(row)].join('\u0001')).join('\u0002');
+}
+function identityEmptyText() {
+  if (identityReadError !== '') return '读取失败：' + identityReadError;
+  if (identityQuery !== '') return '没有匹配，换个名字、群名或号码试试';
+  return '还没有名字记录，点「刷新名字表」拉一次。';
+}
+function paintIdentity() {
+  const listEl = document.getElementById('identityList');
+  if (!listEl) return;
+  const live = lastIdentity !== null;
+  const rows = identityRows();
+  if (!live || rows.length === 0) {
+    const text = live ? identityEmptyText() : (identityReadError ? '读取失败：' + identityReadError : '读取中…');
+    listEl.innerHTML = '<div class="identity-empty">' + esc(text) + '</div>';
+    identityRenderedSig = null;
+    paintIdentityStats();
+    return;
+  }
+  const signature = identitySignature(rows);
+  if (signature !== identityRenderedSig) {
+    const shared = identitySharedKeys(rows);
+    listEl.innerHTML = rows.map((row) => identityRowHtml(row, shared.has(identityKeyOf(row)))).join('');
+    identityRenderedSig = signature;
+  } else {
+    // 结构没变：只刷新每行的相对时间，滚动位置和选中文本都留着。
+    const rowEls = listEl.querySelectorAll('.identity-row');
+    if (rowEls.length !== rows.length) {
+      const shared = identitySharedKeys(rows);
+      listEl.innerHTML = rows.map((row) => identityRowHtml(row, shared.has(identityKeyOf(row)))).join('');
+      identityRenderedSig = signature;
+    } else {
+      rows.forEach((row, index) => {
+        const timeEl = rowEls[index].querySelector('.identity-time');
+        if (timeEl) timeEl.textContent = identityAgo(identitySeenAt(row));
+      });
+    }
+  }
+  paintIdentityStats();
+}
+function identityUrl() {
+  const params = new URLSearchParams();
+  const query = identityQuery.trim();
+  if (query !== '') params.set('q', query);
+  params.set('limit', String(IDENTITY_LIMIT));
+  return '/api/socialV2/identity?' + params.toString();
+}
+// 读失败不吞：列表里画错误，toast 只对「新的错误」弹一次；上一份结果继续留着显示。
+async function refreshIdentity(force = false) {
+  if (!force && !identityViewActive()) return;
+  if (identityLoading) { if (force) identityAgain = true; return; }
+  if (!force && identityFetchedAt > 0 && Date.now() - identityFetchedAt < IDENTITY_POLL_MS) { paintIdentity(); return; }
+  identityLoading = true;
+  identityFetchedAt = Date.now();
+  let failure = '';
+  try {
+    const r = await api(identityUrl());
+    if (r && r.ok === true) lastIdentity = r;
+    else failure = (r && (r.error || r.reason)) ? String(r.error || r.reason) : '接口没有返回原因';
+  } catch (error) {
+    failure = error && error.message ? error.message : String(error);
+  }
+  identityReadError = failure;
+  identityLoading = false;
+  paintIdentity();
+  if (failure && failure !== identityErrorShown) {
+    identityErrorShown = failure;
+    showConsoleToast('名字映射读取失败：' + failure);
+  }
+  if (!failure) identityErrorShown = '';
+  if (identityAgain) { identityAgain = false; refreshIdentity(true); }
+}
+function identityApplyQuery(value) {
+  clearTimeout(identityTimer);
+  identityTimer = 0;
+  identityQuery = String(value ?? '').trim();
+  identityFetchedAt = 0;
+  identityRenderedSig = null;
+  refreshIdentity(true);
+}
+// 输入 300ms 防抖；中文输入法组字期间不查，等 compositionend 那一下 input 再查。
+function identityQueueSearch() {
+  clearTimeout(identityTimer);
+  identityTimer = setTimeout(() => {
+    identityTimer = 0;
+    const input = document.getElementById('identityQuery');
+    identityApplyQuery(input ? input.value : '');
+  }, IDENTITY_DEBOUNCE_MS);
+}
+function identityOnInput(event) {
+  if (event && event.isComposing) return;
+  identityQueueSearch();
+}
+function identitySearchNow(event) {
+  if (event) event.preventDefault();
+  const input = document.getElementById('identityQuery');
+  identityApplyQuery(input ? input.value : '');
+}
+// 手动刷新是一次「立刻同步」：POST 触发后台拉好友/群/成员，成功后重查当前搜索词。
+async function identityRefreshNow() {
+  if (identityBusy) return;
+  const button = document.getElementById('identityRefresh');
+  identityBusy = true;
+  if (button) button.disabled = true;
+  try {
+    const r = await api('/api/socialV2/identity/refresh', 'POST');
+    if (!r || r.ok !== true) throw new Error((r && (r.error || r.reason)) || '桥接拒绝了这次刷新');
+    showConsoleToast('名字表已刷新');
+    identityFetchedAt = 0;
+    await refreshIdentity(true);
+  } catch (error) {
+    showConsoleToast('刷新失败：' + (error && error.message ? error.message : error));
+  } finally {
+    identityBusy = false;
+    if (button) button.disabled = false;
+  }
+}
+document.getElementById('identityQuery').addEventListener('input', identityOnInput);
+document.getElementById('identityQuery').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') identitySearchNow(event);
+});
+document.getElementById('identityRefresh').addEventListener('click', identityRefreshNow);
 
 setConsolePage(location.hash.slice(1), { updateHash:false });
 // 带 #sandbox 直接打开时，上面这次调用发生在沙盘脚本容器还没解析的时候（容器在 </body> 前），

@@ -168,6 +168,29 @@ import {
   emptyCrossState,
   parseCrossState
 } from './cross-core.js';
+// 名字映射表（T-018）：好友 / 群 / 群成员的「号码 → 名字」缓存。和 cross-core 一样是
+// 纯逻辑模块（零依赖、零 I/O、时钟由 at 参数注入）：清洗 / 归一 / 打分检索 / 提示词块
+// 全在 identity-core.js；桥接只负责拉名单（OneBot）、落 state/identity-map.json、鉴权
+// 与两个端点。多行 import 的形状与 cross-core 保持一致（harness 按行剥顶层 import）。
+import {
+  IDENTITY_DEFAULTS,
+  IDENTITY_LIMITS,
+  normalizeIdentityConfig,
+  createIdentityState,
+  normalizeIdentityState,
+  parseIdentityState,
+  serializeIdentityState,
+  upsertPrivate,
+  upsertGroup,
+  upsertMember,
+  applyFriendList,
+  applyGroupList,
+  applyMemberList,
+  identityKey,
+  lookupIdentity,
+  identityPromptBlock,
+  formatIdentityRows
+} from './identity-core.js';
 // 文案生成的三件纯函数（T-012 第五步）：清洗模型输出 / 拼提示词 / 保守兜底模板。
 // 单行 import：scripts/audit-bridge-harness.mjs 按行剥顶层 import，单行最不容易出岔子
 // （同名绑定由 harness 的 `...affectText` 注入 VM）。
@@ -238,6 +261,11 @@ const AFFECT_VENT_SESSION_FILE = path.join(STATE_DIR, 'affect-vent-session.json'
 // 手删它等于把三个窗口清零 —— 这是有意的（出问题时给运维一个不用改代码的复位手段）。
 // 注意 dev-doc 写的是 DATA_DIR，但桥接里只有 STATE_DIR（qzone/affect 也都落在这里）。
 const PROFILE_STATE_FILE = path.join(STATE_DIR, 'profile-changes.json');
+// 名字映射表（T-018）：好友 / 群 / 群成员的「号码 → 名字」缓存。
+// 和 profile-changes.json 一样是「可丢」文件：不存在或损坏都从空表重启，绝不让端点 500。
+// 单独一个文件而不是塞进 social-v2.json：这张表最大能到 200 群 × 2000 成员，
+// 而 social-v2.json 每个会话都在频繁重写（saveSocialV2State），混在一起会把它撑爆。
+const IDENTITY_FILE = path.join(STATE_DIR, 'identity-map.json');
 
 // ── 生图 / 发图（T-017）：三份落盘位置 + 两个体积上限 ─────────────────────────
 // 图片本体（state/images/）、索引（哪张图在哪个文件）、额度账本（谁在什么时候画了 /
@@ -1125,6 +1153,13 @@ function loadConfig() {
   // 端点/控制台/记录钩子读到的永远是归一后的 cfg，不用各自补默认值。
   cfg.socialV2.cross = normalizeCrossConfig(cfg.socialV2?.cross);
 
+  // socialV2.identity：名字映射表（T-018）。好友 / 群 / 群成员的号码 → 名字缓存，
+  // 供控制台检索与 prompt 里「当前会话谁是谁」使用。和 profile / cross 一样，这里是
+  // **唯一**的归一入口：缺字段补出厂默认（enabled: true）、越界钳制（刷新间隔 30 分钟
+  // 到 7 天），normalizeIdentityConfig 永不抛。enabled: false 时桥接整体短路：
+  // 不拉名单、不落盘、prompt 里也没有 identity 块（模型不该看到一张永远不会更新的表）。
+  cfg.socialV2.identity = normalizeIdentityConfig(cfg.socialV2?.identity);
+
   // socialV2.images：生图 / 发图 / 存表情 / 换头像（T-017）。
   // 和 profile / cross 一样，这里是**唯一**的归一入口：缺字段补出厂默认（enabled: true）、
   // 越界钳制，normalizeImageConfig 永不抛。额度（24h 20 张 + 45 秒一张、5 个表情、
@@ -1803,6 +1838,55 @@ function writeProfileState(state) {
     return true;
   } catch (error) {
     log(`[profile] 状态落盘失败（本轮继续）：${error?.message ?? error}`);
+    return false;
+  }
+}
+
+// ── 名字映射表（T-018）：state/identity-map.json 的读与写 ────────────────────
+// 归一 / 打分检索 / 提示词块的判定全在 src/identity-core.js（零 I/O 零依赖）。
+// 这里只负责这一份状态文件的读与写，和 profile / affect 一样**不在读写层做缓存**：
+// 进程内的那份缓存由 main() 里的 identityState 持有（refresh 与增量 upsert 都改它）。
+
+/**
+ * 读名字映射表（纯读，不落盘）。
+ *
+ * - 没有文件 / JSON 坏了 / 顶层不是对象 → 空表（createIdentityState），且**不写盘**：
+ *   读接口绝不制造副作用（否则一次 GET /api/socialV2/identity 就会往 state/ 里落一个空表）。
+ * - 其余都过 normalizeIdentityState：坏号码键丢掉、键即号码、members 补成对象。
+ *   它本身永不抛，这里再包一层只是防御。
+ */
+function readIdentityState() {
+  const raw = readJsonSafe(IDENTITY_FILE, null);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return createIdentityState();
+  try {
+    return normalizeIdentityState(raw);
+  } catch (error) {
+    log(`[identity] 状态文件无法归一，改用空表：${error?.message ?? error}`);
+    return createIdentityState();
+  }
+}
+
+/**
+ * 落盘名字映射表。
+ *
+ * 先 serializeIdentityState 再 parseIdentityState 走一遍形状校验，保证写出去的一定是对象；
+ * 落盘失败**只记日志并返回 false**：名字表是后台补充资料，写不进去不该让消息处理或
+ * 端点失败（下一次 refresh 会再试一次）。
+ *
+ * 「先写 *.tmp 再 rename」由 atomicWriteJson 负责（它自带 mkdir / 0600 / EPERM 退避重试），
+ * 和 profile / affect 的落盘路径完全一致。
+ */
+function writeIdentityState(state) {
+  try {
+    const payload = parseIdentityState(serializeIdentityState(state));
+    if (!payload) {
+      log('[identity] 状态序列化结果不是对象，本次跳过落盘');
+      return false;
+    }
+    atomicWriteJson(IDENTITY_FILE, payload);
+    return true;
+  } catch (error) {
+    log(`[identity] 状态落盘失败（本轮继续）：${error?.message ?? error}`);
     return false;
   }
 }
@@ -4323,6 +4407,40 @@ async function main() {
       }
       return false;
     };
+    /**
+     * 令牌属于哪个二代会话（没有则空串）。
+     *
+     * 用途只有一个：跨会话发送授权（T-018）。`agentTokenOk(key, token)` 要求「令牌 ↔ 目标
+     * 会话」精确绑定，而模型手里只有**它自己那个会话**的令牌；它想在同组另一个群里发言时
+     * 那个绑定必然不成立。先按令牌反查它自己的会话，才能判「我和目标是不是同一互通组」。
+     * 反查口径与 isLiveAgentToken 完全一致（同一份 conversations、同一套 tokenEq）。
+     */
+    const agentTokenSessionKey = (token) => {
+      for (const [k, st] of socialV2.conversations) {
+        if (st?.agentToken && tokenEq(token, st.agentToken)) return k;
+      }
+      return '';
+    };
+    /**
+     * 发送类端点的令牌判定：精确绑定 **或** 同组跨会话发言（T-018）。
+     *
+     * 为什么需要第二条：跨会话互通（T-016）让模型能 recall 同组别的会话，但「看得见」
+     * 不等于「说得上话」—— 它拿着 A 群的令牌去 B 群调用 qq_send_* 会被 agentTokenOk 拒掉。
+     * 这里补上「同一互通编号即可发」，与 recall 的可见范围保持同一个粒度：gid 0（不共享）
+     * 两边都过不了，所以「不共享的会话之间不能借令牌发言」这条底线不变。
+     *
+     * 只给**写/发**端点用。读/状态类端点仍走 agentTokenOk：那些端点的语义是「我这个会话的
+     * 状态」，别的会话本来就不该读（prompt / unread / recent / state / cross / recall 等）。
+     */
+    const agentTokenCoversSend = (key, token) => {
+      if (agentTokenOk(key, token)) return true;
+      const ownerKey = agentTokenSessionKey(token);
+      if (!ownerKey) return false;
+      const groups = cfg.socialV2?.cross?.groups ?? {};
+      const targetGid = groupOf(groups, key);
+      const ownerGid = groupOf(groups, ownerKey);
+      return targetGid > 0 && targetGid === ownerGid;
+    };
     // 二代会话工具必须仍命中当前模式的白名单/准入；避免白名单移除后旧 agentToken 继续读状态。
     const v2SessionAllowed = isSessionAllowedInCurrentMode;
     // ═══════════════════════════════════════════════════════════════════════
@@ -5164,9 +5282,14 @@ async function main() {
         //                     AI 不能自己把某个群拉进自己的互通组。反过来，cross/recall 只是
         //                     「读同组已经存在的缓冲」，不是管理动作，所以**不**进本名单；
         //                     它靠 x-agent-token + 会话白名单 + 5 分钟 3 次限流把关。
+        //   identity/refresh —— 立刻向 QQ 拉一遍好友/群/群成员列表（T-018）。它是**全量 IO**
+        //                     （每群一次请求、每个 15 秒超时），让 AI 自己触发等于给它一个
+        //                     打爆网关的按钮；名字表只由启动定时器与控制台刷新，所以进本名单。
+        //                     只读的 GET /api/socialV2/identity 不在本名单：它不碰网关、
+        //                     也没有消息正文，模型查「阿芙乐尔是谁」是正当用途。
         // 两者都是控制台动作，AI 不该自己触发：AI 的心情由它上报（affect/events），
         // 「发不发」由桥接的判定与操作者决定。
-        const adminOnlyV2Paths = ['/api/socialV2/config', '/api/socialV2/activity', '/api/socialV2/reset', '/api/socialV2/states', '/api/socialV2/wake', '/api/socialV2/initial-prompt', '/api/socialV2/automation', '/api/socialV2/affect/vent', '/api/socialV2/affect/config', '/api/socialV2/cross'];
+        const adminOnlyV2Paths = ['/api/socialV2/config', '/api/socialV2/activity', '/api/socialV2/reset', '/api/socialV2/states', '/api/socialV2/wake', '/api/socialV2/initial-prompt', '/api/socialV2/automation', '/api/socialV2/affect/vent', '/api/socialV2/affect/config', '/api/socialV2/cross', '/api/socialV2/identity/refresh'];
         if (req.headers['x-agent-token'] && (adminOnlyV2Paths.includes(url.pathname) || (url.pathname === '/api/socialV2/feedback' && req.method === 'GET') || (url.pathname === '/api/socialV2/tool-log' && req.method === 'GET'))) {
           sendJson({ ok: false, error: '该接口仅控制台可用' }, 403);
           return;
@@ -6227,7 +6350,8 @@ async function main() {
          *
          * 返回 true = 已经回过错误响应，调用方直接 return。
          * 三种调用方：
-         *   ① MCP 带 x-agent-token + 会话 key → 令牌必须属于这个 key，且当前模式允许它；
+         *   ① MCP 带 x-agent-token + 会话 key → 令牌必须属于这个 key，或属于同一互通编号
+         *      的另一个会话（T-018 的跨会话发言），且当前模式允许它；
          *   ② MCP 只带 x-agent-token（画图/存表情/换头像这类不针对某个会话的动作）
          *      → 只要求它是个仍然有效的会话令牌；
          *   ③ 控制台（不带 x-agent-token）→ 走到这里说明已过全局令牌关卡，再确认一次
@@ -6236,8 +6360,14 @@ async function main() {
         function imageAuthFailed(req, key) {
           const agentToken = String(req.headers['x-agent-token'] ?? '').trim();
           if (agentToken) {
-            if (key && !agentTokenOk(key, agentToken)) {
-              sendJson({ ok: false, reason: 'bad_token', error: 'agent token 无效' }, 403);
+            // 同组跨会话发言（T-018）：发图/发图到群里也要认「同一互通编号」的令牌，
+            // 否则模型在 A 群拿到令牌后连 B 群的图都发不出去（能发文字却不能发图会很怪）。
+            if (key && !agentTokenCoversSend(key, agentToken)) {
+              sendJson({
+                ok: false,
+                reason: 'bad_token',
+                error: 'agent token 无效，或目标会话不在同一互通编号（可在控制台「跨渠道互通」里改编号）'
+              }, 403);
               return true;
             }
             if (key && !v2SessionAllowed(key)) {
@@ -6601,6 +6731,10 @@ async function main() {
             // 后者保证「刚聊过但还没分组」的会话也能出现在控制台里，等着被拖进某个组。
             const keys = new Set(Object.keys(groups));
             for (const key of socialV2.conversations.keys()) keys.add(key);
+            // 主人私聊永远出现在列表里：它的编号和其它会话一样可改，不该因为「还没私聊过」
+            // 或「配置里没有这一条」就从面板上消失 —— 那样用户只能看着一个默认值 0。
+            const ownerKey = cfg.ownerQQ ? `private:${String(cfg.ownerQQ)}` : '';
+            if (ownerKey) keys.add(ownerKey);
             const conversations = [];
             for (const key of keys) {
               const entries = loadCrossChannel(key);
@@ -6611,7 +6745,8 @@ async function main() {
               }
               conversations.push({
                 key,
-                label: humanKeyLabel(key),
+                label: key === ownerKey ? `主人（私聊 ${String(cfg.ownerQQ)}）` : humanKeyLabel(key),
+                owner: key === ownerKey,
                 gid: groupOf(groups, key),
                 count: entries.length,
                 lastAt
@@ -6752,6 +6887,62 @@ async function main() {
             rows,
             lines: formatRecallLines(rows),
             hint: '以上内容来自其它会话；引用时请说明出处，不要向当前对话的第三方透露。'
+          });
+          return;
+        }
+
+        // ── 名字映射表（T-018） ──────────────────────────────────────────
+        //
+        // 读端点：控制台可读，也开放给「活着的会话令牌」（读类放宽，不要求 key 绑定）。
+        // 为什么不绑 key：模型问「阿芙乐尔是谁」时手里永远是**它自己那个**会话的令牌，
+        // 而它想查的人可能只在别的会话里露过面；名字表里没有消息正文、也没有白名单，
+        // 跨会话读它不构成泄漏（和 recall 的区别：这里查的是「谁」，不是「说了什么」）。
+        // 写端点（refresh）在全量 IO 名单里，只有控制台能碰。
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/identity') {
+          const agentToken = String(req.headers['x-agent-token'] ?? '').trim();
+          if (agentToken && !isLiveAgentToken(agentToken)) {
+            sendJson({ ok: false, reason: 'bad_token', error: 'agent token 无效' }, 403);
+            return;
+          }
+          const state = identityStateNow();
+          const q = String(url.searchParams.get('q') ?? '').trim().slice(0, 40);
+          const defaultLimit = Number(cfg.socialV2?.identity?.queryLimit) || 20;
+          const rawLimit = Number(url.searchParams.get('limit'));
+          const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, Math.floor(rawLimit))) : defaultLimit;
+          // 空 q = 「最近活跃」：好友和群各按 lastSeenAt 取前 30。这不是搜索的退化情形，
+          // 而是控制台首屏要的东西（最近和谁说过话），所以单独走一条路径。
+          const rows = q ? lookupIdentity(state, q, { limit }).rows : recentIdentityRows(state, IDENTITY_RECENT_LIMIT);
+          sendJson({
+            ok: true,
+            // enabled:false 时读到的是空表或旧表 —— 明确告诉调用方，免得控制台把
+            // 「功能关着」渲染成「一个名字都没有」。
+            enabled: cfg.socialV2?.identity?.enabled !== false,
+            updatedAt: Number(state?.updatedAt) || 0,
+            query: q,
+            counts: identityCounts(state),
+            rows,
+            lines: formatIdentityRows(rows)
+          });
+          return;
+        }
+
+        // 刷新：立刻向 QQ 拉一轮名单（好友 / 群 / 白名单群成员）再回 counts。
+        // 这里是**同步**的（dev-doc §五.6）：控制台点一下要看到结果，不是「已排队」。
+        // 全量 IO 最坏是 15 秒 × 群数，所以它在 adminOnlyV2Paths 里，AI 触发不了。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/identity/refresh') {
+          const result = await refreshIdentityMap();
+          if (!result.ok) {
+            sendJson({
+              ok: false,
+              reason: result.reason ?? 'failed',
+              error: '名字映射表未启用（socialV2.identity.enabled=false）'
+            }, 403);
+            return;
+          }
+          sendJson({
+            ok: true,
+            updatedAt: Number(identityStateNow()?.updatedAt) || 0,
+            counts: result.counts
           });
           return;
         }
@@ -8176,6 +8367,27 @@ async function main() {
                 hint: '想画点什么直接画；画完可以发、可以存表情、也可以换头像。别拿它画真人照片。'
               };
             })(),
+            // 名字映射表（T-018）：当前会话叫什么、最近谁在这里说过话（号码 → 名字）。
+            // 有这张表，模型看到「2432822808 说了…」时就不用猜这是谁，也不用把号码原样
+            // 甩给群友。speakers 只取当前会话最近来访的 8 个人（非 self，按号码去重），
+            // 具体显示哪个名字由 identity-core 按「本群名片 → 私聊备注 → 消息里的名字」
+            // 重新解析 —— 桥接只负责给「谁」，不给「叫什么」。
+            identity: (() => {
+              // core 的 enabled 只表示 key 合法；配置开关在这里判（关掉时整块不出现）。
+              if (cfg.socialV2?.identity?.enabled === false) return { enabled: false };
+              const speakers = [];
+              const seen = new Set();
+              const recent = Array.isArray(st.recentMessages) ? st.recentMessages : [];
+              for (let i = recent.length - 1; i >= 0 && speakers.length < 8; i -= 1) {
+                const m = recent[i];
+                if (!m || m.isSelf) continue;
+                const qq = String(m.userId ?? m.qq ?? '').trim();
+                if (!/^\d{1,20}$/.test(qq) || seen.has(qq)) continue;
+                seen.add(qq);
+                speakers.push({ qq, name: String(m.sender ?? '').trim() });
+              }
+              return identityPromptBlock(identityStateNow(), key, { speakers, speakerLimit: 8 });
+            })(),
             // 跨会话互通（T-016）：只给「同组还有谁、各有几条、最后一条何时」的元数据。
             // **绝不**把别的会话的消息正文塞进 prompt —— 那会让当前对话的第三方内容
             // 无提示地泄漏；要看细节让模型自己调 qq_recall（带出处提示，且有频率上限）。
@@ -8595,7 +8807,11 @@ async function main() {
             sendJson({ ok: false, error: '已禁用多条发送，请合并为一条消息' }, 403);
             return;
           }
-          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          // 发送类端点用 agentTokenCoversSend（T-018）：本会话令牌，或同一互通编号的会话令牌。
+          if (req.headers['x-agent-token'] && !agentTokenCoversSend(key, req.headers['x-agent-token'])) {
+            sendJson({ ok: false, error: 'agent token 无效，或目标会话不在同一互通编号（可在控制台「跨渠道互通」里改编号）' }, 403);
+            return;
+          }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('sendBurst')) { sendJson({ ok: false, error: '工具未启用：qq_send_burst' }, 403); return; }
           if (currentMode !== 'reserved2') {
@@ -8724,7 +8940,10 @@ async function main() {
             sendJson({ ok: false, error: '已禁用多条发送，请合并为一条消息' }, 403);
             return;
           }
-          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !agentTokenCoversSend(key, req.headers['x-agent-token'])) {
+            sendJson({ ok: false, error: 'agent token 无效，或目标会话不在同一互通编号（可在控制台「跨渠道互通」里改编号）' }, 403);
+            return;
+          }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('sendMessage')) { sendJson({ ok: false, error: '工具未启用：qq_send_message' }, 403); return; }
           if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
@@ -8837,7 +9056,10 @@ async function main() {
           if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
           if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
           if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'reserved2 模式发送拍一拍必须携带 agent token' }, 403); return; }
-          if (!agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (!agentTokenCoversSend(key, req.headers['x-agent-token'])) {
+            sendJson({ ok: false, error: 'agent token 无效，或目标会话不在同一互通编号（可在控制台「跨渠道互通」里改编号）' }, 403);
+            return;
+          }
           if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (!v2ToolEnabled('sendPoke')) { sendJson({ ok: false, error: '工具未启用：qq_send_poke' }, 403); return; }
           if (socialV2.paused) { sendJson({ ok: false, error: '二代 AI 已暂停，不能发送拍一拍' }, 403); return; }
@@ -9149,7 +9371,10 @@ async function main() {
           if (!key) { sendJson({ ok: false, error: 'key 不能为空（格式 group:群号 或 private:QQ号）' }, 400); return; }
           if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
           if (!token) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
-          if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (!agentTokenCoversSend(key, token)) {
+            sendJson({ ok: false, error: 'agent token 无效，或目标会话不在同一互通编号（可在控制台「跨渠道互通」里改编号）' }, 403);
+            return;
+          }
           if (!v2ToolEnabled('sendVoice')) { sendJson({ ok: false, error: '工具未启用：qq_send_voice' }, 403); return; }
           if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
@@ -9219,7 +9444,11 @@ async function main() {
             sendJson({ ok: false, error: '表情消息不能附带文字；请先用 qq_send_message / qq_reply 把想说的话作为单独气泡发送，再单独 qq_send_sticker 发表情' }, 400);
             return;
           }
-          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          // 发表情也是「发言」：同一互通编号的令牌可以往对面会话里发（T-018）。
+          if (req.headers['x-agent-token'] && !agentTokenCoversSend(key, req.headers['x-agent-token'])) {
+            sendJson({ ok: false, error: 'agent token 无效，或目标会话不在同一互通编号（可在控制台「跨渠道互通」里改编号）' }, 403);
+            return;
+          }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('sendSticker')) { sendJson({ ok: false, error: '工具未启用：qq_send_sticker' }, 403); return; }
           if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
@@ -10454,7 +10683,10 @@ async function main() {
             return;
           }
           if (currentMode === 'reserved2' && !token) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
-          if (token && !agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (token && !agentTokenCoversSend(key, token)) {
+            sendJson({ ok: false, error: 'agent token 无效，或目标会话不在同一互通编号（可在控制台「跨渠道互通」里改编号）' }, 403);
+            return;
+          }
           const flag = isPrivate ? 'sendPrivate' : (isReply ? 'reply' : 'sendGroup');
           if (token && !v2ToolEnabled(flag)) { sendJson({ ok: false, error: `工具未启用：${flag}` }, 403); return; }
           if (shouldBlockSilentReply(key)) {
@@ -13655,6 +13887,181 @@ async function main() {
     return { ok: true };
   }
 
+  // ── 名字映射表（T-018）：好友 / 群 / 群成员的名字缓存 ────────────────────
+  //
+  // 唯一真源是 state/identity-map.json；进程内再留一份（identityState）避免每条 prompt
+  // 都读一遍可能上万条的文件。refresh 与增量 upsert 改的是同一份对象，写完立刻落盘。
+  // enabled:false 时三处一起短路：不拉名单、不落盘、prompt 里没有 identity 块。
+  let identityState = null;
+  // 写盘节流：会话 key → 上次落盘时间。identity-core 的 upsert* 已经只在「名字/来源
+  // 真的变了」时返回 true，但刷屏时同一批人会被反复命中，这里再按会话压 10 分钟一次
+  // （dev-doc §五.5）；被压掉的只是落盘，内存里的 lastSeenAt 照旧前进。
+  const identityWriteThrottle = new Map();
+  const IDENTITY_WRITE_THROTTLE_MS = 10 * 60 * 1000;
+  // 空 q 的「最近活跃」各取前 30 个好友 / 前 30 个群（dev-doc §五.6）。
+  const IDENTITY_RECENT_LIMIT = 30;
+
+  function identityStateNow() {
+    if (!identityState) identityState = readIdentityState();
+    return identityState;
+  }
+
+  function identityCounts(state = identityStateNow()) {
+    const privates = Object.keys(state?.privates ?? {}).length;
+    const groups = Object.keys(state?.groups ?? {}).length;
+    let members = 0;
+    for (const group of Object.values(state?.groups ?? {})) {
+      members += Object.keys(group?.members ?? {}).length;
+    }
+    return { privates, groups, members };
+  }
+
+  /** 落盘并推进 updatedAt。失败只记日志（writeIdentityState 内部已记），返回布尔。 */
+  function saveIdentityState() {
+    const state = identityStateNow();
+    state.updatedAt = Date.now();
+    return writeIdentityState(state);
+  }
+
+  /**
+   * 消息增量：把「谁在这个会话里说了话」记进名字表。
+   *
+   * 每条入站消息都会走（appendSocialV2Message 末尾），所以这里必须**便宜**：
+   * 几次字符串归一 + 对象查找，只有真变化才考虑落盘，且同一个会话 10 分钟内最多
+   * 落盘一次。upsert* 返回 false 只意味着「名字没变」（lastSeenAt 已在内存里推进），
+   * 不需要再自己 diff 一遍。
+   */
+  function recordIdentityMessage(key, sender, userId) {
+    if (cfg.socialV2?.identity?.enabled === false) return;
+    const k = String(key ?? '').trim();
+    const qq = String(userId ?? '').trim();
+    const name = String(sender ?? '').trim();
+    if (!/^(group|private):\d{1,20}$/.test(k)) return;
+    if (!/^[1-9]\d*$/.test(qq) || name === '') return;
+    const now = Date.now();
+    const state = identityStateNow();
+    let changed = false;
+    if (k.startsWith('private:')) {
+      changed = upsertPrivate(state, { qq, name, at: now, source: 'message' });
+    } else {
+      const gid = k.slice('group:'.length);
+      if (!state.groups?.[gid]) {
+        // 群还不认识：只有操作者明确配在白名单里的群才补一个空壳（群名/名片交给下一次
+        // refresh 补全）。不在白名单里的群一个字节都不写 —— 那才是 core 里说的「凭空建群」。
+        const allowed = (cfg.allow?.groups ?? []).map((value) => String(value));
+        if (!allowed.includes(gid)) return;
+      }
+      changed = upsertGroup(state, { gid, at: now }) || changed;
+      changed = upsertMember(state, gid, { qq, name, at: now }) || changed;
+    }
+    if (!changed) return;
+    const last = identityWriteThrottle.get(k) ?? 0;
+    if (now - last < IDENTITY_WRITE_THROTTLE_MS) return;
+    if (saveIdentityState()) identityWriteThrottle.set(k, now);
+  }
+
+  /**
+   * 空 q 时给「最近活跃」的名单：好友按 lastSeenAt 前 30 + 群按 lastSeenAt 前 30。
+   * 行形状与 lookupIdentity 严格一致（kind/key/name/label/qq/gid/groupName/score），
+   * 控制台与工具不需要为两种来源写两套渲染。score 恒为 0：它只对「搜了什么」有意义。
+   */
+  function recentIdentityRows(state, limit = IDENTITY_RECENT_LIMIT) {
+    const byRecent = (container) => Object.values(container ?? {})
+      .filter((entry) => entry && typeof entry === 'object')
+      .sort((left, right) => (Number(right.lastSeenAt) || 0) - (Number(left.lastSeenAt) || 0))
+      .slice(0, limit);
+    const rows = [];
+    for (const entry of byRecent(state?.privates)) {
+      const info = identityKey(state, `private:${String(entry.qq ?? '')}`);
+      if (!info) continue;
+      rows.push({
+        kind: 'private', key: info.key, name: info.name, label: info.label,
+        qq: info.id, gid: null, groupName: '', score: 0
+      });
+    }
+    for (const entry of byRecent(state?.groups)) {
+      const info = identityKey(state, `group:${String(entry.gid ?? '')}`);
+      if (!info) continue;
+      rows.push({
+        kind: 'group', key: info.key, name: info.name, label: info.label,
+        qq: null, gid: info.id, groupName: '', score: 0
+      });
+    }
+    return rows;
+  }
+
+  /**
+   * OneBot 列表动作的薄封装：统一 15 秒超时与失败判定。
+   *
+   * oneBotActionNested 只负责发请求、解析 JSON，**不看状态码**；拉名单是后台动作，
+   * 网关返 500 / `{status:'failed'}` 时必须当失败 —— 否则空数组会被当成「真的一个好友
+   * 都没有」写进名字表，把上一轮拉到的名字全部按 maxFriends 淘汰掉。
+   */
+  async function fetchIdentityList(action, params) {
+    const { res, body, data } = await oneBotActionNested(cfg, action, params, 15000);
+    if (!res?.ok) throw new Error(`${action} HTTP ${res?.status ?? '?'}`);
+    if (body?.status === 'failed' || body?.status === 'error') {
+      throw new Error(`${action} retcode=${body?.retcode ?? '?'} ${body?.message ?? body?.wording ?? ''}`.trim());
+    }
+    return data;
+  }
+
+  /**
+   * 拉一轮完整名单：好友 → 群 → 白名单群的成员。
+   *
+   * 顺序是硬的：成员要往群里写（applyMemberList 对不认识的群直接返回 0），所以群必须先
+   * 合并。单个群失败只 log 后继续（dev-doc §五.4）—— 一个群没权限不该让整轮白跑。
+   * 返回 `{ok:true, counts}` 或 `{ok:false, reason}`，POST 端点直接翻译成响应。
+   */
+  async function refreshIdentityMap() {
+    if (cfg.socialV2?.identity?.enabled === false) return { ok: false, reason: 'disabled' };
+    const config = cfg.socialV2?.identity;
+    const state = identityStateNow();
+    const at = Date.now();
+    let friends = 0;
+    let groups = 0;
+    let members = 0;
+    try {
+      friends = applyFriendList(state, await fetchIdentityList('get_friend_list', {}), at, config);
+    } catch (error) {
+      log(`[identity] 拉取好友列表失败（本轮跳过）：${error?.message ?? error}`);
+    }
+    try {
+      groups = applyGroupList(state, await fetchIdentityList('get_group_list', {}), at, config);
+    } catch (error) {
+      log(`[identity] 拉取群列表失败（本轮跳过）：${error?.message ?? error}`);
+    }
+    for (const raw of cfg.allow?.groups ?? []) {
+      const gid = String(raw ?? '').trim();
+      if (!/^[1-9]\d*$/.test(gid)) continue;
+      try {
+        const list = await fetchIdentityList('get_group_member_list', { group_id: Number(gid) });
+        members += applyMemberList(state, gid, list, at, config);
+      } catch (error) {
+        log(`[identity] 拉取群 ${gid} 成员失败（跳过）：${error?.message ?? error}`);
+      }
+    }
+    saveIdentityState();
+    const counts = identityCounts(state);
+    log(`[identity] 名字表已刷新：好友 ${friends} / 群 ${groups} / 成员 ${members}`);
+    return { ok: true, counts };
+  }
+
+  // 启动后 10 秒跑第一轮（那时 SnowLuma 的连接与白名单已就绪，早于它拉列表容易拿到空结果），
+  // 之后按配置间隔定时跑。unref：后台补充资料，不该拖住进程退出（与 affectVentTimer 同理）。
+  if (cfg.socialV2?.identity?.enabled !== false) {
+    const identityEveryMs = Number(cfg.socialV2?.identity?.refreshIntervalMs) || IDENTITY_DEFAULTS.refreshIntervalMs;
+    const identityFirstTimer = setTimeout(() => {
+      refreshIdentityMap().catch((error) => log(`[identity] 首次刷新异常：${error?.message ?? error}`));
+    }, 10 * 1000);
+    identityFirstTimer.unref?.();
+    const identityRefreshTimer = setInterval(() => {
+      refreshIdentityMap().catch((error) => log(`[identity] 定时刷新异常：${error?.message ?? error}`));
+    }, identityEveryMs);
+    identityRefreshTimer.unref?.();
+    log(`[identity] 名字映射表已启用（每 ${Math.round(identityEveryMs / 60000)} 分钟刷新一轮，启动 10 秒后先跑一次）`);
+  }
+
   // ── 二代仿真模式（reserved2）唤醒调度 ──────────────────────────────────
   function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = []) {
     const st = getSocialV2State(key);
@@ -13739,6 +14146,9 @@ async function main() {
       isSelf: false,
       text: crossText
     });
+    // 名字映射表（T-018）：顺手记下「这个号码在这个会话里叫什么」。refresh 六小时才跑
+    // 一轮，靠它补上两轮之间的新面孔；函数内部自己判 enabled、自己压 10 分钟一次的写盘。
+    recordIdentityMessage(key, sender, userId);
   }
 
   // 二代拍一拍事件写入最近/未读消息流，让 AI 能看到“谁拍了拍谁/拍了拍我”。

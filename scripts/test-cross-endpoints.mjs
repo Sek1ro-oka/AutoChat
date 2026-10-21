@@ -191,9 +191,13 @@ check('GET 返回 ok/enabled/bufferPerConversation/conversations',
 check('GET 会话来源 = groups ∪ 二代会话',
   getBlock.includes('new Set(Object.keys(groups))')
   && getBlock.includes('socialV2.conversations.keys()'));
-check('GET 每项含 key/label/gid/count/lastAt',
-  ['key,', 'label: humanKeyLabel(key)', 'gid: groupOf(groups, key)', 'count: entries.length', 'lastAt']
+check('GET 每项含 key/label/owner/gid/count/lastAt',
+  ['key,', 'owner: key === ownerKey', 'gid: groupOf(groups, key)', 'count: entries.length', 'lastAt']
     .every((piece) => getBlock.includes(piece)));
+// 主人私聊永远在列表里，而且编号可改：它有专门的一行 label，不是靠 humanKeyLabel 兜底。
+check('GET 把主人私聊补进 keys，并给主人专用 label',
+  getBlock.includes('const ownerKey = cfg.ownerQQ ?') && getBlock.includes('if (ownerKey) keys.add(ownerKey)')
+  && getBlock.includes('label: key === ownerKey ? `主人（私聊 ${String(cfg.ownerQQ)}）` : humanKeyLabel(key)'));
 check('GET 按 lastAt 降序', getBlock.includes('(b.lastAt - a.lastAt)'));
 
 const postBlock = sliceBetween(bridge, POST_MARK, RECALL_MARK);

@@ -68,6 +68,14 @@ import * as crossCore from '../src/cross-core.js';
 // 导出名已核对：与上面所有 spread 模块均不重名（唯一的 nowIso 冲突是既有问题）。
 import * as imageCore from '../src/image-core.js';
 import * as imageGen from '../src/image-gen.js';
+// 名字映射表（T-018）：identity-core 是纯逻辑模块（状态归一 / upsert / 打分检索 /
+// 提示词块 / 文案，零依赖、零 I/O、时钟由 at/now 注入）。bridge.js 顶层 import 了 17 个
+// 导出名并在 loadConfig 期间就调 normalizeIdentityConfig，少了这一行 VM 里立刻
+// ReferenceError → 所有走 VM 的用例一起红（与 cross/image/profile 同理）。
+// 导出名已核对：IDENTITY_* / normalize* / create* / parse* / serialize* / upsert* /
+// apply* / identityKey / lookupIdentity / identityPromptBlock / formatIdentityRows
+// 与其它 spread 模块均不重名。
+import * as identityCore from '../src/identity-core.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -212,6 +220,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...socialAuto,
     ...crossCore,
     ...imageCore, ...imageGen,
+    ...identityCore,
     ...affectCore, ...affectVent, ...affectText,
     ...profileCore,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的

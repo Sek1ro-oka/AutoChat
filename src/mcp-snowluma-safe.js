@@ -19,6 +19,9 @@ import { z } from 'zod';
 // 在 MCP 里拦会连「安全拒绝理由」都拿不到，反而让模型无法把话说清楚。
 import { SENSITIVE_RE } from './sensitive.js';
 import { serializeModelData } from './qq-model-view.js';
+// 名字表查询的文案格式化是纯函数（零 IO），放 identity-core，桥接与 MCP 共用一套
+// 「私聊 名字（QQ 123）→ private:123」的 label 格式，避免两边各写一份慢慢漂移。
+import { formatIdentityRows } from './identity-core.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -1291,6 +1294,72 @@ if (cfg.socialV2?.cross?.enabled !== false) {
         }
         const detail = error?.body?.reason ? `（reason=${error.body.reason}）` : '';
         return { content: [{ type: 'text', text: `回忆失败：${error?.message ?? error}${detail}` }], isError: true };
+      }
+    }
+  );
+}
+
+// ── 名字映射（T-018）：按名字/群名/QQ 号/群号查这台机器认识的人与会话 ─────────
+//
+// 与 qq_recall 分开：那个回忆的是「说过的话」，这个查的是「这台机器认识谁、该用哪个
+// key 发消息」。只读；数据由桥接的后台刷新器维护，这里只查不写。
+//
+// 开关放在注册期（与 qq_recall 的 cross.enabled 同口径）：identity.enabled=false 时
+// 桥接不拉取、不写状态、prompt 里也没有 identity 块，工具留着只会查一次撞一次
+// 403「没开」。回调里再查一次 getConfig()，是因为 MCP 进程常驻、config.json 会热更。
+const identityEnabled = () => cfg?.socialV2?.identity?.enabled !== false;
+const IDENTITY_DISABLED_TEXT = '名字映射没有开启，查不到人；不要重试。';
+
+if (identityEnabled()) {
+  server.tool(
+    'qq_lookup',
+    '按名字、群名、QQ 号或群号查这台机器认识的会话与人，返回可以直接发消息的 key。只读。查不到就直说不知道，不要猜号码。跨会话发言要求两个会话的互通编号相同。',
+    {
+      query: z.string().describe('名字/备注/群名片/群名/QQ 号/群号，例如「阿芙乐尔」「联调群」「119212385」'),
+      limit: z.union([z.number(), z.string()]).optional().describe('最多返回多少条，默认 20，范围 1–50'),
+      token: z.string().optional().describe('二代会话令牌（reserved2 模式下唤醒提示里给了；带上它桥接才会做会话归属校验）')
+    },
+    async ({ query, limit, token }) => {
+      // 注册期之外再看一眼配置：桥接热更新 config.json，而这个 MCP 进程是常驻的。
+      if (getConfig().socialV2?.identity?.enabled === false) {
+        return { content: [{ type: 'text', text: IDENTITY_DISABLED_TEXT }], isError: true };
+      }
+      const wanted = String(query ?? '').trim();
+      if (!wanted) {
+        return { content: [{ type: 'text', text: 'query 不能为空：把名字、群名、QQ 号或群号传进来。' }], isError: true };
+      }
+      // limit 允许模型传字符串（"20"）：先转数再钳到 1–50；不合法就按默认 20，不报错
+      // —— 为了一条查询结果跟参数较劲，不如用默认值查了再说。
+      const parsedLimit = Number(String(limit ?? '').trim() || '20');
+      const wantedLimit = Number.isFinite(parsedLimit) ? Math.min(50, Math.max(1, Math.floor(parsedLimit))) : 20;
+      try {
+        const data = await agentApi(
+          `/api/socialV2/identity?q=${encodeURIComponent(wanted)}&limit=${wantedLimit}`,
+          token ? { headers: { 'x-agent-token': token } } : {}
+        );
+        const rows = Array.isArray(data?.rows) ? data.rows : [];
+        if (rows.length === 0) {
+          return { content: [{ type: 'text', text: '没有找到匹配的会话或人（不要猜号码）。' }] };
+        }
+        return {
+          content: [{
+            type: 'text',
+            text: [`找到 ${rows.length} 条（用 key 发消息）：`, formatIdentityRows(rows)].join('\n')
+          }]
+        };
+      } catch (error) {
+        // 429 = 查得太密（桥接侧限流）：换关键词硬试只会继续 429，必须让模型先等。
+        if (Number(error?.status) === 429) {
+          const retry = Number(error?.retryAfterMs ?? error?.body?.retryAfterMs);
+          const seconds = Number.isFinite(retry) && retry > 0 ? Math.max(1, Math.ceil(retry / 1000)) : 30;
+          return { content: [{ type: 'text', text: `查太频繁了，约 ${seconds} 秒后再试` }], isError: true };
+        }
+        // 403 = 鉴权/开关问题（令牌无效、没开、会话不在允许范围）：桥接的 message 已经
+        // 写明原因，原样转述；自己加戏只会把模型往错误的方向引。
+        if (Number(error?.status) === 403) {
+          return { content: [{ type: 'text', text: String(error?.message ?? error) }], isError: true };
+        }
+        return { content: [{ type: 'text', text: `查询失败：${error?.message ?? error}` }], isError: true };
       }
     }
   );

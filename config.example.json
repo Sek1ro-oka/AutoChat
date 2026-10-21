@@ -386,6 +386,13 @@
       "bufferPerConversation": 500,
       "groups": {}
     },
+    "identity": {
+      "enabled": true,
+      "refreshIntervalMs": 21600000,
+      "maxFriends": 1000,
+      "maxGroups": 200,
+      "maxGroupMembers": 2000
+    },
     "images": {
       "enabled": true,
       "provider": "pollinations",
