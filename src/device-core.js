@@ -65,7 +65,7 @@ const BLOCKED_APP_LABELS = Object.freeze({
  *   真正需要收窄时在 config.json 的 `device.apps` 里列出来即可。
  * - `blockedApps` 默认就是内核那五项，且**归一化时永远并回内核**（用户删不掉）。
  * - `adbPath` 用 `%LOCALAPPDATA%` 占位而不是写死某个人的用户名目录：platform-tools 不一定在
- *   PATH 里（靠 PATH 找 adb 会在服务进程的 PATH 里神秘失败），但把 `C:\Users\<某人>\...` 写进
+ *   PATH 里（靠 PATH 找 adb 会在服务进程的 PATH 里神秘失败），但把某个人的用户目录绝对路径写进
  *   源码又会把本机路径带进仓库、换个账号 clone 下来还得改代码。`%LOCALAPPDATA%` 两全：同一台机
  *   器展开后与原路径一致，执行前由 `expandEnvPath` 展开。用户仍可用 `device.adbPath` 覆盖。
  * - `pauseAfterRunMs` 是「一轮玩完后的冷却」（1 小时）：由桥接在收尾时用 `pauseDevice` 落盘。
@@ -239,7 +239,7 @@ function toAdbPath(value) {
  * 展开路径里的 `%NAME%`（Windows 风格的环境变量占位）。
  *
  * 存在的理由：默认 adb 路径是 `%LOCALAPPDATA%\Android\platform-tools\adb.exe`，
- * 不写死某个人的 `C:\Users\<名字>\...`。`execFile` 和 `fs.existsSync` 都不认 `%NAME%`，
+ * 不写死某个人的用户目录绝对路径。`execFile` 和 `fs.existsSync` 都不认 `%NAME%`，
  * 所以**必须在真正用到路径之前**展开，否则 spawn 会拿字面量去开文件、报一个看不懂的 ENOENT。
  *
  * 只认 `%NAME%` 这一种写法：`$NAME` / `${NAME}` / `~` 一律**不碰**（那几个在纯 Windows
