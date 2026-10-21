@@ -198,7 +198,11 @@ check('端点是 POST 分支（method 与 pathname 同时判定）',
 
 const getAffectLine = bridge.indexOf("if (req.method === 'GET' && url.pathname === '/api/socialV2/affect')");
 const handlerStart = bridge.indexOf(`if (req.method === 'POST' && url.pathname === '${EVENTS_PATH}')`);
-const handlerEnd = bridge.indexOf('// 配置：POST body 支持四键', handlerStart);
+// 切片终点必须是**下一条端点分派**，不是下一条注释：注释边界会把后面的
+// POST /api/socialV2/affect/config 一起吞进来，任何在两者之间新加的端点
+// （例如 T-014 的自我资料四端点，里面有 oneBotActionNested）都会让「上报链路
+// 不发送」这条断言误红。这里只切上报分支本身。
+const handlerEnd = bridge.indexOf("if (req.method === 'POST' && url.pathname === '/api/socialV2/affect/config')", handlerStart);
 const handler = handlerStart < 0 ? '' : bridge.slice(handlerStart, handlerEnd < 0 ? handlerStart + 4000 : handlerEnd);
 check('端点排在 GET /api/socialV2/affect 之后', handlerStart > getAffectLine && getAffectLine > 0);
 check('handler 切片取到完整分支', handler.length > 200 && handler.includes('sendJson('), `长度 ${handler.length}`);

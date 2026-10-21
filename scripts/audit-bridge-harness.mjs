@@ -45,6 +45,13 @@ import * as affectVent from '../src/affect-vent.js';
 // bridge.js 顶层单行 import 会被下面按行剥掉，这里补上同名绑定；缺了这一行，
 // 任何走到 generateVentText 的用例都会 ReferenceError。
 import * as affectText from '../src/affect-text.js';
+// 自我资料（T-014 步骤 2）：清洗 / 长度 / 形状审计 / 冷却与日额度 / 状态归一。
+// 同样是纯逻辑模块（零依赖、零 I/O、时钟由 now 注入）。bridge.js 顶层 import 会被
+// 下面按行剥掉，这里补上同名绑定：loadConfig 期间就调 normalizeProfileConfig，
+// 少了这一行 VM 里立刻 ReferenceError → 所有 HTTP 用例一起红（与 affect/qzone 同理）。
+// 导出名已核对：PROFILE_* / AVATAR_SIZES / check* / quotaFor / recordChange /
+// *ProfileState 与其它 spread 模块均不重名。
+import * as profileCore from '../src/profile-core.js';
 // 社交自动化（入群邀请 / 好友申请）也是纯逻辑模块（决策、文案、额度、审计格式，零 I/O）：
 // bridge.js 顶层 import 了 16 个导出名，loadConfig 期间就调 normalizeAutomation，少这一行
 // VM 里立刻 ReferenceError → 所有走 VM 的用例一起红。
@@ -192,6 +199,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...stall, ...consoleAuth, ...qzone, ...presetPrompt,
     ...socialAuto,
     ...affectCore, ...affectVent, ...affectText,
+    ...profileCore,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),

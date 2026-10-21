@@ -127,6 +127,25 @@ import {
 // 情绪出口的纯规划层：只算「该不该说、走哪个渠道、说多长」，不发送、不写盘。
 // planVent 被 /api/socialV2/affect 用来给面板生成「现在会发生什么」的逐行中文解释。
 import { VENT_CHANNELS, checkVentText, planVent } from './affect-vent.js';
+// 自我资料（T-014）：清洗 / 长度 / 形状审计 / 冷却与日额度 / 状态归一，全部在纯模块里。
+// 桥接这边只做「读旧值 → 调 OneBot → 读回 → 记账」，**不写任何长度或配额字面量**：
+// 调参只改 profile-core.js 的 PROFILE_DEFAULTS（或 config.json 的 socialV2.profile）。
+import {
+  PROFILE_DEFAULTS,
+  normalizeProfileConfig,
+  cleanProfileText,
+  checkNickname,
+  checkSignature,
+  checkGroupCard,
+  quotaFor,
+  createProfileState,
+  normalizeProfileState,
+  recordChange,
+  serializeProfileState,
+  parseProfileState,
+  avatarUrl,
+  AVATAR_SIZES
+} from './profile-core.js';
 // 文案生成的三件纯函数（T-012 第五步）：清洗模型输出 / 拼提示词 / 保守兜底模板。
 // 单行 import：scripts/audit-bridge-harness.mjs 按行剥顶层 import，单行最不容易出岔子
 // （同名绑定由 harness 的 `...affectText` 注入 VM）。
@@ -163,6 +182,11 @@ const AFFECT_STATE_FILE = path.join(STATE_DIR, 'affect.json');
 // 与 slang-session.json 同一套思路：preset 变了（或没有元数据）就直接重建会话，
 // 因为「旧会话当初用的是什么权限」无法证明 —— 而这个会话的产出会发到公开空间。
 const AFFECT_VENT_SESSION_FILE = path.join(STATE_DIR, 'affect-vent-session.json');
+// 自我资料的改动账本（T-014）：每项资料的「上次改动时间 + 上次值」与最近 100 条变更。
+// 冷却与日额度**全部**由这份文件推导（quotaFor 是纯函数），所以它同时是「配额来源」；
+// 手删它等于把三个冷却清零 —— 这是有意的（出问题时给运维一个不用改代码的复位手段）。
+// 注意 dev-doc 写的是 DATA_DIR，但桥接里只有 STATE_DIR（qzone/affect 也都落在这里）。
+const PROFILE_STATE_FILE = path.join(STATE_DIR, 'profile-changes.json');
 
 /**
  * 模式拼写的**唯一**归一入口（输入边界）。
@@ -1013,6 +1037,13 @@ function loadConfig() {
   // planVent 恒按 quiet:false 调用，静默时段等下一步接入发送时再连同 enabled 一起处理。
   cfg.socialV2.affect = normalizeAffectConfig(cfg.socialV2?.affect);
 
+  // socialV2.profile：机器人「改自己的资料」（昵称 / 签名 / 群名片）的闸门配置。
+  // 和 affect 一样，这里是**唯一**的归一入口：缺字段补出厂默认、越界钳制，
+  // normalizeProfileConfig 永不抛（坏的配置最多退回 PROFILE_DEFAULTS）。
+  // 缺省段 = 出厂默认（enabled: true）——没写这一段也照常可用，不用先改 config.json。
+  // 刻意**不**进控制台：这是 AI 自己的资料，不是操作者的面板开关（dev-doc §6）。
+  cfg.socialV2.profile = normalizeProfileConfig(cfg.socialV2?.profile);
+
   // socialV2.voice：语音发送（把准备好的音频文件当 QQ 语音发出去）。
   // dir 为相对仓库根目录的语音库路径；AI 的 qq_send_voice 默认只能从这个目录取文件，
   // 绝对路径需要显式开 allowAbsolutePath（默认关，避免 prompt injection 读到任意本地文件）。
@@ -1633,6 +1664,57 @@ function writeAffectState(state) {
     atomicWriteJson(AFFECT_STATE_FILE, payload);
   } catch (error) {
     log(`[affect] 状态落盘失败（本轮继续）：${error?.message ?? error}`);
+  }
+}
+
+// ── 自我资料（T-014）：状态文件读写 ──────────────────────────────────────────
+// 判定逻辑（清洗 / 长度 / 形状审计 / 冷却与日额度 / 状态归一）全在 src/profile-core.js，
+// 那里零 I/O 零依赖。这里只负责 state/profile-changes.json 的读与写，和 affect / qzone
+// 一样**不做进程内缓存**：文件很小，且手动删掉它就该立刻把三项冷却与日额度清零。
+
+/**
+ * 读资料改动账本（纯读，不落盘）。
+ *
+ * - 没有文件 / JSON 坏了 / 形状不是对象 → 出厂状态（createProfileState），且**不写盘**：
+ *   读接口绝不制造副作用（否则一次 GET /api/socialV2/profile 就会往 state/ 里落一个空账本）。
+ * - 其余都过 normalizeProfileState：补字段、坏时间戳归零、groupCard 只留纯数字群号、
+ *   changes 按时间倒序留 100 条。它本身永不抛，这里再包一层只是防御。
+ */
+function readProfileState(now = Date.now()) {
+  const raw = readJsonSafe(PROFILE_STATE_FILE, null);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return createProfileState();
+  const ts = Number.isFinite(now) ? now : Date.now();
+  try {
+    return normalizeProfileState(raw, ts);
+  } catch (error) {
+    log(`[profile] 状态文件无法归一，改用出厂状态：${error?.message ?? error}`);
+    return createProfileState();
+  }
+}
+
+/**
+ * 落盘资料改动账本（调用点只有一个：读回校验通过、recordChange 记上之后）。
+ *
+ * 先 serializeProfileState 再 parseProfileState 走一遍形状校验，保证写出去的一定是对象；
+ * 落盘失败**只记日志并返回 false**：这次改动在 QQ 侧是真的成功了，不能因为写盘失败就
+ * 给模型回 500（那会让它以为没改成，然后换个参数硬试一次，白吃一次冷却）。
+ *
+ * 「先写 *.tmp 再 rename」由 atomicWriteJson 负责（它自带 mkdir / 0600 / EPERM 退避重试），
+ * 和 affect、qzone 的落盘路径完全一致 —— 不要再手写一份固定名 `.tmp`：
+ * 固定临时名在并发或符号链接场景下会被别人踩到（见 atomicWriteJson 上方的注释）。
+ */
+function writeProfileState(state) {
+  try {
+    const payload = parseProfileState(serializeProfileState(state));
+    if (!payload) {
+      log('[profile] 状态序列化结果不是对象，本次跳过落盘');
+      return false;
+    }
+    atomicWriteJson(PROFILE_STATE_FILE, payload);
+    return true;
+  } catch (error) {
+    log(`[profile] 状态落盘失败（本轮继续）：${error?.message ?? error}`);
+    return false;
   }
 }
 
@@ -4786,8 +4868,10 @@ async function main() {
       // / qq_list_groups 等工具必须在这个模式里可用（工具描述写的也是"closed-agent 模式不需要"）。
       // 这些端点各自按模式判定（/api/send/* 只在 closed-agent 放行；/api/images/* 在 reserved2
       // 强制要令牌；/api/status 对智能体调用只回最小对象），所以这里把「无令牌智能体调用」
-      // 限制到这条非 v2 会话面；整个 /api/socialV2/ 前缀一概不放——那里的 token 校验全是
+      // 限制到这条非 v2 会话面。整个 /api/socialV2/ 前缀默认不放 —— 那里的令牌校验全是
       // `if (x-agent-token && …)`，放进来就等于退化成管理端全权（confused deputy）。
+      // 例外只有 T-014 的自我资料四端点 + 头像：它们**没有**管理语义，各自的闸门在端点里
+      // （enabled / 内容审计 / 冷却与日额度 / 群白名单），且路径是精确匹配、不带前缀通配。
       if (req.headers['x-agent-call'] !== undefined) {
         const agentToken = req.headers['x-agent-token'];
         const hasToken = typeof agentToken === 'string' && agentToken !== '';
@@ -4798,7 +4882,18 @@ async function main() {
         if (!hasToken) {
           const tokenlessAgentAllowed = url.pathname === '/api/status'
             || url.pathname.startsWith('/api/send/')
-            || url.pathname.startsWith('/api/images/');
+            || url.pathname.startsWith('/api/images/')
+            // 头像下载（T-014）：只回图片字节，没有任何会话维度可越权，谁问都一样。
+            || url.pathname === '/api/avatar'
+            // 自我资料（T-014）：读快照 + 改昵称/签名/群名片。和 /api/send/ 同性质 ——
+            // 这是 AI「对自己」的动作，不是管理端功能，闸门全在端点里（enabled / 内容审计 /
+            // 冷却与日额度 / 群白名单）。放行它们不等于放行管理端：config / reset / wake
+            // 那些仍在 adminOnlyV2Paths 里；而**带了**会话令牌的请求在前一段就已经被要求
+            // 命中活跃会话，走到这里的都是「没令牌、但持有控制台令牌」的 MCP 调用。
+            || url.pathname === '/api/socialV2/profile'
+            || url.pathname === '/api/socialV2/profile/nickname'
+            || url.pathname === '/api/socialV2/profile/signature'
+            || url.pathname === '/api/socialV2/profile/group-card';
           if (!tokenlessAgentAllowed) {
             sendJson({ ok: false, error: '未授权：该接口的智能体调用必须携带有效的会话令牌' }, 403);
             return;
@@ -4875,6 +4970,9 @@ async function main() {
             // 它们本身就是给 AI 用的，真正的闸门是 qzone.enabled + 审计 + 配额 + 管理员校验，
             // 不靠"AI 摸不到这个路径"来保安全。
             || url.pathname.startsWith('/api/qzone/')
+            // 头像下载（T-014）：MCP 的 qq_get_avatar 可能带着会话令牌来（不带也能来，
+            // 上面那段 tokenless 白名单已放行），所以这里也得认，否则带令牌反而被 403。
+            || url.pathname === '/api/avatar'
             || url.pathname === '/api/authorize/read';
           if (!agentAllowed) {
             sendJson({ ok: false, error: '该接口仅控制台可用' }, 403);
@@ -5260,6 +5358,489 @@ async function main() {
           if (before.quietHours.enabled !== next.quietHours.enabled) tuned.push(`quietHours.enabled=${next.quietHours.enabled}`);
           if (tuned.length > 0) log(`[affect] 控制台：参数已更新 ${tuned.join(' ')}`);
           sendJson({ ok: true, configPath: 'config.json', affect: next });
+          return;
+        }
+        // ═══════════════════════════════════════════════════════════════════
+        // 自我资料（T-014 步骤 2）：头像下载 + 资料快照 + 三个改资料端点
+        // ═══════════════════════════════════════════════════════════════════
+        //
+        // 三个改资料端点共用 handleProfileUpdate，闸门顺序是硬的（dev-doc §4）：
+        //   enabled → 内容 → 额度 → 读旧值 → OneBot → 读回 → 记账
+        // 任何一步提前返回都表示「没改成」，**绝不记账**：recordChange 只在读回校验通过之后调用。
+        // 三者都**不进** adminOnlyV2Paths —— 改的是 AI 自己的资料，不是控制台管理操作。
+        // 但带 x-agent-token 的请求必须有合法 key：否则「模型漏传令牌」会退化成管理端全权
+        // （正是上面 L4791 那段集中关卡要防的 confused deputy）。
+
+        // 640 的头像 JPEG 通常 20–60 KB；2 MB 够兜住异常大的图，也不至于让一次请求拖太久。
+        const PROFILE_AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+        const PROFILE_KIND_LABELS = { nickname: '昵称', signature: '签名', groupCard: '群名片' };
+
+        /** 「还有 5 小时 12 分」这种人话；retryAfterMs 非正时返回空串。 */
+        function profileWaitText(ms) {
+          const total = Math.max(0, Math.trunc(Number(ms) || 0));
+          if (total <= 0) return '';
+          const hours = Math.floor(total / 3600000);
+          const minutes = Math.ceil((total % 3600000) / 60000);
+          if (hours > 0) return minutes > 0 ? `${hours} 小时 ${minutes} 分` : `${hours} 小时`;
+          return `${Math.max(1, minutes)} 分钟`;
+        }
+
+        /**
+         * 调 OneBot 并校验信封（status / retcode）。
+         *
+         * 为什么不能直接用 oneBotActionNested 的返回值：它只负责发请求 + 解 JSON，**不看 retcode**。
+         * 于是「action 名写错（1404）」「参数不合法（1400）」「服务端拒绝（100）」在它那里也是
+         * "成功返回" —— 而改资料恰恰最依赖这几个码：不校验就会把「根本没改」当成「改好了」记账，
+         * 白吃一次冷却，模型还会以为已经改成。
+         */
+        async function profileOneBot(action, params) {
+          const { res, body } = await oneBotActionNested(cfg, action, params, 20000);
+          const retcode = body?.retcode;
+          if (!res.ok || body?.status !== 'ok' || retcode !== 0) {
+            const wording = body?.wording ?? body?.msg ?? res.status;
+            throw new Error(`OneBot ${action} 失败：retcode=${retcode ?? '-'} ${wording}`);
+          }
+          return body?.data ?? {};
+        }
+
+        /**
+         * 读自己的资料卡（get_stranger_info）。同一个读点两处用：
+         * 调 OneBot **之前**取 oldValue（失败不阻断，记空串 + degraded:true），
+         * 调完**之后**做读回校验（失败只影响 verified，不算改失败）。
+         */
+        async function readProfileInfo(selfId) {
+          if (!selfId) return null;
+          try {
+            return await profileOneBot('get_stranger_info', { user_id: selfId, no_cache: true });
+          } catch (error) {
+            log(`[profile] get_stranger_info 失败：${error?.message ?? error}`);
+            return null;
+          }
+        }
+
+        /**
+         * 从资料卡里取签名的**唯一**入口。
+         *
+         * 字段名各家实现不一致：go-cqhttp 的 get_stranger_info 回 `long_nick`，
+         * set_self_longnick 的入参叫 `longNick`，有的网关还回 `sign` / `signature`。
+         * 逐个候选找；**一个都没有就返回 null** —— null 的含义是「网关不肯告诉我们」，
+         * 不是「没生效」，所以签名端点遇到 null 时记 verified:false 但照常 ok:true 记账（dev-doc §4）。
+         */
+        function signatureOf(info) {
+          if (!info || typeof info !== 'object') return null;
+          for (const field of ['sign', 'longNick', 'signature', 'long_nick']) {
+            if (typeof info[field] === 'string') return info[field];
+          }
+          return null;
+        }
+
+        /** 昵称同理：标准字段是 `nickname`，个别实现回 `nick`。 */
+        function nicknameOf(info) {
+          if (!info || typeof info !== 'object') return null;
+          for (const field of ['nickname', 'nick']) {
+            if (typeof info[field] === 'string') return info[field];
+          }
+          return null;
+        }
+
+        /**
+         * 比较「读回的值」与「想要的值」。
+         *
+         * 两端都过同一套清洗（回车/控制符/连续空白折叠）再比：QQ 侧常把连续空格折掉、
+         * 或把全角空格换成半角，直接 `===` 会产生假阴性 —— 于是「明明改成了却不记账」，
+         * 冷却没吃到、模型也拿不到 nextAllowedAt，只能稀里糊涂再改一次。
+         */
+        function sameProfileValue(actual, expected) {
+          if (typeof actual !== 'string') return false;
+          return cleanProfileText(actual) === cleanProfileText(expected);
+        }
+
+        /** 从二代会话 key（group:123）里取群号；不是群会话就返回 0。 */
+        function groupIdFromKey(key) {
+          const matched = /^group:(\d+)$/.exec(String(key ?? '').trim());
+          if (!matched) return 0;
+          const id = Number(matched[1]);
+          return Number.isSafeInteger(id) && id > 0 ? id : 0;
+        }
+
+        /**
+         * 昵称 / 签名 / 群名片的**唯一**实现（三个 POST 路由都调它）。
+         *
+         * 顺序（dev-doc §4，硬的）：① 鉴权 → ② 开关 → ③ 取值+审计 → ④ 额度 →
+         * ⑤ 读旧值 → ⑥ 调 OneBot → ⑦ 读回校验 → ⑧ 记账+落盘+日志。
+         * 除了 ⑧，任何一步提前返回都意味着「没改成」，**不得** recordChange。
+         */
+        async function handleProfileUpdate(req, res, kind) {
+          const label = PROFILE_KIND_LABELS[kind] ?? kind;
+          let body;
+          try {
+            body = await readBody();
+          } catch (error) {
+            sendJson({ ok: false, reason: 'bad_body', error: `请求体无法解析：${error?.message ?? error}` }, error?.statusCode ?? 400);
+            return;
+          }
+          const agentToken = String(req.headers['x-agent-token'] ?? '').trim();
+          const key = String(body?.key ?? '').trim();
+
+          // ① 鉴权：带会话令牌 => 必须能对上这个会话，且当前模式允许它。
+          //    不带令牌（控制台）能走到这里，说明已经过了全局令牌关卡。
+          if (agentToken) {
+            if (!key) {
+              sendJson({ ok: false, reason: 'bad_key', error: '缺少会话 key（group:群号 / private:QQ号）' }, 400);
+              return;
+            }
+            if (!agentTokenOk(key, agentToken)) {
+              sendJson({ ok: false, reason: 'bad_token', error: 'agent token 无效' }, 403);
+              return;
+            }
+            if (!v2SessionAllowed(key)) {
+              sendJson({ ok: false, reason: 'session_not_allowed', error: '目标不在当前模式允许范围内' }, 403);
+              return;
+            }
+          }
+
+          // ② 总开关（缺省 = 开；显式 false 才关）
+          const profileCfg = cfg.socialV2.profile ?? PROFILE_DEFAULTS;
+          if (profileCfg.enabled === false) {
+            sendJson({ ok: false, reason: 'disabled', error: '改资料功能已关闭（socialV2.profile.enabled = false）' }, 403);
+            return;
+          }
+
+          // ③ 取值 + 内容审计。清洗先做（按该 kind 的 maxChars 截断），审计只认清洗后的文本。
+          const reasonText = cleanProfileText(body?.reason, { maxChars: 40 });
+          let groupId = 0;
+          let verdict;
+          if (kind === 'nickname') {
+            const value = cleanProfileText(body?.nickname, { maxChars: profileCfg.nickname.maxChars });
+            verdict = checkNickname(value, profileCfg.nickname);
+          } else if (kind === 'signature') {
+            const value = cleanProfileText(body?.signature, { maxChars: profileCfg.signature.maxChars });
+            verdict = checkSignature(value, profileCfg.signature);
+          } else {
+            // 群号：显式 group_id 优先，缺省用「当前会话的群」（带 x-agent-token 时 key 就是
+            // 它正在说话的那个群/私聊）。两者都解析不出就 400 —— 绝不猜一个群去改。
+            const explicit = Number(body?.group_id);
+            groupId = Number.isSafeInteger(explicit) && explicit > 0 ? explicit : groupIdFromKey(key);
+            if (!groupId) {
+              sendJson({ ok: false, reason: 'bad_group', error: '缺少群号：请传 group_id，或带 x-agent-token + group:群号 的 key' }, 400);
+              return;
+            }
+            // 只允许改白名单群的名片：不在 allow.groups 里的一律拒绝（别让它拿它对任意群做探测）。
+            const allowed = (cfg.allow?.groups ?? []).some((entry) => String(entry) === String(groupId));
+            if (!allowed) {
+              sendJson({ ok: false, reason: 'group_not_allowed', error: `群 ${groupId} 不在 allow.groups 白名单里` }, 403);
+              return;
+            }
+            const value = cleanProfileText(body?.card, { maxChars: profileCfg.groupCard.maxChars });
+            verdict = checkGroupCard(value, profileCfg.groupCard);
+          }
+          if (!verdict.ok) {
+            const reasons = Array.isArray(verdict.reasons) ? verdict.reasons : [];
+            sendJson({
+              ok: false,
+              reason: reasons[0]?.code ?? 'rejected',
+              reasons,
+              hits: Array.isArray(verdict.hits) ? verdict.hits : [],
+              error: reasons[0]?.message ?? `【${label}】没有通过内容审计`
+            }, 400);
+            return;
+          }
+          const target = verdict.value;
+          const now = Date.now();
+          const state = readProfileState(now);
+
+          // ④ 额度（冷却 + 当日上限）：纯函数判定，状态来自上面刚读的账本。
+          const quota = quotaFor(state, profileCfg, kind, kind === 'groupCard' ? groupId : undefined, now);
+          if (!quota.ok) {
+            sendJson({
+              ok: false,
+              reason: quota.reason,
+              retryAfterMs: quota.retryAfterMs,
+              todayCount: quota.todayCount,
+              remaining: quota.remaining,
+              lastTs: quota.lastTs,
+              error: quota.reason === 'daily_cap'
+                ? `今天改【${label}】的额度已经用完（${quota.todayCount} 次），明天零点后才恢复`
+                : `改【${label}】还在冷却中，约 ${profileWaitText(quota.retryAfterMs)} 后才能再改`
+            }, 429);
+            return;
+          }
+
+          // 登录账号：读旧值、读回、set_group_card 的 user_id 都要它。
+          // 拿 0 去 set_group_card 只会得到一个看不懂的 retcode，所以这里直接说清楚。
+          const selfId = await resolveAutomationSelfId(null);
+          if (!selfId) {
+            sendJson({ ok: false, reason: 'onebot_error', detail: '拿不到登录账号（get_login_info 失败，网关可能未连上）' }, 502);
+            return;
+          }
+
+          // ⑤ 读旧值：失败**不阻断**（oldValue 记空串、响应带 degraded:true）。
+          //    「拿不到旧值」不该挡住改资料：旧值只用于日志/展示，不参与任何判定。
+          let oldValue = '';
+          let degraded = false;
+          if (kind === 'groupCard') {
+            try {
+              const member = await profileOneBot('get_group_member_info', { group_id: groupId, user_id: selfId, no_cache: true });
+              oldValue = typeof member?.card === 'string' ? member.card : '';
+            } catch (error) {
+              degraded = true;
+              log(`[profile] 读旧群名片失败（继续）：${error?.message ?? error}`);
+            }
+          } else {
+            const info = await readProfileInfo(selfId);
+            if (info) oldValue = (kind === 'nickname' ? nicknameOf(info) : signatureOf(info)) ?? '';
+            else degraded = true;
+          }
+
+          // ⑥ 调 OneBot：信封不对（retcode 非 0）一律 502，且不记账。
+          try {
+            if (kind === 'nickname') {
+              await profileOneBot('set_qq_profile', { nickname: target });
+            } else if (kind === 'signature') {
+              await profileOneBot('set_self_longnick', { longNick: target });
+            } else {
+              await profileOneBot('set_group_card', { group_id: groupId, user_id: selfId, card: target });
+            }
+          } catch (error) {
+            log(`[profile] 设置${label}失败：${error?.message ?? error}`);
+            sendJson({ ok: false, reason: 'onebot_error', detail: String(error?.message ?? error) }, 502);
+            return;
+          }
+
+          // ⑦ 读回校验。三种结局：
+          //   · 读回来了且一致                     → verified:true，记账；
+          //   · 读回来了但不一致                   → not_applied + pending:true，**不记账**
+          //     （QQ 侧可能只是延迟生效，让模型稍后再读一次确认，而不是立刻重试）；
+          //   · 网关根本不返回该字段（签名最常见） → verified:false 但 ok:true，照常记账 ——
+          //     这是「无法确认」而不是「没生效」；当成失败会让签名永远改不成。
+          let verified = true;
+          let pending = false;
+          try {
+            if (kind === 'groupCard') {
+              const member = await profileOneBot('get_group_member_info', { group_id: groupId, user_id: selfId, no_cache: true });
+              const card = typeof member?.card === 'string' ? member.card : null;
+              if (card === null || !sameProfileValue(card, target)) { verified = false; pending = true; }
+            } else {
+              const info = await readProfileInfo(selfId);
+              if (!info) {
+                verified = false;
+              } else if (kind === 'nickname') {
+                const current = nicknameOf(info);
+                if (current === null || !sameProfileValue(current, target)) { verified = false; pending = true; }
+              } else {
+                const current = signatureOf(info);
+                if (current === null) verified = false;
+                else if (!sameProfileValue(current, target)) { verified = false; pending = true; }
+              }
+            }
+          } catch (error) {
+            log(`[profile] 读回${label}失败（按未确认处理）：${error?.message ?? error}`);
+            verified = false;
+          }
+          if (pending) {
+            sendJson({
+              ok: false,
+              reason: 'not_applied',
+              pending: true,
+              kind,
+              oldValue,
+              newValue: target,
+              verified: false,
+              error: 'QQ 侧还没生效（可能只是延迟）。这次没有记账：稍后读一次确认，别连着重复改'
+            });
+            return;
+          }
+
+          // ⑧ 记账 + 落盘 + 日志（只有走到这里才算「改成了」）。
+          const ts = Date.now();
+          const nextState = recordChange(state, {
+            ts,
+            kind,
+            groupId: kind === 'groupCard' ? groupId : 0,
+            oldValue,
+            newValue: target,
+            reason: reasonText
+          }, profileCfg);
+          const persisted = writeProfileState(nextState);
+          const scope = kind === 'groupCard' ? `（群 ${groupId}）` : '';
+          log(`[profile] ${label}${scope}「${oldValue || '空'}」→「${target || '空'}」（原因：${reasonText || '未说明'}）${verified ? '' : '［读回未确认］'}${persisted ? '' : '［落盘失败］'}`);
+          const intervalMs = Number(profileCfg[kind]?.intervalMs) || 0;
+          sendJson({
+            ok: true,
+            kind,
+            groupId: kind === 'groupCard' ? groupId : 0,
+            oldValue,
+            newValue: target,
+            verified,
+            nextAllowedAt: intervalMs > 0 ? ts + intervalMs : 0,
+            ...(degraded ? { degraded: true } : {}),
+            ...(persisted ? {} : { persisted: false })
+          });
+        }
+
+        /** 三个路由共用的外壳：连未预期异常也变成结构化响应，不给控制台抛栈。 */
+        async function runProfileUpdate(req, res, kind) {
+          try {
+            await handleProfileUpdate(req, res, kind);
+          } catch (error) {
+            log(`[profile] 改${PROFILE_KIND_LABELS[kind] ?? kind}时抛异常：${error?.message ?? error}`);
+            if (!res.headersSent) {
+              sendJson({ ok: false, reason: 'internal', error: '改资料时发生未预期错误，详情见桥接日志' }, 500);
+            }
+          }
+        }
+
+        // 头像：GET，返回 base64 图片。只回图片字节、不带任何会话信息 ——
+        // 鉴权接受「控制台令牌」或「agent token（带 key 时校验归属性）」，两者都没有就 401。
+        if (req.method === 'GET' && url.pathname === '/api/avatar') {
+          const agentToken = String(req.headers['x-agent-token'] ?? '').trim();
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          if (agentToken) {
+            if (key && !agentTokenOk(key, agentToken)) {
+              sendJson({ ok: false, reason: 'bad_token', error: 'agent token 无效' }, 401);
+              return;
+            }
+            if (key && !v2SessionAllowed(key)) {
+              sendJson({ ok: false, reason: 'session_not_allowed', error: '目标不在当前模式允许范围内' }, 403);
+              return;
+            }
+            if (!key && !isLiveAgentToken(agentToken)) {
+              sendJson({ ok: false, reason: 'bad_token', error: '会话令牌无效' }, 401);
+              return;
+            }
+          } else if (!tokenMatches) {
+            sendJson({ ok: false, reason: 'unauthorized', error: '未授权：请提供控制台令牌或会话令牌' }, 401);
+            return;
+          }
+          const uin = String(url.searchParams.get('uin') ?? '').trim();
+          if (!/^\d{5,12}$/.test(uin)) {
+            sendJson({ ok: false, reason: 'bad_uin', error: 'uin 必须是 5–12 位纯数字 QQ 号' }, 400);
+            return;
+          }
+          const sizeRaw = Number(url.searchParams.get('size'));
+          const wantedSize = AVATAR_SIZES.includes(sizeRaw) ? sizeRaw : 640;
+          // 640 拿不到时用 100 再试一次（小图更不容易被限流）；100 也要不到才算失败。
+          const sizes = wantedSize === 640 ? [640, 100] : [wantedSize];
+          let buffer = null;
+          let usedSize = wantedSize;
+          let failReason = 'fetch_failed';
+          let detail = '';
+          for (const size of sizes) {
+            try {
+              const fetched = await safeFetchBuffer(avatarUrl(uin, size), PROFILE_AVATAR_MAX_BYTES);
+              // safeFetchBuffer 自己已经校验过图片头；这里再校一次是防御 ——
+              // 一旦哪天它放宽了校验，非图片会以 base64 直接进模型上下文，白烧 token 还看不出原因。
+              if (!looksLikeImageBuffer(fetched.buffer)) {
+                failReason = 'not_image';
+                detail = `头像地址返回的不是图片（${size}）`;
+                continue;
+              }
+              buffer = fetched.buffer;
+              usedSize = size;
+              break;
+            } catch (error) {
+              detail = String(error?.message ?? error);
+              // safeFetchBuffer 自己会先校图片头，非图片是它抛的错（不走到上面的
+              // looksLikeImageBuffer 分支）。按契约把「不是图片」与「抓不到」分开报，
+              // 前者换尺寸也没用，后者才值得回落 100 再试。
+              failReason = /不是有效图片/.test(detail) ? 'not_image' : 'fetch_failed';
+            }
+          }
+          if (!buffer) {
+            log(`[profile] 头像抓取失败 ${uin}：${failReason} ${detail}`);
+            // error 是给 MCP/模型看的人话（agentApi 抛错时优先取它），reason/detail 保持结构化。
+            sendJson({ ok: false, reason: failReason, detail, error: `头像抓取失败：${detail}` }, 502);
+            return;
+          }
+          sendJson({
+            ok: true,
+            uin,
+            size: usedSize,
+            mimeType: mimeFromBuffer(buffer),
+            bytes: buffer.length,
+            data: buffer.toString('base64')
+          });
+          return;
+        }
+
+        // 资料快照：GET，只读。给自己的昵称/签名 + 三项额度 + 最近 10 条改动。
+        // 和 affect 面板一样**不进** adminOnlyV2Paths：AI 自己该能看见「我还能改几次」。
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/profile') {
+          const agentToken = String(req.headers['x-agent-token'] ?? '').trim();
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          if (agentToken && key) {
+            if (!agentTokenOk(key, agentToken)) {
+              sendJson({ ok: false, reason: 'bad_token', error: 'agent token 无效' }, 403);
+              return;
+            }
+            if (!v2SessionAllowed(key)) {
+              sendJson({ ok: false, reason: 'session_not_allowed', error: '目标不在当前模式允许范围内' }, 403);
+              return;
+            }
+          } else if (agentToken && !isLiveAgentToken(agentToken)) {
+            sendJson({ ok: false, reason: 'bad_token', error: '会话令牌无效' }, 401);
+            return;
+          }
+          try {
+            const now = Date.now();
+            // loadConfig() 已经把 profile 归一过；`?? PROFILE_DEFAULTS` 只是防御
+            // （例如测试里直接构造的 cfg 没走 loadConfig），保证永远拿得到一个完整配置段。
+            const profileCfg = cfg.socialV2.profile ?? PROFILE_DEFAULTS;
+            const state = readProfileState(now);
+            const selfId = await resolveAutomationSelfId(null);
+            const info = await readProfileInfo(selfId);
+            const groupId = groupIdFromKey(key);
+            const view = (quota) => ({
+              remaining: quota.remaining,
+              retryAfterMs: quota.retryAfterMs,
+              lastTs: quota.lastTs,
+              todayCount: quota.todayCount,
+              nextAllowedAt: quota.ok ? 0 : now + quota.retryAfterMs
+            });
+            sendJson({
+              ok: true,
+              selfId,
+              nickname: nicknameOf(info),
+              signature: signatureOf(info),
+              quotas: {
+                nickname: view(quotaFor(state, profileCfg, 'nickname', undefined, now)),
+                signature: view(quotaFor(state, profileCfg, 'signature', undefined, now)),
+                // 群名片是按群记的：没有群号（私聊会话/控制台）时给一份聚合视图，
+                // 让模型至少知道「还有没有额度」。
+                groupCard: view(quotaFor(state, profileCfg, 'groupCard', groupId || undefined, now))
+              },
+              // 最近 10 条改动（state.changes 已按时间倒序）。让模型看得见「上次改了什么、为什么」。
+              changes: state.changes.slice(0, 10),
+              profile: {
+                enabled: profileCfg.enabled !== false,
+                nicknameMaxChars: profileCfg.nickname.maxChars,
+                signatureMaxChars: profileCfg.signature.maxChars,
+                groupCardMaxChars: profileCfg.groupCard.maxChars
+              },
+              // 读不到资料卡（网关不支持 / 没连上）时昵称与签名都是 null：明确降级，
+              // 别让它看起来像「你的昵称是空的」。
+              ...(info ? {} : { degraded: true })
+            });
+          } catch (error) {
+            log(`[profile] 资料快照生成失败：${error?.message ?? error}`);
+            sendJson({ ok: false, reason: 'internal', error: '资料快照生成失败，详情见桥接日志' }, 500);
+          }
+          return;
+        }
+
+        // 三个改资料端点：共用 handleProfileUpdate（闸门顺序见它上方的注释）。
+        // 刻意**不**登记进 adminOnlyV2Paths —— 改的是 AI 自己的资料，不是控制台管理操作；
+        // 真正的闸门是 enabled + 内容审计 + 冷却/日额度 + 会话令牌 + 群白名单。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/profile/nickname') {
+          await runProfileUpdate(req, res, 'nickname');
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/profile/signature') {
+          await runProfileUpdate(req, res, 'signature');
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/profile/group-card') {
+          await runProfileUpdate(req, res, 'groupCard');
           return;
         }
         // 配置：POST body 支持四键的**部分更新**（enabled / windowHours / windowCap / ugcRight）。
