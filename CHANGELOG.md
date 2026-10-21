@@ -44,6 +44,26 @@
 - 配置在 `config.json` 的 `socialV2.affect`（阈值、半衰期、剂量、出口额度、静默时段）；
   缺省段等于出厂默认，删除该段即可回到「情绪记录照常、不发任何东西」的初始状态。
 
+### 资料自管（2026-10-21，T-014）
+
+机器人现在能看头像、也能改自己的昵称 / 签名 / 群名片，改动有闸门、有额度、改完会读回确认。
+
+- **看头像**：`qq_get_avatar` / `GET /api/avatar?uin=&size=`（640 或 100，默认 640；单张上限 2MB，
+  640 拉不到自动回落 100），图片直接进视觉上下文。
+- **自查**：`qq_get_profile` / `GET /api/socialV2/profile` 返回自己的 QQ 号、昵称、签名、
+  三项改动的当日剩余额度与下次可改时间、最近 10 条改动记录。
+- **改资料**：`qq_set_nickname` / `qq_set_signature` / `qq_set_group_card`，
+  对应 `POST /api/socialV2/profile/{nickname,signature,group-card}`。闸门在纯函数模块
+  `src/profile-core.js`：长度按码点、禁换行、禁纯 emoji / 纯标点，正文复用 qzone 的审计规则
+  （链接 / 手机号 / 邮箱 / 身份证 / 拉人话术），昵称额外拒绝数字开头、`@`、5 位以上连续数字。
+- **额度按自然日**：昵称 24 小时 1 次、签名 6 小时 3 次、群名片每群 1 小时 6 次；
+  拒绝时 `429` 带 `retryAfterMs` 与「约 X 小时 Y 分 后才能再改」。
+- **读回校验**：改完立刻读回，不一致时不记账、返回 `ok:false` + `pending:true`（模型会被告知「没回读确认」）。
+- **群名片清空是网关限制**：SnowLuma 的编码器在群名片为空串时会省略字段，服务端回 OIDB 1007，
+  所以「清除」实际写的是一个半角空格（读回可能显示为空），状态文件与日志仍记空串。
+- 配置在 `config.json` 的 `socialV2.profile`（`enabled` 与三种资料各自的 `minIntervalMs` / `dailyCap` /
+  `maxChars`）；缺省段等于出厂默认。这四个工具没有登记 `TOOL_CONFIG_FLAGS`，总开关是 `socialV2.profile.enabled`。
+
 ### 新增
 
 - **社交自动化（`socialV2.automation`，出厂全关）**：桥接自己处理四类「加好友 / 进群」杂事，不需要模型参与——

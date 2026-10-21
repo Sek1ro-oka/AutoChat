@@ -356,6 +356,27 @@
           "cooldownMin": 180
         }
       }
+    },
+    "profile": {
+      "enabled": true,
+      "nickname": {
+        "minChars": 2,
+        "maxChars": 12,
+        "intervalMs": 86400000,
+        "dailyCap": 1
+      },
+      "signature": {
+        "minChars": 0,
+        "maxChars": 60,
+        "intervalMs": 21600000,
+        "dailyCap": 3
+      },
+      "groupCard": {
+        "minChars": 0,
+        "maxChars": 20,
+        "intervalMs": 3600000,
+        "dailyCap": 6
+      }
     }
   },
   "webSearch": {
