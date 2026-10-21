@@ -2236,10 +2236,20 @@ async function main() {
   const crossChannelCache = new Map();
   const crossChannelLines = new Map();
   const CROSS_CACHE_LIMIT = 20;
-  // recall 限流：同一会话 5 分钟窗口最多 3 次。放内存、重启清零 —— 防模型反复试探。
+  // recall 限流：同一会话一个滑动窗口最多 N 次。放内存、重启清零 —— 防模型反复试探。
+  // 窗口与次数都读配置（T-021：用户要在控制台自己调），常量只当兜底。
   const crossRecallRate = new Map();
   const CROSS_RECALL_WINDOW_MS = 5 * 60 * 1000;
   const CROSS_RECALL_MAX_PER_WINDOW = 3;
+  const recallWindowMs = () => {
+    const raw = Number(cfg.socialV2?.cross?.recallWindowMs);
+    return Number.isFinite(raw) ? Math.min(3600000, Math.max(60000, Math.floor(raw))) : CROSS_RECALL_WINDOW_MS;
+  };
+  // 0 = 不限次数（配置显式写 0 才算；缺省/坏值回落到 3）。
+  const recallMaxPerWindow = () => {
+    const raw = Number(cfg.socialV2?.cross?.recallMaxPerWindow);
+    return Number.isFinite(raw) ? Math.min(100, Math.max(0, Math.floor(raw))) : CROSS_RECALL_MAX_PER_WINDOW;
+  };
   fs.mkdirSync(STATE_DIR, { recursive: true });
   hardenStateDirAcl();
   acquireLock();
@@ -6767,6 +6777,9 @@ async function main() {
               ok: true,
               enabled: cfg.socialV2?.cross?.enabled !== false,
               bufferPerConversation: crossBufferLimit(),
+              // 限流旋钮（T-021）：控制台拿它回填输入框，保存时原样提交。
+              recallWindowMs: cfg.socialV2?.cross?.recallWindowMs ?? CROSS_RECALL_WINDOW_MS,
+              recallMaxPerWindow: cfg.socialV2?.cross?.recallMaxPerWindow ?? CROSS_RECALL_MAX_PER_WINDOW,
               conversations
             });
           } catch (error) {
@@ -6782,26 +6795,49 @@ async function main() {
         if (req.method === 'POST' && url.pathname === '/api/socialV2/cross') {
           const body = await readBody();
           const patch = body?.groups;
-          if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
-            sendJson({ ok: false, reason: 'bad_body', error: 'body.groups 必须是对象' }, 400);
+          const hasGroups = Boolean(patch) && typeof patch === 'object' && !Array.isArray(patch);
+          // 限流旋钮（T-021）：控制台可以单独改，不必连 groups 一起提交。
+          // 这里不做静默钳制 —— 界面写错值要让用户看见 400，而不是悄悄改成别的数。
+          const knobs = {};
+          const knobSpecs = [['recallWindowMs', 60000, 3600000], ['recallMaxPerWindow', 0, 100]];
+          for (const [field, min, max] of knobSpecs) {
+            if (body?.[field] === undefined) continue;
+            const num = Number(body[field]);
+            if (!Number.isInteger(num) || num < min || num > max) {
+              sendJson({ ok: false, reason: 'bad_quota', error: `${field} 必须是 ${min}–${max} 的整数` }, 400);
+              return;
+            }
+            knobs[field] = num;
+          }
+          if (!hasGroups && Object.keys(knobs).length === 0) {
+            sendJson({ ok: false, reason: 'bad_body', error: 'body.groups 必须是对象（或提供 recallWindowMs / recallMaxPerWindow）' }, 400);
             return;
           }
-          const merged = { ...crossGroups() };
-          for (const [key, value] of Object.entries(patch)) {
-            if (!/^(group|private):\d{1,20}$/.test(key)) {
-              sendJson({ ok: false, reason: 'bad_key', error: `会话 key 不合法：${key}` }, 400);
-              return;
+          const next = { ...knobs };
+          if (hasGroups) {
+            const merged = { ...crossGroups() };
+            for (const [key, value] of Object.entries(patch)) {
+              if (!/^(group|private):\d{1,20}$/.test(key)) {
+                sendJson({ ok: false, reason: 'bad_key', error: `会话 key 不合法：${key}` }, 400);
+                return;
+              }
+              const gid = normalizeGid(value);
+              if (gid === null) {
+                sendJson({ ok: false, reason: 'bad_gid', error: `分组号必须是非负整数：${key}` }, 400);
+                return;
+              }
+              merged[key] = gid;
             }
-            const gid = normalizeGid(value);
-            if (gid === null) {
-              sendJson({ ok: false, reason: 'bad_gid', error: `分组号必须是非负整数：${key}` }, 400);
-              return;
-            }
-            merged[key] = gid;
+            next.groups = merged;
           }
           try {
-            writeCrossGroups(merged);
-            sendJson({ ok: true, groups: cfg.socialV2.cross.groups });
+            writeCrossConfig(next);
+            sendJson({
+              ok: true,
+              groups: cfg.socialV2.cross.groups,
+              recallWindowMs: cfg.socialV2.cross.recallWindowMs,
+              recallMaxPerWindow: cfg.socialV2.cross.recallMaxPerWindow
+            });
           } catch (error) {
             log(`[cross] 写回分组失败：${error?.message ?? error}`);
             sendJson({ ok: false, reason: 'config_write_failed', error: '写 config.json 失败，详情见桥接日志' }, 500);
@@ -13862,18 +13898,21 @@ async function main() {
   }
 
   /**
-   * 写回 groups。桥接没有统一的 config 写回 helper，既有端点（qzone / affect /
-   * socialV2/config）都是内联「读原始文件 → 只换目标段 → atomicWriteJson → 换内存」，
-   * 这里照同一套做：先落盘，成功了才热更新 cfg，避免磁盘失败时内存与文件分叉。
+   * 写回 cross 配置（groups / recall 限流旋钮）。桥接没有统一的 config 写回 helper，
+   * 既有端点（qzone / affect / socialV2/config）都是内联「读原始文件 → 只换目标段 →
+   * atomicWriteJson → 换内存」，这里照同一套做：先落盘，成功了才热更新 cfg，
+   * 避免磁盘失败时内存与文件分叉。
    */
-  function writeCrossGroups(nextGroups) {
+  function writeCrossConfig(nextCross) {
     const configFile = path.join(ROOT, 'config.json');
     const file = readConfigObject(configFile);
     const social = (file.socialV2 && typeof file.socialV2 === 'object' && !Array.isArray(file.socialV2)) ? file.socialV2 : {};
     const cross = (social.cross && typeof social.cross === 'object' && !Array.isArray(social.cross)) ? social.cross : {};
-    file.socialV2 = { ...social, cross: { ...cross, groups: nextGroups } };
+    const merged = { ...cross, ...nextCross };
+    file.socialV2 = { ...social, cross: merged };
     atomicWriteJson(configFile, file);
-    cfg.socialV2.cross = { ...(cfg.socialV2.cross ?? normalizeCrossConfig(undefined)), groups: nextGroups };
+    // normalize 一次再放进内存：控制台/接口只允许过合法值，这里兜底防手写坏值。
+    cfg.socialV2.cross = { ...(cfg.socialV2.cross ?? normalizeCrossConfig(undefined)), ...normalizeCrossConfig(merged) };
   }
 
   /**
@@ -13909,7 +13948,7 @@ async function main() {
       // 只改内存的话重启后分组丢失，已经写进 ndjson 的消息会变成「无主」。
       const assigned = assignGroups([key], groups);
       try {
-        writeCrossGroups(assigned.map);
+        writeCrossConfig({ groups: assigned.map });
         groups = cfg.socialV2.cross.groups;
       } catch (error) {
         // 写盘失败不能丢这条消息：按内存里的新组号先记。代价是重启后这个会话可能
@@ -13938,15 +13977,18 @@ async function main() {
     }
   }
 
-  /** 每个会话 5 分钟最多 3 次 recall；第 4 次返回 retryAfterMs。 */
+  /** 每个会话一个窗口内最多 N 次 recall（默认 5 分钟 3 次）；超了返回 retryAfterMs。 */
   function crossRecallRateCheck(key, now) {
+    const windowMs = recallWindowMs();
+    const maxPerWindow = recallMaxPerWindow();
+    if (maxPerWindow <= 0) return { ok: true }; // 0 = 不限次数
     const hit = crossRecallRate.get(key);
-    if (!hit || now - hit.ts >= CROSS_RECALL_WINDOW_MS) {
+    if (!hit || now - hit.ts >= windowMs) {
       crossRecallRate.set(key, { ts: now, count: 1 });
       return { ok: true };
     }
-    if (hit.count >= CROSS_RECALL_MAX_PER_WINDOW) {
-      return { ok: false, retryAfterMs: CROSS_RECALL_WINDOW_MS - (now - hit.ts) };
+    if (hit.count >= maxPerWindow) {
+      return { ok: false, retryAfterMs: windowMs - (now - hit.ts) };
     }
     hit.count += 1;
     return { ok: true };

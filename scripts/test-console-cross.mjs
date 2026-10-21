@@ -43,7 +43,7 @@ ok(panel.includes('同一个编号 = 同一个圈子：编号相同的会话可�
 ok(/document\.getElementById\('breadcrumbPage'\)\.textContent = consolePages\[page\]\[0\]/.test(html), '面包屑/标题仍走 consolePages（新页自动有标题）');
 
 console.log('## 面板元素');
-for (const id of ['crossList', 'crossSave', 'crossStats', 'crossBufferNote']) {
+for (const id of ['crossList', 'crossSave', 'crossStats', 'crossBufferNote', 'crossRecallMax', 'crossRecallWindow']) {
   const n = (html.match(new RegExp(`id="${id}"`, 'g')) ?? []).length;
   ok(n === 1, `元素 ${id}`, `${n} 处`);
 }
@@ -56,8 +56,13 @@ ok(html.includes('还没有任何会话记录；等 AI 收发过消息后再来�
 
 console.log('## 读写接口');
 ok(/api\('\/api\/socialV2\/cross'\)/.test(html), 'GET /api/socialV2/cross（读会话列表）');
-ok(/api\('\/api\/socialV2\/cross', 'POST', \{ groups \}\)/.test(html), 'POST /api/socialV2/cross，body 是 { groups }');
+ok(/api\('\/api\/socialV2\/cross', 'POST', payload\)/.test(html), 'POST /api/socialV2/cross，body 是 payload');
+ok(/const payload = \{ recallMaxPerWindow: recallMax, recallWindowMs: recallMinutes \* 60000 \};/.test(html)
+  && /if \(inputs\.length > 0\) payload\.groups = groups;/.test(html), 'payload 带限流旋钮；有会话时才带 groups');
 ok(/groups\[input\.dataset\.key\] = gid;/.test(html), '提交前从每个输入框的 data-key 收编号');
+ok(/function paintCrossLimits\(\)/.test(html) && /lastCross\.recallMaxPerWindow/.test(html)
+  && /lastCross\.recallWindowMs/.test(html), '限流输入框用桥接返回值回填');
+ok(/qq_recall 次数上限要填 0–100 的整数/.test(html) && /限流窗口要填 1–60 分钟/.test(html), '前端先挡住越界值');
 ok(/showConsoleToast\('已保存'\)/.test(html), '保存成功 toast「已保存」');
 ok(/await refreshCross\(true\);/.test(html), '保存成功后立即强拉一次列表');
 ok(/showConsoleToast\('保存失败：'/.test(html), '保存失败 toast 错误信息');

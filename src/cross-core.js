@@ -33,7 +33,10 @@ export const CROSS_DEFAULTS = Object.freeze({
   // T-020：prompt 里自动带上的「同组最近消息」。5 条 × 2 小时是用户拍板的默认值
   // （够看清刚才聊了什么，又不至于把整段历史灌进上下文）；设 0 等于关掉自动带。
   recentPerKey: 5,
-  recentHours: 2
+  recentHours: 2,
+  // T-021：qq_recall 的限流旋钮，控制台可改。0 次 = 不限次数（显式写 0 才算）。
+  recallWindowMs: 5 * 60 * 1000,
+  recallMaxPerWindow: 3
 });
 
 /**
@@ -47,7 +50,9 @@ export const CROSS_LIMITS = Object.freeze({
   bufferPerConversation: Object.freeze([50, 2000]),
   limit: Object.freeze([1, CROSS_MAX_LIMIT]),
   recentPerKey: Object.freeze([0, 20]),
-  recentHours: Object.freeze([0, 72])
+  recentHours: Object.freeze([0, 72]),
+  recallWindowMs: Object.freeze([60 * 1000, 60 * 60 * 1000]),
+  recallMaxPerWindow: Object.freeze([0, 100])
 });
 
 // 会话 key 的唯一合法形态（与 src/diary-store.js:15-23、social-v2.json 的 conversations 一致）。
@@ -218,6 +223,12 @@ export function normalizeCrossConfig(raw) {
     ),
     recentPerKey: clampIntTo(source.recentPerKey, CROSS_DEFAULTS.recentPerKey, CROSS_LIMITS.recentPerKey),
     recentHours: clampIntTo(source.recentHours, CROSS_DEFAULTS.recentHours, CROSS_LIMITS.recentHours),
+    recallWindowMs: clampIntTo(source.recallWindowMs, CROSS_DEFAULTS.recallWindowMs, CROSS_LIMITS.recallWindowMs),
+    recallMaxPerWindow: clampIntTo(
+      source.recallMaxPerWindow,
+      CROSS_DEFAULTS.recallMaxPerWindow,
+      CROSS_LIMITS.recallMaxPerWindow
+    ),
     groups
   };
 }

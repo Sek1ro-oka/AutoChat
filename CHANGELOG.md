@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+### qq_recall 限流改成控制台可调（2026-10-21，T-021）
+
+- 新增 `socialV2.cross.recallWindowMs`（60 秒–60 分钟，默认 5 分钟）与 `recallMaxPerWindow`（0–100，默认 3，**0 = 不限次数**）。
+- 「跨渠道互通」面板新增两个输入框（次数上限 / 窗口分钟），和分组一起「保存分组」提交；桥接即时生效，不用重启。
+- `POST /api/socialV2/cross` 现在支持只提交限流旋钮（`groups` 可省略）；越界整数直接 400 `bad_quota`，不再静默夹值。
+- `GET /api/socialV2/cross` 返回两个当前值供面板回填；`qq_recall` 的 429 `retryAfterMs` 跟着窗口走。
+
 ### 同组消息自动进上下文 + 补齐工具清单（2026-10-21，T-020）
 
 - **修好「私聊读不进群聊消息」**：prompt 的 `enabledTools` 之前漏登记 `qq_recall` / `qq_lookup` / `qq_affect_report`，模型看不到能力清单里的检索工具，只能说「读不到别处的消息」。现在三项按各自总开关（`socialV2.cross` / `socialV2.identity` / `socialV2.affect`）出现在清单里。

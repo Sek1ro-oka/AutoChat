@@ -136,6 +136,22 @@ check('recentHours 默认 2、边界 0/72、坏值回落',
   && normalizeCrossConfig({ recentHours: -1 }).recentHours === 0
   && normalizeCrossConfig({ recentHours: null }).recentHours === 2);
 
+// T-021：qq_recall 的限流旋钮（控制台可改）。0 次 = 不限次数；窗口 1–60 分钟。
+check('recallWindowMs 默认 5 分钟、边界 1–60 分钟、坏值回落',
+  normalizeCrossConfig({}).recallWindowMs === 300000
+  && normalizeCrossConfig({ recallWindowMs: 60000 }).recallWindowMs === 60000
+  && normalizeCrossConfig({ recallWindowMs: 3600000 }).recallWindowMs === 3600000
+  && normalizeCrossConfig({ recallWindowMs: 59999 }).recallWindowMs === 60000
+  && normalizeCrossConfig({ recallWindowMs: 3600001 }).recallWindowMs === 3600000
+  && normalizeCrossConfig({ recallWindowMs: 'x' }).recallWindowMs === 300000);
+check('recallMaxPerWindow 默认 3、边界 0/100（0=不限）、坏值回落',
+  normalizeCrossConfig({}).recallMaxPerWindow === 3
+  && normalizeCrossConfig({ recallMaxPerWindow: 0 }).recallMaxPerWindow === 0
+  && normalizeCrossConfig({ recallMaxPerWindow: 100 }).recallMaxPerWindow === 100
+  && normalizeCrossConfig({ recallMaxPerWindow: 101 }).recallMaxPerWindow === 100
+  && normalizeCrossConfig({ recallMaxPerWindow: -1 }).recallMaxPerWindow === 0
+  && normalizeCrossConfig({ recallMaxPerWindow: null }).recallMaxPerWindow === 3);
+
 const cfgGroups = normalizeCrossConfig({
   groups: {
     'group:119212385': 2,

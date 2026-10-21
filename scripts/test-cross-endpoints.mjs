@@ -9,7 +9,7 @@
 //   ② 配置在 loadConfig 里归一，config.example.json 有完整 cross 段；
 //   ③ 四个写入钩子都调用 recordCrossMessage（且传的是截断前原文）；
 //   ④ 三个端点存在、鉴权分工正确（写端点进 adminOnlyV2Paths，recall 不进）；
-//   ⑤ recall 的 gid=0 返回 200 空结果 + 「没有找到」，限流是 5 分钟 3 次 / 429；
+//   ⑤ recall 的 gid=0 返回 200 空结果 + 「没有找到」，限流是滑动窗口 / 429（窗口与次数可配）；
 //   ⑥ prompt 的 cross 块：元数据 + T-020 的「同组最近几条正文」（带出处、按时间正序），
 //      gid 0 不共享；唤醒提示阈值 ≥2 / ≥3。
 import fs from 'node:fs';
@@ -125,7 +125,7 @@ check("文件名把 ':' 换成 '_'", fileFn.includes(".replace(/:/g, '_')") && f
 check('enabled=false 直接 return（不写盘）', recordFn.includes('cfg.socialV2?.cross?.enabled === false')
   && /enabled === false\) return;/.test(recordFn));
 check('首次见到会话用 assignGroups 补号', recordFn.includes('assignGroups([key], groups)'));
-check('补号后立刻写 config（writeCrossGroups）', recordFn.includes('writeCrossGroups(assigned.map)'));
+check('补号后立刻写 config（writeCrossConfig）', recordFn.includes('writeCrossConfig({ groups: assigned.map })'));
 check('追加前按 groupOf 取 gid', recordFn.includes('groupOf(groups, key)'));
 check('用 appendEntry 往 store 追加', recordFn.includes('appendEntry(crossStore, { key, gid, entry, limit })'));
 check('写 ndjson 用 appendFileSync + 一行 JSON + 换行',
@@ -206,8 +206,18 @@ check('POST 校验 key 正则', postBlock.includes('/^(group|private):\\d{1,20}$
 check('POST 遇到坏 key 返回 bad_key', postBlock.includes("reason: 'bad_key'"));
 check('POST 用 normalizeGid 校验 gid', postBlock.includes('normalizeGid(value)'));
 check('POST 遇到坏 gid 返回 bad_gid', postBlock.includes("reason: 'bad_gid'"));
-check('POST 合并写回 groups', postBlock.includes('writeCrossGroups(merged)'));
-check('POST 返回 ok/groups', postBlock.includes('ok: true, groups: cfg.socialV2.cross.groups'));
+check('POST 合并写回 groups', postBlock.includes('next.groups = merged') && postBlock.includes('writeCrossConfig(next)'));
+check('POST 返回 ok/groups/限流旋钮', postBlock.includes('groups: cfg.socialV2.cross.groups,')
+  && postBlock.includes('recallWindowMs: cfg.socialV2.cross.recallWindowMs,')
+  && postBlock.includes('recallMaxPerWindow: cfg.socialV2.cross.recallMaxPerWindow'));
+check('POST 支持只改限流旋钮（groups 可省略）',
+  postBlock.includes('const hasGroups = Boolean(patch)') && postBlock.includes("reason: 'bad_quota'")
+  && postBlock.includes('${field} 必须是 ${min}–${max} 的整数'));
+check('GET 返回限流旋钮供控制台回填',
+  getBlock.includes('recallWindowMs: cfg.socialV2?.cross?.recallWindowMs ?? CROSS_RECALL_WINDOW_MS')
+  && getBlock.includes('recallMaxPerWindow: cfg.socialV2?.cross?.recallMaxPerWindow ?? CROSS_RECALL_MAX_PER_WINDOW'));
+check('限流判定读配置：窗口/次数都不写死', bridge.includes('const windowMs = recallWindowMs();')
+  && bridge.includes('const maxPerWindow = recallMaxPerWindow();') && bridge.includes('if (maxPerWindow <= 0) return { ok: true };'));
 
 const recallBlock = sliceBetween(bridge, RECALL_MARK, '// 配置：POST body 支持四键的');
 check('recall 用 x-agent-token + agentTokenOk', recallBlock.includes("req.headers['x-agent-token']")

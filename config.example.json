@@ -386,6 +386,8 @@
       "bufferPerConversation": 500,
       "recentPerKey": 5,
       "recentHours": 2,
+      "recallWindowMs": 300000,
+      "recallMaxPerWindow": 3,
       "groups": {}
     },
     "identity": {

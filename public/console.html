@@ -1936,6 +1936,9 @@ button:active:not(:disabled) {
 }
 #section-cross .cross-actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:12px }
 #section-cross .cross-hint { margin:0; font-size:12px; color:var(--muted) }
+#section-cross .cross-limits { display:flex; align-items:flex-end; gap:16px; flex-wrap:wrap; margin-top:12px }
+#section-cross .cross-limit { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted) }
+#section-cross .cross-limit input { width:110px }
 #section-cross .cross-buffer { margin-top:8px; font-size:11px; color:var(--muted-soft) }
 
 /* ===== 名字映射（T-018）=====
@@ -3625,6 +3628,15 @@ button:active:not(:disabled) {
       <div class="cross-actions">
         <button id="crossSave" class="primary" type="button">保存分组</button>
         <p class="cross-hint">保存后立刻生效，不需要重启桥接。</p>
+      </div>
+      <div class="cross-limits">
+        <label class="cross-limit">qq_recall 次数上限
+          <input id="crossRecallMax" type="number" min="0" max="100" step="1" inputmode="numeric" aria-label="qq_recall 次数上限">
+        </label>
+        <label class="cross-limit">窗口（分钟）
+          <input id="crossRecallWindow" type="number" min="1" max="60" step="1" inputmode="numeric" aria-label="qq_recall 限流窗口分钟数">
+        </label>
+        <p class="cross-hint">同一个会话在一个窗口内最多能查几次；<b>0 次 = 不限次数</b>，窗口 1–60 分钟。改完和分组一起保存。</p>
       </div>
       <div class="cross-buffer" id="crossBufferNote">每个会话最多保留 — 条</div>
     </section>
@@ -7510,7 +7522,7 @@ async function refreshCross(force = false) {
   let failure = '';
   try {
     const r = await api('/api/socialV2/cross');
-    if (r && r.ok === true) lastCross = r;
+    if (r && r.ok === true) { lastCross = r; paintCrossLimits(); }
     else failure = (r && (r.error || r.reason)) ? String(r.error || r.reason) : '接口没有返回原因';
   } catch (error) {
     failure = error && error.message ? error.message : String(error);
@@ -7536,7 +7548,18 @@ function crossOnInput(event) {
 async function crossSave() {
   if (crossBusy) return;
   const inputs = [...document.querySelectorAll('#crossList input[data-key]')];
-  if (inputs.length === 0) { showConsoleToast('现在没有可以保存的会话'); return; }
+  const maxEl = document.getElementById('crossRecallMax');
+  const winEl = document.getElementById('crossRecallWindow');
+  const recallMax = Number(maxEl ? maxEl.value : lastCross?.recallMaxPerWindow ?? 3);
+  const recallMinutes = Number(winEl ? winEl.value : Math.round((lastCross?.recallWindowMs ?? 300000) / 60000));
+  if (!Number.isInteger(recallMax) || recallMax < 0 || recallMax > 100) {
+    showConsoleToast('qq_recall 次数上限要填 0–100 的整数（0 = 不限次数）');
+    return;
+  }
+  if (!Number.isInteger(recallMinutes) || recallMinutes < 1 || recallMinutes > 60) {
+    showConsoleToast('限流窗口要填 1–60 分钟');
+    return;
+  }
   const groups = {};
   for (const input of inputs) {
     const gid = crossGid(input.value);
@@ -7545,11 +7568,14 @@ async function crossSave() {
     input.value = String(gid);
     crossDraft.set(input.dataset.key, String(gid));
   }
+  const payload = { recallMaxPerWindow: recallMax, recallWindowMs: recallMinutes * 60000 };
+  // 列表为空（一个会话都没见过）时也能只保存限流旋钮；有分组就一起提交。
+  if (inputs.length > 0) payload.groups = groups;
   const button = document.getElementById('crossSave');
   crossBusy = true;
   if (button) button.disabled = true;
   try {
-    const r = await api('/api/socialV2/cross', 'POST', { groups });
+    const r = await api('/api/socialV2/cross', 'POST', payload);
     if (!r || r.ok !== true) {
       const reason = r && typeof r.reason === 'string' ? r.reason : '';
       throw new Error((r && r.error) || CROSS_SAVE_REASONS[reason] || '桥接拒绝了这次改动');
@@ -7564,6 +7590,14 @@ async function crossSave() {
     crossBusy = false;
     if (button) button.disabled = false;
   }
+}
+// 用桥接返回的真实值回填限流输入框（保存后可能被钳制）；正在编辑的框不动。
+function paintCrossLimits() {
+  const maxEl = document.getElementById('crossRecallMax');
+  const winEl = document.getElementById('crossRecallWindow');
+  if (!lastCross) return;
+  if (maxEl && document.activeElement !== maxEl) maxEl.value = String(lastCross.recallMaxPerWindow ?? 3);
+  if (winEl && document.activeElement !== winEl) winEl.value = String(Math.round((lastCross.recallWindowMs ?? 300000) / 60000));
 }
 document.getElementById('crossList').addEventListener('input', crossOnInput);
 document.getElementById('crossSave').addEventListener('click', crossSave);
