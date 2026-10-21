@@ -171,6 +171,15 @@ const tests = [
   // 小黑盒 MCP 工具（T-022 第二步）：假 CLI 桩验证 dry-run 不记账、真发记账 + 回读、
   // 额度/审计/重复拦截、验证码暂停、错误映射。不碰真实 CLI 与真实 state/。
   'test-heybox-tools.mjs',
+  // 平板纯函数（T-023 第一步）：配置钳制、日额度与步数、触点/滑动 clamp、包名校验、
+  // 北京日界重置、状态序列化、错误翻译。零网络零磁盘。
+  'test-device-core.mjs',
+  // 平板 MCP 工具（T-023 第二步）：假 adb 桩验证七工具的参数校验、额度/间隔闸门、
+  // 截图落盘与回读、状态记账、暂停窗口。不碰真实 adb 与真实 state/。
+  'test-device-tools.mjs',
+  // 平板接线（T-023 第三步）：bridge 的 import/常量/归一/读状态/toolMap/过滤/prompt 块，
+  // MCP 侧的 import 与 try/catch 注册，config.example 的 device 段。只读源码。
+  'test-device-wiring.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

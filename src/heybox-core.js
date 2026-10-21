@@ -14,6 +14,11 @@ import { auditContent } from './qzone-post.js';
 
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
+// 验证码暂停窗口的钳制区间。下限定 5 分钟：短于这个数「停一下」等于没停，风控窗口通常
+// 以十分钟计；上限 120 分钟：再长就等于把功能锁死，用户只会以为工具坏了、然后手动去试，
+// 反而是更糟的风控行为。
+const CAPTCHA_PAUSE_MIN_MS = 5 * MINUTE_MS;
+const CAPTCHA_PAUSE_MAX_MS = 120 * MINUTE_MS;
 // 小黑盒的「今天」按北京时间（UTC+8）切：服务器可能跑在别的时区，不能依赖进程时区。
 const BEIJING_OFFSET_MS = 8 * HOUR_MS;
 // Date 能表示的最大时间戳；超出它 toISOString() 会抛 RangeError。
@@ -33,6 +38,10 @@ const MIN_COMPARE_CHARS = 6;
  *
  * `minGapMs` / `maxGapMs` 是评论间隔的抖动区间：MCP 层在两者之间取一个随机间隔，
  * 固定间隔太像脚本。`dryRunDefault:true` 表示 CLI 层默认只演练、不真发。
+ *
+ * `captchaPauseMs` 是**被验证码拦下之后搜索与评论一起停多久**（共用同一个窗口）：风控不是
+ * 「再试一次就好」的东西，原先是硬编码「停到当天 24:00」，等于一条验证码就把剩下半天全废了；
+ * 30 分钟是「真的停手、但不至于停摆」的经验值，两端由 `HEYBOX_LIMITS.captchaPauseMs` 钳制。
  */
 export const HEYBOX_DEFAULTS = Object.freeze({
   enabled: true,
@@ -41,6 +50,7 @@ export const HEYBOX_DEFAULTS = Object.freeze({
   dailyComments: 10,
   minGapMs: 6 * MINUTE_MS,
   maxGapMs: 20 * MINUTE_MS,
+  captchaPauseMs: 30 * MINUTE_MS,
   postMaxChars: 200,
   dryRunDefault: true,
 });
@@ -55,6 +65,7 @@ export const HEYBOX_LIMITS = Object.freeze({
   dailyComments: Object.freeze([0, 50]),
   minGapMs: Object.freeze([MINUTE_MS, 6 * HOUR_MS]),
   maxGapMs: Object.freeze([MINUTE_MS, 6 * HOUR_MS]),
+  captchaPauseMs: Object.freeze([CAPTCHA_PAUSE_MIN_MS, CAPTCHA_PAUSE_MAX_MS]),
   postMaxChars: Object.freeze([5, 500]),
 });
 
@@ -144,9 +155,32 @@ export function normalizeHeyboxConfig(raw) {
     dailyComments: clampInt(source.dailyComments, HEYBOX_LIMITS.dailyComments, HEYBOX_DEFAULTS.dailyComments),
     minGapMs,
     maxGapMs: Math.max(minGapMs, maxGapMs),
+    captchaPauseMs: clampInt(source.captchaPauseMs, HEYBOX_LIMITS.captchaPauseMs, HEYBOX_DEFAULTS.captchaPauseMs),
     postMaxChars: clampInt(source.postMaxChars, HEYBOX_LIMITS.postMaxChars, HEYBOX_DEFAULTS.postMaxChars),
     dryRunDefault: toBool(source.dryRunDefault, HEYBOX_DEFAULTS.dryRunDefault),
   });
+}
+
+/**
+ * 「现在能不能真发评论」的一句话回显（`heybox_status` 用）。
+ *
+ * 为什么需要它：`allowComment` / `dryRunDefault` 是两个布尔值，而模型的用户问的是
+ * 「你现在能自己发评论吗」。把两个开关翻成四种模式 + 一句人话，回显才不会两个布尔自相矛盾
+ * （比如 allowComment=true 却还是只演练）。四种模式按「先关、后只读、再演练、最后真发」排序，
+ * 与 `heyboxQuota` 的拒绝顺序一致。
+ */
+export function commentModeOf(cfg) {
+  const config = normalizeHeyboxConfig(cfg);
+  if (!config.enabled) {
+    return { mode: 'disabled', text: '小黑盒功能没启用（enabled=false）：看帖、搜索、评论都不能用' };
+  }
+  if (!config.allowComment) {
+    return { mode: 'readonly', text: '当前不发评论（allowComment=false）：只能看帖和搜索' };
+  }
+  if (config.dryRunDefault) {
+    return { mode: 'dry_run', text: '当前只演练不发（allowComment=true，dryRunDefault=true）：要真发必须显式传 dryRun=false' };
+  }
+  return { mode: 'live', text: '当前允许真发评论（allowComment=true，dryRunDefault=false）' };
 }
 
 /**
@@ -172,6 +206,43 @@ function usedTodayOf(usage, todayKey) {
 }
 
 /**
+ * 毫秒时长 → 人话（`27 分钟` / `1 小时 5 分钟` / `不到 1 分钟`）。
+ * 向上取整：还剩 90 秒时说「2 分钟」才是实话，说「1 分钟」会让用户提前去撞验证码。
+ * 0 或负数回空串（调用方自己决定说「已经解禁」还是干脆不提时长）。
+ */
+function durationText(ms) {
+  const total = toCount(ms);
+  if (total <= 0) return '';
+  if (total < MINUTE_MS) return '不到 1 分钟';
+  const minutes = Math.ceil(total / MINUTE_MS);
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? `${hours} 小时` : `${hours} 小时 ${rest} 分钟`;
+}
+
+/**
+ * 验证码暂停的截止时刻：`now + captchaPauseMs`（配置值已在 `normalizeHeyboxConfig` 里钳过）。
+ * 抽成导出函数是为了让「暂停多久」只有一处在算 —— MCP 层写 `pausedUntil`、测试断言、以后
+ * 想做「暂停中允许手动解除」都从这里取，不会两边各算一个数。
+ */
+export function captchaPauseDeadline(now, cfg) {
+  const at = toTimestamp(now, 0);
+  const pauseMs = normalizeHeyboxConfig(cfg).captchaPauseMs;
+  return Math.min(MAX_DATE_MS, at + pauseMs);
+}
+
+/**
+ * 暂停还剩多久的短句（`还剩 27 分钟`）。已经过点（或压根没暂停）回空串 ——
+ * 这种情况调用方不该再提「还剩」。
+ */
+export function formatPauseRemaining(pausedUntil, now) {
+  const left = toCount(pausedUntil) - toTimestamp(now, 0);
+  return left > 0 ? `还剩 ${durationText(left)}` : '';
+}
+
+
+/**
  * 评论额度判定（纯计算，不写任何状态）。顺序是**定死的**，因为拒绝理由决定用户下一步做什么：
  *   ① `enabled === false` → `disabled`（整个功能关着，改评论开关也没用）
  *   ② `allowComment === false` → `comment_disabled`
@@ -185,7 +256,8 @@ function usedTodayOf(usage, todayKey) {
  * ——把系统时间往前拨一次不能换来一次评论机会。
  *
  * 返回值除约定的 5 个键外另外带 `dailyComments` / `minGapMs`：`commentReasonText(reason, quota)`
- * 只有 quota 一个入参，需要这两个值才能拼出「上限 M 条」「不到 X 分钟」。
+ * 只有 quota 一个入参，需要这两个值才能拼出「上限 M 条」「不到 X 分钟」；再带 `pausedUntil` /
+ * `pausedRemainingMs`，因为「还剩多久」同样只能从 quota 里拿。
  */
 export function heyboxQuota(state, cfg, now) {
   const config = normalizeHeyboxConfig(cfg);
@@ -201,6 +273,10 @@ export function heyboxQuota(state, cfg, now) {
     nextAllowedAt,
     dailyComments: config.dailyComments,
     minGapMs: config.minGapMs,
+    // 暂停窗口一起带出去：reason='paused' 时调用方要说「还剩多久」，不该再回头读一遍 usage
+    // （读出来的可能是另一个时刻的状态）。没在暂停时两者分别是旧时间戳与 0。
+    pausedUntil: usage.pausedUntil,
+    pausedRemainingMs: Math.max(0, usage.pausedUntil - at),
   });
 
   if (!config.enabled) return make(false, 'disabled');
@@ -389,7 +465,9 @@ export function serializeUsage(state) {
 /** CLI 错误码 → 中文可读原因（逐字定稿，MCP 层原样回给模型，模型据此跟用户解释）。 */
 const CLI_ERROR_TEXTS = Object.freeze({
   auth: '小黑盒登录失效，需要重新扫码登录',
-  captcha: '小黑盒要求验证码，先停一天',
+  // 验证码不再是「停一天」：暂停窗口由 captchaPauseMs 决定（默认 30 分钟），
+  // 具体还剩多久由 MCP 层用 formatPauseRemaining 拼在返回里，这里只给一句定性的话。
+  captcha: '小黑盒要求验证码，先暂停一下',
   rate_limit: '小黑盒限流了，今天别再试',
   network: '连不上小黑盒',
   unknown: '小黑盒拒绝了这次操作',
@@ -509,8 +587,14 @@ export function commentReasonText(reason, quota) {
       // 向上取整：间隔 90 秒时说「不到 2 分钟」才是实话，说「不到 1 分钟」是骗人。
       return `距上次评论还不到 ${Math.max(1, Math.ceil(gapMs / MINUTE_MS))} 分钟`;
     }
-    case 'paused':
-      return '今天被验证码拦过，先停一天';
+    case 'paused': {
+      // 暂停不是定长的一天（captchaPauseMs 可配），所以必须把「还剩多久」说出来：
+      // 用户看到「先停一天」会以为今天全废，实际可能只差 20 分钟。
+      const left = durationText(toCount(info.pausedRemainingMs));
+      return left === ''
+        ? '小黑盒要求验证码，搜索和评论一起停'
+        : `小黑盒要求验证码，搜索和评论一起停，还剩 ${left}`;
+    }
     case 'comment_disabled':
       return '评论开关没开';
     case 'disabled':

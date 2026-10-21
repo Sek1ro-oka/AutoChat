@@ -5,6 +5,26 @@
 
 ## [Unreleased]
 
+### 小黑盒：验证码自动暂停与评论 id 回读（2026-10-21，T-022 收尾）
+
+- 验证码风控从「撞到就不重试」升级为**自动暂停**：新配置 `heybox.captchaPauseMs`（默认 30 分钟，钳制 5 分钟–2 小时）——命中验证码时把 `pausedUntil` 写进 `state/heybox-usage.json`，到期自动恢复，返回文案带「还剩 27 分钟」这种具体等待时间。
+- 暂停窗口覆盖**所有**小黑盒请求（`heybox_feed` / `heybox_post` / `heybox_search` / `heybox_comment`）：真机实测平台对 `post get` 这种只读请求同样会要验证码，只掐搜索和评论等于形同虚设。四个入口共用 `pauseBlocker` 一个闸门、`captchaBlocked` 一个出口，不会出现「一个入口暂停了、另一个还在打」。
+- 真发评论后落 `messageId`：先取 CLI 返回的评论 id（只认 `data.commentid` / `comment_id` / `commentId`、`data.comment.*`、`data.result.*`，**绝不拿 `data.id` 猜**——那是帖子的 id），取不到再回读评论区按自己的正文匹配（只认本机发的那条），两者都拿不到就是 `null`、不编造；`state/heybox-actions.jsonl` 同时记 `messageId` / `readback` / `readbackSource`。
+- `heybox_status` 回显 `commentMode` 四态（`disabled` / `readonly` / `dry_run` / `live`）与一句人话（例如「当前允许真发评论（allowComment=true，dryRunDefault=false）」），不用再去猜配置和额度状态；暂停期间额外回「还剩多久」。
+
+### 安卓平板：截图、点击与视觉闭环（2026-10-21，T-023）
+
+- 新增 `src/device-core.js`（配置归一/预算/黑名单/坐标夹取/动作分类/`adb devices` 与 `dumpsys window` 解析，纯函数）与 `src/device-tools.js`（**八个** MCP 工具，注册进现有 snowluma 服务器：58 → 66，`tools/list` 实测 66 = 53 个 `qq_*` + 5 个 `heybox_*` + 8 个 `device_*`；没有单独的 `src/mcp-device-safe.js` 进程）。
+- 工具：`device_status`（设备/电池/今日额度/`foreground`）、`device_screenshot`（唯一入口，返回 PNG 给模型看）、`device_list_apps`（第三方应用包名 + 是否在黑名单）、`device_tap`、`device_swipe`、`device_type`、`device_key`（back/home）、`device_open_app`。
+- 黑名单硬闸门：`device.blockedApps` 的内核五项（支付宝 / 微信 / QQ / Play 商店 / 系统设置）写死在代码里，配置只能追加、删不掉；五个动手工具**每次执行前**先读 `dumpsys window` 的 `mCurrentFocus`，命中即 `blocked_foreground`、写日志且**不记步**；**唯一例外是 `device_key home`**（逃生口：只回桌面，不碰应用内容；`back` 仍拦，因为它是应用内导航）；`device_open_app` 对黑名单包名一律 `blocked_app`（白名单里写了也一样）；`device_status` 直接返回 `foreground` 供模型确认自己在哪一屏。读不出前台时 fail-open 放行，但动作日志会带 `foreground:"unknown"` / `foregroundKnown:false`，事后能看出哪几步是盲着做的。截图 / 列应用不过这道闸门（被拦时至少还能看见「我在微信」）。
+- 预算闸门：每天 30 分钟 / 60 步、两步间隔 ≥1 秒、一轮结束暂停 1 小时、`open_app` 只认白名单、敏感词（密码/支付/转账/验证码/登录/购买/删除/安装…）直接拒且不记账。截图与 `device_list_apps` 不计步（否则「点一下看一次」第一眼就被间隔拦），额度用完后两者仍可用——「看」不拦，「动」才拦。
+- `device_type` 只支持 ASCII（adb `input text` 的限制）：中文直接返回 `ascii_only` 并提示改用点击；空格转 `%s`，其它特殊字符编码以避免设备端 shell 解释。
+- 桥接：顶层 `device` 配置归一（与 MCP 侧同一个 `normalizeDeviceConfig`）、prompt `device` 块（额度现算 + 八个工具名 + 黑名单），`enabled:false` 时整块短路成 `{enabled:false}`、八个工具从清单消失。
+- 新增 `scripts/smoke-device.mjs`（`npm run smoke:device`）：真机顺序跑 `status → list_apps → screenshot → tap → swipe → key(back) → open_app`，前一步失败即停并给中文原因（`adb` 不存在 / 无设备 / 未授权 / 前台是黑名单应用），失败以 1 退出；`--state-dir` 可换独立账本，不占正式额度。
+- 文档对齐：`work/agent-tasks/T-023/dev-doc.md` 按**实际实现**重写（旧稿里的 `mcp-device-safe.js`、`device_state`、`scalePoint`、剪贴板 IME、boredom 定时器都是没实现的设想，已逐条标出），`ISSUE.md` 状态改为「已实现，真机待验收」，`config.example.json` 的 `device.adbPath` 换成占位符并补 `blockedApps` 示例。
+- 本轮不含自动唤醒：模型会用工具，但「自己跑去玩」的定时器与玩后写日记留到下一步。
+- 状态在 `state/device-state.json`，动作日志 `state/device-actions.jsonl`，截图 `state/device/`。
+
 ### 小黑盒：看帖、搜索与自主评论（2026-10-21，T-022）
 
 - 新增五个 MCP 工具（注册进 snowluma 服务器，随 DSH 重拉子进程生效）：`heybox_status`（登录态 + 今日额度）、`heybox_feed`（首页推荐，返回链接 id 与摘要）、`heybox_post`（正文 + 前 20 条评论）、`heybox_search`（搜帖子/游戏/话题/用户）、`heybox_comment`（发评论，默认 dry-run）。

@@ -228,6 +228,15 @@ import {
 // 真正发评论的闸门与记账在 src/mcp-heybox-safe.js 里，桥接不参与、也不起定时器。
 // 单行 import：scripts/audit-bridge-harness.mjs 按行剥顶层 import，单行不会踩多行剥错的坑。
 import { normalizeHeyboxConfig, heyboxQuota, parseUsage } from './heybox-core.js';
+// 平板（T-023 第三步）：device-core 是纯逻辑模块（配置归一 / 预算 / 状态解析 / 提示词块，
+// 零依赖、零 I/O、时钟由 now 注入）。桥接这边只用四处：
+//   - normalizeDeviceConfig：loadConfig 里归一 config.json 的**顶层** device 段；
+//   - createDeviceState + parseDeviceState：读 state/device-state.json（坏/缺回落空状态）；
+//   - devicePromptBlock：prompt 里给模型「有手有眼、今天还能玩多久」的一段话。
+// 真正调 adb 的闸门与记账在 src/device-tools.js（MCP 侧），桥接不参与、**也不起定时器**
+// —— 本轮只做「模型会用工具」，主动去平板玩是下一步。
+// 单行 import：scripts/audit-bridge-harness.mjs 按行剥顶层 import，单行不会踩多行剥错的坑。
+import { normalizeDeviceConfig, createDeviceState, parseDeviceState, devicePromptBlock } from './device-core.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -282,6 +291,13 @@ const IDENTITY_FILE = path.join(STATE_DIR, 'identity-map.json');
 // 也就是 state/heybox-usage.json。注意 dev-doc §二 的目录图写的是 state/heybox/usage.json，
 // 那是设计稿的旧写法；以 mcp-heybox-safe.js 的实际实现为准（否则 prompt 里的额度永远是 0）。
 const HEYBOX_USAGE_FILE = path.join(STATE_DIR, 'heybox-usage.json');
+
+// 平板（T-023 第三步）：当日预算状态。形状
+// { day, usedMs, steps, lastTs, pausedUntil, pausedReason }，由 MCP 子进程在**每一步之后**
+// 写（src/device-tools.js 的 DEVICE_STATE_FILE，同一个 state/ 目录），桥接这边**只读** ——
+// 一次 GET /api/socialV2/prompt 不该往 state/ 里落一个空状态文件，那会让「今天还没玩」
+// 看起来像「已经玩过一轮」。路径必须和 MCP 的落盘位置逐字一致（state/device-state.json）。
+const DEVICE_STATE_FILE = path.join(STATE_DIR, 'device-state.json');
 
 // ── 生图 / 发图（T-017）：三份落盘位置 + 两个体积上限 ─────────────────────────
 // 图片本体（state/images/）、索引（哪张图在哪个文件）、额度账本（谁在什么时候画了 /
@@ -1288,6 +1304,15 @@ function loadConfig() {
   // 注意取的是 file.heybox：cfg 的字面量里没有 heybox 键，写成 cfg.heybox 会永远是 undefined。
   cfg.heybox = normalizeHeyboxConfig(file.heybox);
 
+  // 平板（T-023 第三步）：配置段在 config.json **顶层**的 device —— 与 heybox / qzone / file /
+  // bili 同级，不在 socialV2 里（工具类能力都在顶层，这是 T-022 定的口径）。
+  // 归一全交给纯模块 src/device-core.js：缺字段补出厂默认（enabled: true、30 分钟 / 60 步 /
+  // 步间 1 秒 / 轮间 1 小时），数字类字段 clamp 到 DEVICE_LIMITS，normalizeDeviceConfig 永不抛。
+  // 所以「config.json 里没有 device 段」= 出厂默认（功能开着），而**不是** undefined 一路传进
+  // 端点被当成"没配置所以随便点"。这里只归一，不读盘、不建定时器、不碰 adb。
+  // 注意取的是 file.device：cfg 的字面量里没有 device 键，写成 cfg.device 会永远是 undefined。
+  cfg.device = normalizeDeviceConfig(file.device);
+
   // 人格卡注入上限（字符）。历史硬编码 6000，现在可配：每条约 4~6k token 的成本护栏。
   cfg.role = { maxInjectChars: ROLE_INJECT_MAX_CHARS_DEFAULT, ...(file.role ?? {}) };
   roleInjectMaxChars = applyRoleInjectLimit(cfg.role.maxInjectChars);
@@ -1982,6 +2007,26 @@ async function writeImageIndex(entry) {
  */
 function readHeyboxUsage() {
   return parseUsage(readJsonSafe(HEYBOX_USAGE_FILE, null));
+}
+
+// ── 平板（T-023 第三步）：预算状态（只读） ───────────────────────────────────
+// 判定逻辑（日额度 / 步数 / 步间间隔 / 暂停窗口）全在 src/device-core.js 的 deviceBudget，
+// 记账与落盘在 MCP 子进程（src/device-tools.js 每一步成功后写）。这里只读，且和 profile /
+// affect / images / heybox 一样不做进程内缓存：文件很小，手删 device-state.json 就该立刻
+// 把今天的计数清零。
+/**
+ * 读当日预算状态（纯读，不落盘）。
+ *
+ * 没有文件 / JSON 坏了 → createDeviceState()（`day` 取今天、计数 0、没有暂停），于是
+ * devicePromptBlock 说「今天还剩满额」。单字段类型不对则由 parseDeviceState 逐字段兜底
+ * （只坏一个字段不该让今天的计数清零 —— 那等于凭空多出 30 分钟额度）。
+ * 读接口绝不制造副作用：否则一次 GET /api/socialV2/prompt 就会往 state/ 里落一个空状态。
+ * `Date.now()` 只在兜底分支取一次，正常路径的时间由调用方（devicePromptBlock 的 now）决定。
+ */
+function readDeviceState() {
+  const raw = readJsonSafe(DEVICE_STATE_FILE, null);
+  if (raw === null) return createDeviceState(Date.now());
+  return parseDeviceState(raw);
 }
 
 /**
@@ -8390,7 +8435,19 @@ async function main() {
             heyboxFeed: 'heybox_feed',
             heyboxPost: 'heybox_post',
             heyboxSearch: 'heybox_search',
-            heyboxComment: 'heybox_comment'
+            heyboxComment: 'heybox_comment',
+            // 平板（T-023 第三步）：状态 / 截图 / 点 / 滑 / 打字 / 按键 / 开应用 / 列应用。总开关是
+            // **顶层** cfg.device.enabled（缺省即开，与 normalizeDeviceConfig 的默认一致）；
+            // 关掉时八个工具一起从清单里消失 —— 与 heybox 同口径：模型看不到就不会对着 403
+            // 反复试。八个值必须与 src/device-tools.js 的 DEVICE_TOOL_NAMES 逐字一致。
+            deviceStatus: 'device_status',
+            deviceScreenshot: 'device_screenshot',
+            deviceTap: 'device_tap',
+            deviceSwipe: 'device_swipe',
+            deviceType: 'device_type',
+            deviceKey: 'device_key',
+            deviceOpenApp: 'device_open_app',
+            deviceListApps: 'device_list_apps'
           };
           const tools = cfg.socialV2?.tools ?? {};
           const stickerToolFlags = new Set(['listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker']);
@@ -8418,9 +8475,14 @@ async function main() {
           const hb = cfg.heybox;
           const heyboxToolFlags = new Set(['heyboxStatus', 'heyboxFeed', 'heyboxPost', 'heyboxSearch', 'heyboxComment']);
           const heyboxEnabled = hb?.enabled !== false;
+          // 平板（T-023 第三步）：总开关同样是顶层 cfg.device.enabled（loadConfig 已归一，
+          // 缺省即开）。关掉时八个工具一起从清单里消失 —— 与 heybox / profile / images 同一套
+          // 「模型看不到就不会去试，省得对着 403 反复调」。判据用 `!== false`：没写这一段也照常可用。
+          const deviceEnabled = cfg.device?.enabled !== false;
+          const deviceToolFlags = new Set(['deviceStatus', 'deviceScreenshot', 'deviceTap', 'deviceSwipe', 'deviceType', 'deviceKey', 'deviceOpenApp', 'deviceListApps']);
           const enabledTools = [];
           for (const [flag, name] of Object.entries(toolMap)) {
-            if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled()) && !(profileToolFlags.has(flag) && !profileEnabled) && !(imageToolFlags.has(flag) && (!imagesEnabled || (flag === 'drawImage' && !drawEnabled))) && !(flag === 'recall' && !crossEnabled) && !(flag === 'lookup' && !identityEnabled) && !(flag === 'affectReport' && !affectEnabled) && !(heyboxToolFlags.has(flag) && !heyboxEnabled) && !(flag === 'heyboxComment' && hb?.allowComment !== true)) enabledTools.push(name);
+            if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled()) && !(profileToolFlags.has(flag) && !profileEnabled) && !(imageToolFlags.has(flag) && (!imagesEnabled || (flag === 'drawImage' && !drawEnabled))) && !(flag === 'recall' && !crossEnabled) && !(flag === 'lookup' && !identityEnabled) && !(flag === 'affectReport' && !affectEnabled) && !(heyboxToolFlags.has(flag) && !heyboxEnabled) && !(flag === 'heyboxComment' && hb?.allowComment !== true) && !(deviceToolFlags.has(flag) && !deviceEnabled)) enabledTools.push(name);
           }
           sendJson({
             ok: true,
@@ -8595,6 +8657,19 @@ async function main() {
                   + (hb.allowComment
                     ? '真心想回一句时才用 heybox_comment（默认 dry-run，不会真发）。'
                     : '评论能力默认关着，不要尝试。')
+              };
+            })(),
+            // 平板（T-023 第三步）：只读快照 —— 白名单应用、今天还剩多少额度、一句行为约束。
+            // devicePromptBlock 只给 { enabled, apps, budget, hint }（它属于纯模块，不该知道
+            // 工具叫什么），工具清单在这里补上：模型得在 prompt 里看到工具名才会去用。
+            // 禁用时保持 { enabled: false }（整段不注入）；这里**不写盘、不起定时器、不碰 adb** ——
+            // 主动去平板玩（proactive 唤醒）是下一步，本步骤只让模型会用工具。
+            device: (() => {
+              if (!deviceEnabled) return { enabled: false };
+              const block = devicePromptBlock(cfg.device, readDeviceState(), Date.now());
+              return {
+                ...block,
+                tools: ['device_status', 'device_screenshot', 'device_tap', 'device_swipe', 'device_type', 'device_key', 'device_open_app', 'device_list_apps']
               };
             })(),
             replyTiming: replyTimingV2(st),

@@ -25,6 +25,9 @@ import { formatIdentityRows } from './identity-core.js';
 // 小黑盒的 5 个 heybox_* 工具注册在这里（T-022）：DSH 的 MCP server 清单启动时固定，
 // 新增独立 server 要重启 DSH 才生效，所以日常运行挂在 snowluma 这个已有的 server 上。
 import { registerHeyboxTools } from './heybox-tools.js';
+// 平板的 7 个 device_* 工具（T-023 第三步），理由同上：DSH 的 MCP server 清单启动时读死，
+// 新增独立 server 必须重启 DSH 才生效，所以日常挂在 snowluma 这个已有的 server 上。
+import { registerDeviceTools } from './device-tools.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -2356,6 +2359,14 @@ try {
   registerHeyboxTools(server);
 } catch (err) {
   console.error('[heybox] 工具注册失败：' + (err?.message || err));
+}
+
+// 平板工具同样单独兜一层：device 的依赖（adb / 状态目录）或注册出问题，只该少七个工具，
+// 不该把整个 snowluma server 一起拖死 —— 那会让 QQ 聊天全挂（同 heybox 的那层理由）。
+try {
+  registerDeviceTools(server);
+} catch (err) {
+  console.error('[device] 工具注册失败：' + (err?.message || err));
 }
 
 await server.connect(new StdioServerTransport());

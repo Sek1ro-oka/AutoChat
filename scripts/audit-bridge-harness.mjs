@@ -85,6 +85,11 @@ import * as identityCore from '../src/identity-core.js';
 // auditComment / nearDuplicate / createHeyboxState / recordAction / parseUsage /
 // serializeUsage / describeCliError / commentReasonText）与其它 spread 模块均不重名。
 import * as heyboxCore from '../src/heybox-core.js';
+// T-023 第三步：bridge 的 loadConfig 现在会调 normalizeDeviceConfig(file.device)，prompt 的
+// device 块会调 devicePromptBlock + readDeviceState（→ parseDeviceState / createDeviceState）。
+// 只把导出铺进 context（spread 的是 module namespace，不是 module 本体，不会触发 device-core
+// 里对 node:child_process 的引用）。导出名已核对 21 个，与其它 spread 模块均不重名。
+import * as deviceCore from '../src/device-core.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -231,6 +236,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...imageCore, ...imageGen,
     ...identityCore,
     ...heyboxCore,
+    ...deviceCore,
     ...affectCore, ...affectVent, ...affectText,
     ...profileCore,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的

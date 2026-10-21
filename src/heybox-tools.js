@@ -37,6 +37,9 @@ import {
   serializeUsage,
   describeCliError,
   commentReasonText,
+  commentModeOf,
+  captchaPauseDeadline,
+  formatPauseRemaining,
 } from './heybox-core.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -55,7 +58,6 @@ const MAX_STDOUT_BYTES = 64 * 1024 * 1024;
 
 const MINUTE_MS = 60 * 1000;
 const BEIJING_OFFSET_MS = 8 * 60 * MINUTE_MS;
-const DAY_MS = 24 * 60 * MINUTE_MS;
 
 // ── 日志 ────────────────────────────────────────────────────────────────────
 // stdout 是 MCP 协议流，一个字都不能往里写；stderr 可以，但限长，避免把 CLI 的原始
@@ -281,13 +283,6 @@ function formatCreateAt(value) {
     + `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
 }
 
-/** 北京时间「当天 24:00」的时间戳：验证码暂停的截止时刻。 */
-function endOfBeijingDayMs(ms) {
-  const shifted = ms + BEIJING_OFFSET_MS;
-  const nextDayStart = Math.floor(shifted / DAY_MS) * DAY_MS + DAY_MS;
-  return nextDayStart - BEIJING_OFFSET_MS;
-}
-
 function authorOf(value) {
   if (!value || typeof value !== 'object') return '';
   const user = value.user;
@@ -451,6 +446,41 @@ function commentPayload(entry) {
   return typeof raw === 'object' ? raw : null;
 }
 
+/** 纯数字 id → 数字串（不是纯数字就回空串）。评论 id 一律按字符串落地，避免大 id 被浮点吃掉。 */
+function digitsOf(value) {
+  const text = textOf(value).trim();
+  return /^\d{1,20}$/.test(text) ? text : '';
+}
+
+/** 评论 id：平台写 `commentid`，个别版本写 `comment_id`；统一成数字串，取不到回空串。 */
+function commentIdOf(payload) {
+  if (!payload || typeof payload !== 'object') return '';
+  return digitsOf(payload.commentid ?? payload.comment_id);
+}
+
+/**
+ * 从 `comment create` 的返回值里挖评论 id。
+ *
+ * 为什么只认这些键：`data.id` 之类含义不明的键绝对不能猜 —— 万一那是帖子 id，
+ * 写进 actions 的 `messageId` 就是一条错账，比空着更坏。挖不到就回空串，
+ * 交给 `post get` 回读兜底（回读也是唯一能确认「这条评论真在线」的路径）。
+ */
+function commentIdFromCli(json) {
+  const data = json && typeof json === 'object' && json.data && typeof json.data === 'object' ? json.data : {};
+  const nested = data.comment && typeof data.comment === 'object' ? data.comment : {};
+  const wrapped = data.result && typeof data.result === 'object' ? data.result : {};
+  const candidates = [
+    data.commentid, data.comment_id, data.commentId,
+    nested.commentid, nested.comment_id, nested.commentId,
+    wrapped.commentid, wrapped.comment_id, wrapped.commentId,
+  ];
+  for (const value of candidates) {
+    const id = digitsOf(value);
+    if (id !== '') return id;
+  }
+  return '';
+}
+
 function slimPostComment(entry) {
   const payload = commentPayload(entry);
   if (!payload) return null;
@@ -462,7 +492,7 @@ function slimPostComment(entry) {
     // 平台字段就叫 `up`（点赞数），不是「作者本人」那种布尔。
     likes: intOf(payload.up ?? payload.like_num ?? payload.likes),
     childCount: intOf(payload.child_num),
-    commentId: textOf(payload.commentid ?? payload.comment_id).trim(),
+    commentId: commentIdOf(payload),
   };
 }
 
@@ -596,6 +626,9 @@ export function createHeyboxTools({
    *
    * 找不到只代表「没验证到」，不代表没发出去 —— 平台审核、分页、风控都会让回读落空。
    * 所以这里只回 verified，由调用方决定怎么如实告诉模型。
+   *
+   * 命中时把那条评论的 `commentId` 也带出来：这是唯一能把「刚发的评论」和
+   * 「actions 里的 messageId」对上号的来源（CLI 的 create 返回值不一定带 id）。
    */
   async function verifySent(cfg, id, body) {
     const userId = await selfUserId(cfg);
@@ -603,13 +636,77 @@ export function createHeyboxTools({
     const called = await invoke(cfg, ['-f', 'json', 'post', 'get', id], READ_TIMEOUT_MS);
     if (!called.ok) return { verified: false, detail: called.reason };
     const rawComments = Array.isArray(called.json?.data?.result?.comments) ? called.json.data.result.comments : [];
+    let matchedId = '';
     const found = rawComments.some((entry) => {
       const payload = commentPayload(entry);
       if (!payload) return false;
       const authorId = textOf(payload.userid ?? payload.user?.userid).trim();
-      return authorId === userId && textOf(payload.text).trim() === body;
+      if (authorId !== userId || textOf(payload.text).trim() !== body) return false;
+      matchedId = commentIdOf(payload);
+      return true;
     });
-    return { verified: found };
+    return found ? { verified: true, commentId: matchedId } : { verified: false };
+  }
+
+  /**
+   * 记一次验证码暂停：`pausedUntil = at + captchaPauseMs`，并把结果写给调用方。
+   *
+   * 四个 CLI 入口（feed / post / search / comment）共用这一个 30 分钟窗口
+   * （都读 `heybox-usage.json` 的 pausedUntil）：被要过一次验证码之后继续请求，
+   * 只会延长风控；而各写各的窗口等于各停各的，用户看到「评论不能发但还能看帖」
+   * 会以为是 bug。**读请求同样会撞验证码**（本机实测过 `post get` 被要验证码），
+   * 所以暂停期内连看帖/刷首页也一并停手。
+   */
+  function applyCaptchaPause(cfg, state, at) {
+    const pausedUntil = captchaPauseDeadline(at, cfg);
+    const tracked = writeUsage({ ...state, pausedUntil, pausedReason: 'captcha' });
+    const remaining = formatPauseRemaining(pausedUntil, at);
+    const out = {
+      pausedUntil,
+      tracked,
+      remaining,
+      hint: `暂停期间所有小黑盒请求（看帖 / 搜索 / 评论）都不再发出；${remaining}后自动恢复`,
+    };
+    if (!tracked) out.warn = '暂停状态没写进 heybox-usage.json，重启后可能忘记暂停';
+    return out;
+  }
+
+  /**
+   * 四个入口撞到验证码时的统一出口：置暂停窗口 + 回一条带「还剩多久」的拒绝。
+   * 收在一处是为了「暂停窗口只有一份账」——散着写迟早有一路忘记落盘。
+   *
+   * @param {object} state 调用方手里最新的 usage（search/feed/post 传 readUsage()）
+   */
+  function captchaBlocked(cfg, at, called, state) {
+    const paused = applyCaptchaPause(cfg, state, at);
+    const out = {
+      ok: false,
+      code: 'captcha',
+      reason: called.reason,
+      pausedUntil: paused.pausedUntil,
+      pausedReason: 'captcha',
+      pauseRemainingText: paused.remaining,
+      hint: paused.hint,
+    };
+    if (paused.warn) out.warn = paused.warn;
+    return out;
+  }
+
+  /**
+   * 暂停闸门：暂停期内直接拒绝，不调 CLI（feed / post / search 共用）。
+   * 返回 null 表示没在暂停、可以继续。
+   */
+  function pauseBlocker(cfg, at) {
+    const state = readUsage();
+    if (!(state.pausedUntil > at)) return null;
+    return {
+      ok: false,
+      code: 'paused',
+      reason: commentReasonText('paused', { pausedUntil: state.pausedUntil, pausedRemainingMs: Math.max(0, state.pausedUntil - at) }),
+      pausedUntil: state.pausedUntil,
+      pausedReason: state.pausedReason || 'captcha',
+      pauseRemainingText: formatPauseRemaining(state.pausedUntil, at),
+    };
   }
 
   // ① 状态
@@ -618,6 +715,7 @@ export function createHeyboxTools({
     const at = nowMs();
     const state = readUsage();
     const quota = heyboxQuota(state, cfg, at);
+    const mode = commentModeOf(cfg);
     const called = await invoke(cfg, ['-f', 'json', 'auth', 'status'], READ_TIMEOUT_MS);
     const data = called.ok && called.json?.data && typeof called.json.data === 'object' ? called.json.data : {};
     const authenticated = data.authenticated === true;
@@ -637,7 +735,15 @@ export function createHeyboxTools({
       pausedUntil: state.pausedUntil,
       pausedReason: state.pausedReason,
       dryRunDefault: cfg.dryRunDefault,
+      // 两个布尔值的「当前生效含义」：模型直接读这句就能回答「你现在能发评论吗」，
+      // 不用自己把 allowComment / dryRunDefault 组合一遍（组合错就是两个字段自相矛盾）。
+      commentMode: mode.mode,
+      commentModeText: mode.text,
+      // 暂停窗口多长、还剩多久：只在真在暂停里才给剩余时长，避免平时也冒出「还剩 0 分钟」。
+      captchaPauseMs: cfg.captchaPauseMs,
     };
+    const pauseText = formatPauseRemaining(state.pausedUntil, at);
+    if (pauseText !== '') result.pauseRemainingText = pauseText;
     if (!called.ok) {
       result.code = called.code;
       result.reason = called.reason;
@@ -648,10 +754,17 @@ export function createHeyboxTools({
   // ② 首页
   async function feed({ limit } = {}) {
     const cfg = currentConfig();
+    const at = nowMs();
     if (!cfg.enabled) return disabledResult(cfg);
+    // 与搜索/评论共用暂停窗口：首页也是小黑盒的读接口，风控窗口内先别动。
+    const blocked = pauseBlocker(cfg, at);
+    if (blocked) return blocked;
     const count = clampInt(limit, 8, 1, 20);
     const called = await invoke(cfg, ['-f', 'json', 'feed'], READ_TIMEOUT_MS);
-    if (!called.ok) return called;
+    if (!called.ok) {
+      if (called.code === 'captcha') return captchaBlocked(cfg, at, called, readUsage());
+      return called;
+    }
     const links = called.json?.data?.result?.links;
     if (!Array.isArray(links)) {
       logWarn('feed 返回里没有 data.result.links');
@@ -665,12 +778,19 @@ export function createHeyboxTools({
   // ③ 帖子
   async function post({ linkId, comments } = {}) {
     const cfg = currentConfig();
+    const at = nowMs();
     if (!cfg.enabled) return disabledResult(cfg);
     const id = normalizeLinkId(linkId);
     if (id === '') return { ok: false, code: 'input', reason: 'linkId 必须是数字（用 heybox_feed / heybox_search 返回的 linkId）' };
+    // 读帖子同样吃风控（实测 `post get` 也会被要验证码），所以暂停期内先不读。
+    const blocked = pauseBlocker(cfg, at);
+    if (blocked) return blocked;
     const wantComments = clampInt(comments, 8, 0, 20);
     const called = await invoke(cfg, ['-f', 'json', 'post', 'get', id], READ_TIMEOUT_MS);
-    if (!called.ok) return called;
+    if (!called.ok) {
+      if (called.code === 'captcha') return captchaBlocked(cfg, at, called, readUsage());
+      return called;
+    }
     const result = called.json?.data?.result;
     if (!result || typeof result !== 'object') {
       return { ok: false, code: 'protocol', reason: '小黑盒没有返回这条帖子的内容' };
@@ -697,7 +817,11 @@ export function createHeyboxTools({
   // ④ 搜索
   async function search({ query, limit } = {}) {
     const cfg = currentConfig();
+    const at = nowMs();
     if (!cfg.enabled) return disabledResult(cfg);
+    // 暂停窗口与评论共用：被要过一次验证码之后继续搜索，只会把风控窗口拉得更长。
+    const blocked = pauseBlocker(cfg, at);
+    if (blocked) return blocked;
     const rawQuery = textOf(query);
     if (/[\r\n]/.test(rawQuery)) return { ok: false, code: 'input', reason: '搜索词不能包含换行' };
     const word = rawQuery.replace(/\s+/g, ' ').trim();
@@ -709,7 +833,11 @@ export function createHeyboxTools({
       ['-f', 'json', 'search', word, '--type', 'post', '--limit', String(count)],
       READ_TIMEOUT_MS,
     );
-    if (!called.ok) return called;
+    if (!called.ok) {
+      // 搜索撞到验证码：置同一个暂停窗口。不重试、不换个搜索词绕 —— 风控看的是行为量。
+      if (called.code === 'captcha') return captchaBlocked(cfg, at, called, readUsage());
+      return called;
+    }
     const items = called.json?.data?.result?.items;
     const list = (Array.isArray(items) ? items : [])
       .map(slimSearchItem)
@@ -748,7 +876,7 @@ export function createHeyboxTools({
     const state = readUsage();
     const quota = heyboxQuota(state, cfg, at);
     if (!quota.ok) {
-      return {
+      const reject = {
         ok: false,
         code: quota.reason,
         reason: commentReasonText(quota.reason, quota),
@@ -756,8 +884,12 @@ export function createHeyboxTools({
         dailyComments: quota.dailyComments,
         remaining: quota.remaining,
         nextAllowedAt: quota.nextAllowedAt,
-        pausedUntil: state.pausedUntil,
+        pausedUntil: quota.pausedUntil,
+        pausedReason: state.pausedReason || '',
       };
+      // 暂停中额外把「还剩多久」单列一份：模型不必从 reason 里抠时长
+      if (quota.reason === 'paused') reject.pauseRemainingText = formatPauseRemaining(quota.pausedUntil, at);
+      return reject;
     }
 
     // ⑤ 重复：只和「最近 5 条真发成功的」比，演练记录不参与
@@ -783,29 +915,52 @@ export function createHeyboxTools({
     if (!sent.ok) {
       appendAction({ ts: at, linkId: idFromDigits(id), text: body, dryRun: false, ok: false, reason: sent.reason });
       if (sent.code === 'captcha') {
-        // 验证码 = 平台在风控。今天到此为止：暂停到北京时间的 24:00，不做任何重试。
-        const pausedUntil = endOfBeijingDayMs(at);
-        writeUsage({ ...state, pausedUntil, pausedReason: 'captcha' });
-        return {
-          ok: false,
-          code: 'captcha',
-          reason: sent.reason,
-          pausedUntil,
-          pausedReason: 'captcha',
-          hint: '被验证码拦下了，今天先别再试；明天再手动确认登录态',
-        };
+        // 验证码 = 平台在风控。不重试，按 captchaPauseMs（默认 30 分钟）把看帖/搜索/评论一起停掉。
+        // 之前是「停到当天 24:00」：一条验证码废掉剩下半天，还会和日额度混成一句说不清的理由。
+        return captchaBlocked(cfg, at, sent, state);
       }
       return sent;
     }
 
     // 成功才记账：先算新状态，写盘失败也不影响「评论已经发出去了」这个事实。
+    // 注意顺序——actions 行必须等回读之后再写，那一行要带上 commentId，先写就只能写 null。
+    // 代价是回读那两次 CLI 调用（auth status + post get）之间进程若被杀，这一行会丢；
+    // 但丢一行日志 ≠ 丢评论，回读失败也照样会落一行（readback:'not_found'）。
     const nextState = recordAction(state, at);
     const tracked = writeUsage(nextState);
-    appendAction({ ts: at, linkId: idFromDigits(id), text: body, dryRun: false, messageId: null });
 
-    // ⑧ 回读校验：真发的「成功」以能在评论列表里看到自己那条为准。
-    // 但回读落空 ≠ 没发出去（审核延迟 / 分页 / 风控），所以不动 ok，只如实标 verified。
-    const check = await verifySent(cfg, id, body);
+    // ⑧ 回读校验：真发的「成功」以能在评论列表里看到自己那条为准。两个来源：
+    //   a) CLI 自己已经回读过（xhh_operator 的 comment create 拿到 comment_id 后会再拉一次
+    //      `post sort=latest`，逐条比对 commentid / 文本 / userid，命中就把 verified 置 true）。
+    //      这种情况直接采信，不再多发一次请求 —— 小黑盒的读请求同样会触发风控，能省就省。
+    //   b) 否则由我们 `post get` 复核（老版本 CLI 没有这一步，返回值里也没有 verified）。
+    // 回读落空 ≠ 没发出去（审核延迟 / 分页 / 风控），所以不动 ok，只如实标 verified。
+    const cliData = sent.json?.data && typeof sent.json.data === 'object' ? sent.json.data : {};
+    // id 的取法有优先级：CLI 的 create 返回值自带就优先用它（不用猜、也不受审核延迟影响），
+    // 否则用回读命中那条的 commentId；都没有就是 null —— 宁可空着，也不写一个猜出来的 id。
+    const fromCli = commentIdFromCli(sent.json);
+    let check;
+    let readbackSource;
+    if (fromCli !== '' && cliData.verified === true) {
+      check = { verified: true, commentId: fromCli };
+      readbackSource = 'cli';
+    } else {
+      check = await verifySent(cfg, id, body);
+      readbackSource = 'local';
+    }
+    const readback = check.verified === true ? 'found' : 'not_found';
+    const fromReadback = readback === 'found' ? textOf(check.commentId).trim() : '';
+    const messageId = fromCli !== '' ? fromCli : (fromReadback !== '' ? fromReadback : null);
+    const logged = appendAction({
+      ts: at,
+      linkId: idFromDigits(id),
+      text: body,
+      dryRun: false,
+      messageId,
+      readback,
+      readbackSource,
+    });
+
     const result = {
       ok: true,
       dryRun: false,
@@ -813,12 +968,18 @@ export function createHeyboxTools({
       text: body,
       usedToday: nextState.count,
       verified: check.verified === true,
+      messageId,
+      readback,
+      readbackSource,
     };
     if (!result.verified) {
       result.reason = 'readback_missing';
       if (check.detail) result.detail = check.detail;
     }
-    if (!tracked) result.warn = '本地计数写入失败，下次评论的额度可能不准';
+    const warns = [];
+    if (!tracked) warns.push('本地计数写入失败，下次评论的额度可能不准');
+    if (!logged) warns.push('评论已经发出去了，但本地 actions 记账失败（不影响评论本身）');
+    if (warns.length > 0) result.warn = warns.join('；');
     return result;
   }
 
@@ -847,14 +1008,14 @@ export function registerHeyboxTools(server, opts = {}) {
 
   server.tool(
     'heybox_status',
-    '查小黑盒登录状态与今天的评论额度（只读）：是否登录、用户 id、今天已评论几条、还剩几条、现在能不能评论、是否被验证码暂停、默认是否 dry-run。',
+    '查小黑盒登录状态与今天的评论额度（只读）：是否登录、用户 id、今天已评论几条、还剩几条、现在能不能评论、是否被验证码暂停（还剩多久）、以及评论模式的当前生效值（commentMode + 一句人话）。',
     {},
     async () => textResult(await tools.status())
   );
 
   server.tool(
     'heybox_feed',
-    '看小黑盒首页推荐，返回链接 id 和摘要；想看正文用 heybox_post。只读，一次最多 10 条。',
+    '看小黑盒首页推荐，返回链接 id 和摘要；想看正文用 heybox_post。只读，一次最多 10 条。验证码暂停期内会直接拒绝（返回里说明还剩多久），不会去碰小黑盒。',
     {
       limit: z.number().optional().describe('返回几条（1–20），默认 8；CLI 一次只给 10 条，所以实际最多 10 条'),
     },
@@ -863,7 +1024,7 @@ export function registerHeyboxTools(server, opts = {}) {
 
   server.tool(
     'heybox_post',
-    '看一条小黑盒帖子的正文和前几条评论（只读）。linkId 用 heybox_feed 或 heybox_search 返回的 linkId。',
+    '看一条小黑盒帖子的正文和前几条评论（只读）。linkId 用 heybox_feed 或 heybox_search 返回的 linkId。验证码暂停期内同样直接拒绝。',
     {
       linkId: z.union([z.number(), z.string()]).describe('帖子 id（heybox_feed / heybox_search 返回的 linkId）'),
       comments: z.number().optional().describe('带几条评论（0–20），默认 8'),
@@ -873,7 +1034,7 @@ export function registerHeyboxTools(server, opts = {}) {
 
   server.tool(
     'heybox_search',
-    '在小黑盒搜索帖子（只读）：返回链接 id、标题、摘要、作者、评论数。搜太勤会被小黑盒要验证码，隔一会儿再用。',
+    '在小黑盒搜索帖子（只读）：返回链接 id、标题、摘要、作者、评论数。搜太勤会被小黑盒要验证码：一旦被要过验证码，所有小黑盒请求（看帖 / 搜索 / 评论）会一起暂停一段时间（默认 30 分钟），返回里会说明还剩多久，暂停期间不要再试。',
     {
       query: z.string().describe('搜索关键词，最多 60 字'),
       limit: z.number().optional().describe('返回几条（1–10），默认 5'),
@@ -883,7 +1044,7 @@ export function registerHeyboxTools(server, opts = {}) {
 
   server.tool(
     'heybox_comment',
-    '在小黑盒帖子下发一条评论。只有你自己真的想回一句时才用；一次一条；默认 dry-run，不会真发（要真发得显式传 dryRun=false，且 config.json 打开了 allowComment）。不要为了刷存在感连续评论；验证码/登录失效时不要重试。',
+    '在小黑盒帖子下发一条评论。只有你自己真的想回一句时才用；一次一条；默认 dry-run，不会真发（要真发得显式传 dryRun=false，且 config.json 打开了 allowComment）。不要为了刷存在感连续评论；真发成功后会回读评论区确认，并在返回里给出评论 id（messageId）与回读结果。验证码/登录失效时不要重试：验证码会自动把看帖 / 搜索 / 评论一起暂停一段时间。',
     {
       linkId: z.union([z.number(), z.string()]).describe('帖子 id（heybox_feed / heybox_search 返回的 linkId）'),
       text: z.string().describe('评论正文，纯文本，5–200 字，不要带链接 / 手机号 / 联系方式'),

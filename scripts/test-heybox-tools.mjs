@@ -5,12 +5,15 @@
 //
 // 覆盖组：
 //   1. buildCliEnv：代理变量清干净、NO_PROXY 重设、Python UTF-8 钉死
-//   2. heybox_status：登录态 / 额度 / 暂停 / CLI 不可用降级 / canComment 四个条件
+//   2. heybox_status：登录态 / 额度 / 暂停 / CLI 不可用降级 / canComment 四个条件 /
+//      commentMode 三态回显（live / dry_run / readonly）+ captchaPauseMs 生效值
 //   3. heybox_feed：瘦身字段、HTML 清理、摘要与图片上限、limit 夹取
 //   4. heybox_post：富文本转纯文本、评论合并与截断、条数夹取、参数校验
 //   5. heybox_search：items.info 取字段、`<em>` 清掉、query 校验、参数拼装
 //   6. heybox_comment 四道闸门：开关、审计、额度/间隔、重复（含「只比最近 5 条」）
-//   7. heybox_comment 真发：成功记账 + 回读校验、失败不记账、验证码暂停到当天 24:00
+//   7. heybox_comment 真发：成功记账 + 回读校验（messageId 优先用 CLI 返回值、其次回读命中，
+//      回读不到记 readback=not_found）、失败不记账、验证码按 captchaPauseMs 暂停
+//      （默认 30 分钟，看帖/搜索/评论共用同一窗口；读接口撞验证码也落盘），暂停到点自动恢复
 //   8. CLI 错误映射：auth / captcha / rate_limit / unknown / local / protocol
 //   9. 落盘：usage 字段、actions.jsonl 每行结构、配置每次重读
 import fs from 'node:fs';
@@ -278,6 +281,10 @@ async function testStatus() {
   check('canComment=true（开关+额度+登录都过）', okResult.canComment === true);
   check('quotaReason=null', okResult.quotaReason === null);
   check('dryRunDefault=true', okResult.dryRunDefault === true);
+  check('status 回显 commentMode=dry_run（allowComment=true + dryRunDefault=true）', okResult.commentMode === 'dry_run', `actual=${okResult.commentMode}`);
+  check('status 的人话点明「只演练不发」并要求显式 dryRun=false', okResult.commentModeText.includes('只演练不发') && okResult.commentModeText.includes('dryRun=false'), `actual=${okResult.commentModeText}`);
+  check('status 回显 captchaPauseMs 生效值（默认 30 分钟）', okResult.captchaPauseMs === 1800000, `actual=${okResult.captchaPauseMs}`);
+  check('没暂停时不带 pauseRemainingText', !('pauseRemainingText' in okResult));
   check('pausedUntil=0', okResult.pausedUntil === 0);
   serializable('status 结果 JSON 可序列化', okResult);
   check('status 只调一次 auth status', ok.stub.calls.length === 1 && mAuth(ok.stub.calls[0].argv));
@@ -287,6 +294,19 @@ async function testStatus() {
   const defaultResult = await defaults.tools.status();
   check('默认配置 allowComment=false', defaultResult.allowComment === false);
   check('默认配置下 canComment=false', defaultResult.canComment === false);
+  check('默认配置 commentMode=readonly（人话说「不发评论」）', defaultResult.commentMode === 'readonly' && defaultResult.commentModeText.includes('allowComment=false'));
+
+  const liveCfg = makeTools({ routes: [authRoute()], config: { heybox: { allowComment: true, dryRunDefault: false } } });
+  const liveStatus = await liveCfg.tools.status();
+  check('allowComment=true + dryRunDefault=false → commentMode=live', liveStatus.commentMode === 'live', `actual=${liveStatus.commentMode}`);
+  check('live 的人话是「当前允许真发评论」', liveStatus.commentModeText.includes('当前允许真发评论'), `actual=${liveStatus.commentModeText}`);
+
+  const offCfg = makeTools({ routes: [authRoute()], config: { heybox: { enabled: false } } });
+  const offStatus = await offCfg.tools.status();
+  check('enabled=false → commentMode=disabled', offStatus.commentMode === 'disabled' && offStatus.commentModeText.includes('enabled=false'));
+
+  const customPauseCfg = makeTools({ routes: [authRoute()], config: { heybox: { allowComment: true, captchaPauseMs: 600000 } } });
+  check('status 回显可配的 captchaPauseMs（600000）', (await customPauseCfg.tools.status()).captchaPauseMs === 600000);
 
   const usedDir = freshStateDir();
   writeUsageFile(usedDir, { count: 3, lastTs: FIXED_NOW - 3 * 3600 * 1000 });
@@ -303,6 +323,7 @@ async function testStatus() {
   check('暂停原因透出 captcha', pausedResult.pausedReason === 'captcha');
   check('pausedUntil 透出时间戳', pausedResult.pausedUntil === FIXED_NOW + 3600 * 1000);
   check('暂停时 quotaReason=paused', pausedResult.quotaReason === 'paused');
+  check('暂停时 status 带「还剩多久」', pausedResult.pauseRemainingText === '还剩 1 小时', `actual=${pausedResult.pauseRemainingText}`);
 
   const notLogged = makeTools({ routes: [{ match: mAuth, reply: () => json({ ok: true, data: { stored: false, authenticated: false } }) }] });
   const notLoggedResult = await notLogged.tools.status();
@@ -713,9 +734,12 @@ async function testCommentSend() {
   const actions = readActions(dir);
   check('actions 只有一行', actions.length === 1, `actual=${actions.length}`);
   const record = actions[0];
-  same('actions 行字段是 {ts,linkId,text,dryRun,messageId}', Object.keys(record).sort(), ['dryRun', 'linkId', 'messageId', 'text', 'ts']);
+  same('actions 行字段是 {ts,linkId,text,dryRun,messageId,readback,readbackSource}', Object.keys(record).sort(), ['dryRun', 'linkId', 'messageId', 'readback', 'readbackSource', 'text', 'ts']);
   check('actions 行 dryRun=false', record.dryRun === false);
-  check('actions 行 messageId=null', record.messageId === null);
+  check('actions 行 messageId 用 CLI 返回的 commentid（不是 null）', record.messageId === '770001', `actual=${JSON.stringify(record.messageId)}`);
+  check('actions 行 readback=found', record.readback === 'found', `actual=${record.readback}`);
+  check('actions 行 readbackSource=local（CLI 没说自己校验过）', record.readbackSource === 'local', `actual=${record.readbackSource}`);
+  check('结果里回显 messageId 与 readback', result.messageId === '770001' && result.readback === 'found', `actual=${JSON.stringify({ id: result.messageId, rb: result.readback })}`);
   check('actions 行 linkId 是数字', record.linkId === 193660114);
   check('actions 行 ts 用注入的 now', record.ts === FIXED_NOW);
 
@@ -723,6 +747,33 @@ async function testCommentSend() {
   check('真发 argv 不带 --dry-run', !sendCall.argv.includes('--dry-run'), `actual=${sendCall.argv.join(' ')}`);
   check('真发 argv 形如 comment create <id> --text <文本>', sendCall.argv.join(' ') === `-f json comment create 193660114 --text ${TEXT_A}`, `actual=${sendCall.argv.join(' ')}`);
   check('真发会跑一次 auth status + 一次 post get 做回读', countCalls(stub, mAuth) === 1 && countCalls(stub, mPostGet) === 1);
+
+  // CLI 不回 comment id（实测这条路径最常见）：靠回读把 id 补上
+  const fromReadback = makeTools({
+    dir: freshStateDir(),
+    routes: [authRoute(), { match: mComment, reply: () => json({ ok: true, data: {} }) }, readbackRoute(TEXT_A)],
+  });
+  const fromReadbackResult = await fromReadback.tools.comment({ linkId: 193660114, text: TEXT_A, dryRun: false });
+  check('CLI 不回 id 时用回读到的 commentId 记账', readActions(fromReadback.dir)[0].messageId === '880001', `actual=${JSON.stringify(readActions(fromReadback.dir)[0].messageId)}`);
+  check('CLI 不回 id 时结果也带 messageId', fromReadbackResult.messageId === '880001' && fromReadbackResult.readback === 'found', `actual=${JSON.stringify(fromReadbackResult.messageId)}`);
+
+  // CLI 自己已经回读校验过（xhh_operator 会 post sort=latest 复核后置 verified=true）：采信它，不再多发一次请求
+  const cliVerified = makeTools({
+    dir: freshStateDir(),
+    routes: [authRoute(), { match: mComment, reply: () => json({ ok: true, data: { accepted: true, comment_id: '770001', verified: true } }) }],
+  });
+  const cliVerifiedResult = await cliVerified.tools.comment({ linkId: 193660114, text: TEXT_A, dryRun: false });
+  check('CLI 说 verified=true 时不再自己 post get（省一次读请求）', countCalls(cliVerified.stub, mPostGet) === 0, `actual=${countCalls(cliVerified.stub, mPostGet)}`);
+  check('CLI 说 verified=true 时采信为 verified / readbackSource=cli', cliVerifiedResult.verified === true && cliVerifiedResult.readbackSource === 'cli', `actual=${JSON.stringify(cliVerifiedResult)}`);
+  check('CLI 说 verified=true 时 messageId 仍取自 CLI', cliVerifiedResult.messageId === '770001' && readActions(cliVerified.dir)[0].readback === 'found');
+
+  // 回读拿到的是别人的评论 → 不能把别人的 id 记成自己的
+  const otherId = makeTools({
+    dir: freshStateDir(),
+    routes: [authRoute(), { match: mComment, reply: () => json({ ok: true, data: {} }) }, { match: mPostGet, reply: () => postPayload({ comments: [{ comment: [commentFixture({ text: TEXT_A, userid: 999, commentid: 999001 })] }] }) }],
+  });
+  await otherId.tools.comment({ linkId: 193660114, text: TEXT_A, dryRun: false });
+  check('回读只认自己的评论 id（别人的 id 不记账）', readActions(otherId.dir)[0].messageId === null, `actual=${JSON.stringify(readActions(otherId.dir)[0].messageId)}`);
 
   // 回读落空：仍然算「已记账」，但要如实说 verified=false
   const missingDir = freshStateDir();
@@ -736,6 +787,11 @@ async function testCommentSend() {
   check('回读落空时带 reason=readback_missing', missingResult.reason === 'readback_missing', `actual=${missingResult.reason}`);
   check('回读落空照样记账', readUsageFile(missingDir).count === 1);
   check('回读落空照样写 actions', readActions(missingDir).length === 1);
+  check('回读落空的 actions 行 readback=not_found 且 messageId=null', (() => {
+    const row = readActions(missingDir)[0];
+    return row.readback === 'not_found' && row.messageId === null;
+  })(), `actual=${JSON.stringify(readActions(missingDir)[0])}`);
+  check('回读落空不算失败（ok 仍 true、没有 error 字段）', missingResult.ok === true && !('error' in missingResult));
 
   const sameUserOtherText = makeTools({
     dir: freshStateDir(),
@@ -787,16 +843,91 @@ async function testCommentSend() {
   });
   const captchaResult = await captcha.tools.comment({ linkId: 193660114, text: TEXT_A, dryRun: false });
   check('验证码映射成 captcha', captchaResult.ok === false && captchaResult.code === 'captcha');
-  check('验证码把 pausedUntil 设到北京时间当天 24:00', captchaResult.pausedUntil === TODAY_END, `actual=${captchaResult.pausedUntil} expected=${TODAY_END}`);
+  check('验证码把 pausedUntil 设成 now + 默认 30 分钟', captchaResult.pausedUntil === FIXED_NOW + 30 * 60000, `actual=${captchaResult.pausedUntil} expected=${FIXED_NOW + 30 * 60000}`);
+  check('验证码暂停不再沿用到当天 24:00', captchaResult.pausedUntil !== TODAY_END);
   check('验证码写 pausedReason=captcha', captchaResult.pausedReason === 'captcha');
+  check('验证码返回「还剩多久」的人话', captchaResult.pauseRemainingText === '还剩 30 分钟', `actual=${captchaResult.pauseRemainingText}`);
+  check('验证码 hint 说清「所有请求一起停」', typeof captchaResult.hint === 'string' && captchaResult.hint.includes('看帖') && captchaResult.hint.includes('搜索') && captchaResult.hint.includes('评论'), `actual=${captchaResult.hint}`);
   const captchaUsage = readUsageFile(captchaDir);
-  check('验证码暂停落盘', captchaUsage.pausedUntil === TODAY_END && captchaUsage.pausedReason === 'captcha');
+  check('验证码暂停落盘', captchaUsage.pausedUntil === FIXED_NOW + 30 * 60000 && captchaUsage.pausedReason === 'captcha', `actual=${captchaUsage.pausedUntil}`);
   check('验证码不增加 count', captchaUsage.count === 0, `actual=${captchaUsage.count}`);
   check('验证码留一行失败 actions', readActions(captchaDir).length === 1);
 
   const afterCaptcha = await captcha.tools.comment({ linkId: 193660114, text: TEXT_A, dryRun: false });
   check('暂停后下一次直接被 paused 拦住', afterCaptcha.ok === false && afterCaptcha.code === 'paused', `actual=${afterCaptcha.code}`);
   check('暂停拦截不再调 CLI', captcha.stub.calls.filter((call) => mComment(call.argv)).length === 1);
+  check('暂停拦截的人话带「还剩多久」', typeof afterCaptcha.reason === 'string' && afterCaptcha.reason.includes('还剩 30 分钟'), `actual=${afterCaptcha.reason}`);
+  check('暂停拦截回显 pausedUntil / pausedReason', afterCaptcha.pausedUntil === FIXED_NOW + 30 * 60000 && afterCaptcha.pausedReason === 'captcha');
+
+  // 暂停窗口跟着配置走：captchaPauseMs=10 分钟
+  const customPause = makeTools({
+    dir: freshStateDir(),
+    config: { heybox: { allowComment: true, dryRunDefault: false, captchaPauseMs: 600000 } },
+    routes: [authRoute(), { match: mComment, reply: () => json({ ok: false, error: { code: 'captcha', message: '需要验证码' } }, 1) }],
+  });
+  const customResult = await customPause.tools.comment({ linkId: 193660114, text: TEXT_A, dryRun: false });
+  check('captchaPauseMs 可配（600000 → 暂停 10 分钟）', customResult.pausedUntil === FIXED_NOW + 10 * 60000, `actual=${customResult.pausedUntil}`);
+  check('captchaPauseMs 的「还剩多久」跟着配置', customResult.pauseRemainingText === '还剩 10 分钟', `actual=${customResult.pauseRemainingText}`);
+
+  // 搜索与评论共用同一个暂停窗口：评论先被验证码拦住，搜索也得停
+  const sharedDir = freshStateDir();
+  const shared = makeTools({
+    dir: sharedDir,
+    routes: [authRoute(), { match: mComment, reply: () => json({ ok: false, error: { code: 'captcha', message: '需要验证码' } }, 1) }, { match: mSearch, reply: () => json({ ok: true, data: {} }) }],
+  });
+  await shared.tools.comment({ linkId: 193660114, text: TEXT_A, dryRun: false });
+  const sharedSearch = await shared.tools.search({ query: '黑神话' });
+  check('评论撞验证码后搜索也被同一个暂停窗口拦住', sharedSearch.ok === false && sharedSearch.code === 'paused', `actual=${sharedSearch.code}`);
+  check('暂停期的搜索不调 CLI（一次都没调）', countCalls(shared.stub, mSearch) === 0, `actual=${countCalls(shared.stub, mSearch)}`);
+  check('暂停期的搜索也回「还剩多久」', sharedSearch.pauseRemainingText === '还剩 30 分钟', `actual=${sharedSearch.pauseRemainingText}`);
+
+  // 反过来：搜索先撞验证码，评论同样被拦
+  const searchFirstDir = freshStateDir();
+  const searchFirst = makeTools({
+    dir: searchFirstDir,
+    routes: [authRoute(), { match: mSearch, reply: () => json({ ok: false, error: { code: 'captcha', message: '需要验证码' } }, 1) }],
+  });
+  const searchCaptcha = await searchFirst.tools.search({ query: '黑神话' });
+  check('搜索撞验证码也置暂停', searchCaptcha.ok === false && searchCaptcha.code === 'captcha' && searchCaptcha.pausedUntil === FIXED_NOW + 30 * 60000, `actual=${JSON.stringify(searchCaptcha.pausedUntil)}`);
+  check('搜索撞验证码也落盘', readUsageFile(searchFirstDir).pausedUntil === FIXED_NOW + 30 * 60000);
+  const commentAfterSearch = await searchFirst.tools.comment({ linkId: 193660114, text: TEXT_A, dryRun: false });
+  check('搜索撞验证码后评论被同一个窗口拦住', commentAfterSearch.ok === false && commentAfterSearch.code === 'paused' && countCalls(searchFirst.stub, mComment) === 0);
+
+  // 暂停窗口到点自动恢复：把时钟挪到 pausedUntil 之后
+  const resumeDir = freshStateDir();
+  let clockNow = FIXED_NOW;
+  const resume = makeTools({ dir: resumeDir, routes: [authRoute(), { match: mSearch, reply: () => json({ ok: true, data: {} }) }], clock: () => clockNow });
+  writeUsageFile(resumeDir, { count: 0, lastTs: 0, pausedUntil: FIXED_NOW + 30 * 60000, pausedReason: 'captcha' });
+  clockNow = FIXED_NOW + 31 * 60000;
+  const resumed = await resume.tools.search({ query: '黑神话' });
+  check('暂停到点后搜索自动恢复（带 pausedReason 也不再拦）', resumed.ok === true && countCalls(resume.stub, mSearch) === 1, `actual=${JSON.stringify(resumed).slice(0, 120)}`);
+
+  // 暂停期连看帖/刷首页也一起停：本机实测 `post get` 同样会被小黑盒要验证码
+  const readPauseDir = freshStateDir();
+  const readPause = makeTools({
+    dir: readPauseDir,
+    routes: [
+      authRoute(),
+      { match: mFeed, reply: () => json({ ok: true, data: { result: { items: [] } } }) },
+      { match: mPostGet, reply: () => postPayload() },
+    ],
+  });
+  writeUsageFile(readPauseDir, { count: 0, lastTs: 0, pausedUntil: FIXED_NOW + 30 * 60000, pausedReason: 'captcha' });
+  const feedWhilePaused = await readPause.tools.feed({});
+  check('暂停期的首页也被拦住', feedWhilePaused.ok === false && feedWhilePaused.code === 'paused', `actual=${feedWhilePaused.code}`);
+  check('暂停期的首页不调 CLI', countCalls(readPause.stub, mFeed) === 0, `actual=${countCalls(readPause.stub, mFeed)}`);
+  const postWhilePaused = await readPause.tools.post({ linkId: 193660114 });
+  check('暂停期的帖子也被拦住且不调 CLI', postWhilePaused.ok === false && postWhilePaused.code === 'paused' && countCalls(readPause.stub, mPostGet) === 0, `actual=${JSON.stringify(postWhilePaused).slice(0, 160)}`);
+
+  // 读请求撞验证码同样落盘：风控看的是请求量，不区分读还是写
+  const postCaptchaDir = freshStateDir();
+  const postCaptcha = makeTools({
+    dir: postCaptchaDir,
+    routes: [authRoute(), { match: mPostGet, reply: () => json({ ok: false, error: { code: 'captcha', message: '需要验证码' } }, 1) }],
+  });
+  const postCaptchaResult = await postCaptcha.tools.post({ linkId: 193660114 });
+  check('看帖撞验证码也置同一个暂停窗口', postCaptchaResult.code === 'captcha' && postCaptchaResult.pausedUntil === FIXED_NOW + 30 * 60000, `actual=${JSON.stringify(postCaptchaResult.pausedUntil)}`);
+  check('看帖撞验证码也回「还剩多久」并落盘', postCaptchaResult.pauseRemainingText === '还剩 30 分钟' && readUsageFile(postCaptchaDir).pausedUntil === FIXED_NOW + 30 * 60000, `actual=${readUsageFile(postCaptchaDir).pausedUntil}`);
 
   // 限流
   const rateDir = freshStateDir();

@@ -16,6 +16,8 @@
 //   组8  describeCliError：五种 code 与 stderr 文本兜底
 //   组9  commentReasonText：五种配额原因翻成人话
 //   组10 纯函数性（只读入参、可重复调用）与导出齐全
+//   组11 验证码暂停窗口（captchaPauseMs / captchaPauseDeadline / formatPauseRemaining）与
+//        评论模式回显（commentModeOf）
 import {
   HEYBOX_DEFAULTS,
   HEYBOX_LIMITS,
@@ -29,7 +31,10 @@ import {
   parseUsage,
   serializeUsage,
   describeCliError,
-  commentReasonText
+  commentReasonText,
+  commentModeOf,
+  captchaPauseDeadline,
+  formatPauseRemaining
 } from '../src/heybox-core.js';
 import * as heyboxCore from '../src/heybox-core.js';
 
@@ -70,6 +75,7 @@ const DEFAULT_CONFIG = {
   dailyComments: 10,
   minGapMs: 360000,
   maxGapMs: 1200000,
+  captchaPauseMs: 1800000,
   postMaxChars: 200,
   dryRunDefault: true
 };
@@ -95,16 +101,19 @@ check('HEYBOX_DEFAULTS 数值：日上限 10、间隔 6 分钟到 20 分钟',
   && HEYBOX_DEFAULTS.maxGapMs === 1200000);
 check('HEYBOX_DEFAULTS 其余：postMaxChars 200、dryRunDefault true',
   HEYBOX_DEFAULTS.postMaxChars === 200 && HEYBOX_DEFAULTS.dryRunDefault === true);
+check('HEYBOX_DEFAULTS.captchaPauseMs 默认 30 分钟', HEYBOX_DEFAULTS.captchaPauseMs === 30 * MINUTE);
 check('HEYBOX_LIMITS 上下界与契约一致', stable(HEYBOX_LIMITS) === stable({
   dailyComments: [0, 50],
   minGapMs: [60000, 21600000],
   maxGapMs: [60000, 21600000],
+  captchaPauseMs: [300000, 7200000],
   postMaxChars: [5, 500]
 }));
 check('常量（含其内部的上下界数组）是冻结的',
   Object.isFrozen(HEYBOX_DEFAULTS) && Object.isFrozen(HEYBOX_LIMITS)
   && Object.isFrozen(HEYBOX_LIMITS.dailyComments) && Object.isFrozen(HEYBOX_LIMITS.minGapMs)
-  && Object.isFrozen(HEYBOX_LIMITS.maxGapMs) && Object.isFrozen(HEYBOX_LIMITS.postMaxChars));
+  && Object.isFrozen(HEYBOX_LIMITS.maxGapMs) && Object.isFrozen(HEYBOX_LIMITS.captchaPauseMs)
+  && Object.isFrozen(HEYBOX_LIMITS.postMaxChars));
 check('normalizeHeyboxConfig(undefined) 逐键等于默认值',
   stable(normalizeHeyboxConfig(undefined)) === stable(DEFAULT_CONFIG));
 check('normalizeHeyboxConfig({}) 逐键等于默认值',
@@ -115,7 +124,7 @@ check('脏入参（null / 字符串 / 数组）也回落到默认值',
   && stable(normalizeHeyboxConfig([])) === stable(DEFAULT_CONFIG));
 check('返回值字段顺序稳定（序列化落盘时不会来回抖）',
   Object.keys(normalizeHeyboxConfig({})).join(',')
-  === 'enabled,allowComment,cliPath,dailyComments,minGapMs,maxGapMs,postMaxChars,dryRunDefault');
+  === 'enabled,allowComment,cliPath,dailyComments,minGapMs,maxGapMs,captchaPauseMs,postMaxChars,dryRunDefault');
 check('布尔只认显式 true/false：0 / 字符串 / null 一律用默认',
   normalizeHeyboxConfig({ enabled: 0, allowComment: 'false', dryRunDefault: 1 }).enabled === true
   && normalizeHeyboxConfig({ enabled: 0, allowComment: 'false', dryRunDefault: 1 }).allowComment === false
@@ -154,6 +163,20 @@ check('合法间隔原样保留（2 分钟 / 15 分钟）', (() => {
   const cfg = normalizeHeyboxConfig({ minGapMs: 120000, maxGapMs: 900000 });
   return cfg.minGapMs === 120000 && cfg.maxGapMs === 900000;
 })());
+check('captchaPauseMs 默认 30 分钟、可配（10 分钟原样保留）',
+  normalizeHeyboxConfig({}).captchaPauseMs === 1800000
+  && normalizeHeyboxConfig({ captchaPauseMs: 600000 }).captchaPauseMs === 600000);
+check('captchaPauseMs 钳到 5 分钟下界 / 120 分钟上界',
+  normalizeHeyboxConfig({ captchaPauseMs: 1 }).captchaPauseMs === 300000
+  && normalizeHeyboxConfig({ captchaPauseMs: 99999999 }).captchaPauseMs === 7200000);
+check('captchaPauseMs 显式 0 / 负数被抬到 5 分钟下界（0 不能被当成「不停」）',
+  normalizeHeyboxConfig({ captchaPauseMs: 0 }).captchaPauseMs === 300000
+  && normalizeHeyboxConfig({ captchaPauseMs: -60000 }).captchaPauseMs === 300000);
+check('captchaPauseMs 非数字（"abc" / null）回落默认 30 分钟',
+  normalizeHeyboxConfig({ captchaPauseMs: 'abc' }).captchaPauseMs === 1800000
+  && normalizeHeyboxConfig({ captchaPauseMs: null }).captchaPauseMs === 1800000);
+check('数字字符串形式的 captchaPauseMs 也接受（"900000" → 15 分钟）',
+  normalizeHeyboxConfig({ captchaPauseMs: '900000' }).captchaPauseMs === 900000);
 check('归一化结果本身也是冻结的（下游不能改坏共享配置）',
   Object.isFrozen(normalizeHeyboxConfig({})));
 
@@ -255,9 +278,16 @@ check('坏 state（null / 字符串）不抛，按全新状态处理', (() => {
   const b = heyboxQuota('x', COMMENT_ON, NOW);
   return a.ok === true && b.ok === true && a.remaining === 10;
 })());
-check('返回字段固定为 ok/reason/usedToday/remaining/nextAllowedAt 加上额度快照', (() => {
+check('返回字段固定为 ok/reason/usedToday/remaining/nextAllowedAt 加上额度快照与暂停窗口', (() => {
   const q = heyboxQuota(freshState(), COMMENT_ON, NOW);
-  return Object.keys(q).join(',') === 'ok,reason,usedToday,remaining,nextAllowedAt,dailyComments,minGapMs';
+  return Object.keys(q).join(',')
+    === 'ok,reason,usedToday,remaining,nextAllowedAt,dailyComments,minGapMs,pausedUntil,pausedRemainingMs';
+})());
+check('quota 里带出暂停窗口：暂停中 pausedRemainingMs > 0，没暂停是 0', (() => {
+  const paused = heyboxQuota({ day: '2026-10-20', count: 1, lastTs: 0, pausedUntil: NOW + 27 * MINUTE, pausedReason: 'captcha' }, COMMENT_ON, NOW);
+  const free = heyboxQuota(freshState(), COMMENT_ON, NOW);
+  return paused.reason === 'paused' && paused.pausedUntil === NOW + 27 * MINUTE
+    && paused.pausedRemainingMs === 27 * MINUTE && free.pausedRemainingMs === 0;
 })());
 check('连续发 10 条全放行、第 11 条被日上限拒（真跑一轮记账）', (() => {
   let state = freshState();
@@ -461,8 +491,8 @@ check('auth → 让用户重新扫码', (() => {
   const r = describeCliError({ ok: false, error: { code: 'auth', message: 'x' } });
   return r.code === 'auth' && r.text === '小黑盒登录失效，需要重新扫码登录';
 })());
-check('captcha → 先停一天',
-  describeCliError({ ok: false, error: { code: 'captcha' } }).text === '小黑盒要求验证码，先停一天');
+check('captcha → 先暂停一下（不再写「停一天」）',
+  describeCliError({ ok: false, error: { code: 'captcha' } }).text === '小黑盒要求验证码，先暂停一下');
 check('rate_limit → 今天别再试',
   describeCliError({ ok: false, error: { code: 'rate_limit' } }).text === '小黑盒限流了，今天别再试');
 check('network → 连不上',
@@ -521,8 +551,13 @@ check('too_frequent → 默认 6 分钟', (() => {
 })());
 check('too_frequent → 按配置的 minGapMs 算分钟（90 秒向上取整成 2）',
   commentReasonText('too_frequent', { minGapMs: 90000 }) === '距上次评论还不到 2 分钟');
-check('paused 文案',
-  commentReasonText('paused') === '今天被验证码拦过，先停一天');
+check('paused 文案（没有 quota 时只说「一起停」，不编时长）',
+  commentReasonText('paused') === '小黑盒要求验证码，搜索和评论一起停');
+check('paused 文案带「还剩多久」（quota 里有 pausedRemainingMs）',
+  commentReasonText('paused', { pausedRemainingMs: 27 * MINUTE })
+    === '小黑盒要求验证码，搜索和评论一起停，还剩 27 分钟');
+check('paused 文案余量 < 1 分钟时写「不到 1 分钟」',
+  commentReasonText('paused', { pausedRemainingMs: 30 * 1000 }).includes('不到 1 分钟'));
 check('comment_disabled 文案',
   commentReasonText('comment_disabled') === '评论开关没开');
 check('disabled 文案',
@@ -538,7 +573,7 @@ check('五种 reason 的文案互不相同', (() => {
 // ── 组10：纯函数性与导出齐全 ──────────────────────────────────────────────
 console.log('\n── 组10：纯函数性 / 导出齐全 ──');
 
-check('13 个导出都在且类型正确', (() => {
+check('16 个导出都在且类型正确', (() => {
   const expected = {
     HEYBOX_DEFAULTS: 'object',
     HEYBOX_LIMITS: 'object',
@@ -552,7 +587,10 @@ check('13 个导出都在且类型正确', (() => {
     parseUsage: 'function',
     serializeUsage: 'function',
     describeCliError: 'function',
-    commentReasonText: 'function'
+    commentReasonText: 'function',
+    commentModeOf: 'function',
+    captchaPauseDeadline: 'function',
+    formatPauseRemaining: 'function'
   };
   return Object.entries(expected).every(([name, type]) => {
     if (type === 'function') return typeof heyboxCore[name] === 'function';
@@ -578,6 +616,54 @@ check('归一化不污染 HEYBOX_DEFAULTS（自己钳自己的那份）', (() =>
   const cfg = normalizeHeyboxConfig({ dailyComments: 99, minGapMs: 1 });
   return cfg.dailyComments === 50 && cfg.minGapMs === 60000
     && HEYBOX_DEFAULTS.dailyComments === 10 && HEYBOX_DEFAULTS.minGapMs === 360000;
+})());
+
+// ── 组11：验证码暂停窗口与评论模式回显 ────────────────────────────────────
+console.log('\n── 组11：验证码暂停窗口（captchaPauseMs）与 commentModeOf ──');
+
+check('captchaPauseDeadline = now + 默认 30 分钟', (() => {
+  return captchaPauseDeadline(NOW, {}) === NOW + 30 * MINUTE;
+})());
+check('captchaPauseDeadline 跟随可配的 captchaPauseMs（10 分钟）',
+  captchaPauseDeadline(NOW, { captchaPauseMs: 600000 }) === NOW + 10 * MINUTE);
+check('captchaPauseDeadline 也被钳制（配 1 秒 → 5 分钟）',
+  captchaPauseDeadline(NOW, { captchaPauseMs: 1000 }) === NOW + 5 * MINUTE);
+check('captchaPauseDeadline 脏 now 按 0 处理（不抛）',
+  captchaPauseDeadline(Number.NaN, {}) === 30 * MINUTE);
+check('formatPauseRemaining：27 分钟 / 65 分钟 / 2 小时',
+  formatPauseRemaining(NOW + 27 * MINUTE, NOW) === '还剩 27 分钟'
+  && formatPauseRemaining(NOW + 65 * MINUTE, NOW) === '还剩 1 小时 5 分钟'
+  && formatPauseRemaining(NOW + 120 * MINUTE, NOW) === '还剩 2 小时');
+check('formatPauseRemaining：不足 1 分钟写「不到 1 分钟」，过点回空串',
+  formatPauseRemaining(NOW + 30 * 1000, NOW) === '还剩 不到 1 分钟'
+  && formatPauseRemaining(NOW, NOW) === ''
+  && formatPauseRemaining(NOW - MINUTE, NOW) === '');
+check('formatPauseRemaining 向上取整（剩 90 秒 → 2 分钟，不提前解禁）',
+  formatPauseRemaining(NOW + 90 * 1000, NOW) === '还剩 2 分钟');
+
+check('commentModeOf：四个开关组合对应四种模式', (() => {
+  const live = commentModeOf({ allowComment: true, dryRunDefault: false });
+  const dry = commentModeOf({ allowComment: true });
+  const readonly = commentModeOf({ allowComment: false, dryRunDefault: false });
+  const disabled = commentModeOf({ enabled: false, allowComment: true, dryRunDefault: false });
+  return live.mode === 'live' && dry.mode === 'dry_run'
+    && readonly.mode === 'readonly' && disabled.mode === 'disabled';
+})());
+check('commentModeOf 的人话里点明开关状态（allowComment / dryRunDefault）', (() => {
+  const live = commentModeOf({ allowComment: true, dryRunDefault: false }).text;
+  const dry = commentModeOf({ allowComment: true }).text;
+  const readonly = commentModeOf({ allowComment: false }).text;
+  return live.includes('当前允许真发评论') && live.includes('dryRunDefault=false')
+    && dry.includes('只演练不发') && dry.includes('dryRun=false')
+    && readonly.includes('allowComment=false');
+})());
+check('commentModeOf 对脏入参不抛（undefined / null / 字符串）',
+  commentModeOf(undefined).mode === 'readonly'
+  && commentModeOf(null).mode === 'readonly'
+  && commentModeOf('x').mode === 'readonly');
+check('commentModeOf 返回只有 mode/text 两个键（不泄露配置细节）', (() => {
+  const keys = Object.keys(commentModeOf({ allowComment: true, dryRunDefault: false })).join(',');
+  return keys === 'mode,text';
 })());
 
 // ── 汇总 ───────────────────────────────────────────────────────────────────

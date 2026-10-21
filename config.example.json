@@ -65,8 +65,25 @@
     "dailyComments": 10,
     "minGapMs": 360000,
     "maxGapMs": 1200000,
+    "captchaPauseMs": 1800000,
     "postMaxChars": 200,
     "cliPath": "xiaoheihe-cli"
+  },
+  "device": {
+    "enabled": true,
+    "adbPath": "C:\\platform-tools\\adb.exe",
+    "maxMinutesPerDay": 30,
+    "maxStepsPerDay": 60,
+    "minGapMs": 1000,
+    "pauseAfterRunMs": 3600000,
+    "apps": [],
+    "blockedApps": [
+      "com.eg.android.AlipayGphone",
+      "com.tencent.mm",
+      "com.tencent.mobileqq",
+      "com.android.vending",
+      "com.android.settings"
+    ]
   },
   "ownerQQ": null,
   "sessionCwd": "",

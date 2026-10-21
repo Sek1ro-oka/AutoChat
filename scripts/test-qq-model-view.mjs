@@ -157,8 +157,9 @@ test('MCP validates/forwards read watermarks and wait purposes against an isolat
     // 少复制它会让 fixture 里的 server 启动即崩（MCP error -32000: Connection closed）。
     // heybox-tools / heybox-core / qzone-post 是 T-022 接进 snowluma 的小黑盒工具链：
     // heybox-tools → heybox-core → qzone-post（auditContent），少一个都会让 fixture 起不来。
+    // device-tools → device-core 是 T-023 的平板工具链（同理由 mcp-snowluma-safe.js 静态 import）。
     await Promise.all(['mcp-snowluma-safe.js', 'qq-model-view.js', 'sensitive.js', 'identity-core.js',
-      'heybox-tools.js', 'heybox-core.js', 'qzone-post.js'].map((name) =>
+      'heybox-tools.js', 'heybox-core.js', 'qzone-post.js', 'device-tools.js', 'device-core.js'].map((name) =>
       fs.copyFile(path.join(ROOT, 'src', name), path.join(fixture, 'src', name))));
     await fs.writeFile(path.join(fixture, 'config.json'), JSON.stringify({ consolePort: api.address().port }));
     const transport = new StdioClientTransport({
