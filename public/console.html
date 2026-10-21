@@ -1880,6 +1880,64 @@ button:active:not(:disabled) {
 #section-affect #afVentMsg, #section-affect #afEventMsg, #section-affect #afSaveMsg { margin:10px 0 0 }
 #section-affect #afVentMsg:empty, #section-affect #afEventMsg:empty, #section-affect #afSaveMsg:empty { margin:0 }
 
+/* ===== 跨渠道互通（T-016）=====
+   信息结构照 work/agent-tasks/T-016/demo/index.html：固定高度的滑动窗口，表头 sticky。
+   面板里只有会话元数据（label / 编号 / 缓冲条数 / 最后一条时间），不预览消息正文，
+   也不做 JSON 展示。作用域全部挂在 #section-cross 下，深色主题吃同名变量的另一套值。 */
+#section-cross .cross-lead { margin:10px 0 0; font-size:12px; line-height:1.75; color:var(--muted) }
+#section-cross .cross-stats {
+  margin-top:14px; font-size:12px; color:var(--text-secondary); font-variant-numeric:tabular-nums
+}
+/* 滑动窗口：高度锁死，列表自己滚；表头 sticky 在窗口顶部，滚动时列名不跟着走。 */
+#section-cross .cross-window {
+  margin-top:10px; max-height:340px; overflow-y:auto;
+  border:1px solid var(--border-subtle); border-radius:12px; background:var(--surface)
+}
+#section-cross .cross-head,
+#section-cross .cross-row {
+  display:grid; grid-template-columns:minmax(0,1fr) 78px 62px 88px;
+  gap:10px; align-items:center; padding:8px 12px
+}
+#section-cross .cross-head {
+  position:sticky; top:0; z-index:1;
+  background:var(--surface-subtle); border-bottom:1px solid var(--border-subtle);
+  font-size:11px; color:var(--muted-soft); letter-spacing:.02em
+}
+#section-cross .cross-head > :nth-child(2),
+#section-cross .cross-head > :nth-child(3),
+#section-cross .cross-head > :nth-child(4) { text-align:center }
+#section-cross .cross-row { border-bottom:1px solid var(--border-subtle) }
+#section-cross .cross-row:last-child { border-bottom:0 }
+/* 同组会话不止一个时给一条左侧强调线：扫一眼就能看出「这几个已经互通了」。 */
+#section-cross .cross-row.is-shared { box-shadow:inset 3px 0 0 var(--accent) }
+#section-cross .cross-row.is-shared .cross-name { color:var(--accent) }
+#section-cross .cross-conv { display:flex; align-items:baseline; gap:8px; min-width:0; flex-wrap:wrap }
+#section-cross .cross-tag {
+  flex:0 0 auto; padding:0 7px; border-radius:999px; border:1px solid var(--border-subtle);
+  font-size:11px; line-height:1.7; color:var(--muted); background:var(--surface-chip-strong)
+}
+#section-cross .cross-tag.g { color:var(--ok); border-color:var(--ok) }
+#section-cross .cross-tag.p { color:var(--warn-fg); border-color:var(--warn-fg) }
+#section-cross .cross-name {
+  font-size:13px; font-weight:600; color:var(--text); min-width:0; overflow-wrap:anywhere
+}
+#section-cross .cross-key { font-size:11px; color:var(--muted-soft); overflow-wrap:anywhere }
+/* 数字框定宽：主样式里 input[type=number]{width:100%}，这里靠 #section-cross 的权重压过去。 */
+#section-cross input.cross-num {
+  width:100%; min-width:0; padding:5px 6px; text-align:center;
+  font-variant-numeric:tabular-nums
+}
+#section-cross .cross-count,
+#section-cross .cross-time {
+  font-size:12px; color:var(--text-secondary); text-align:center; font-variant-numeric:tabular-nums
+}
+#section-cross .cross-empty {
+  padding:18px 14px; text-align:center; font-size:12px; line-height:1.8; color:var(--muted-soft)
+}
+#section-cross .cross-actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:12px }
+#section-cross .cross-hint { margin:0; font-size:12px; color:var(--muted) }
+#section-cross .cross-buffer { margin-top:8px; font-size:11px; color:var(--muted-soft) }
+
 /* ── 社交自动化（T-009）─────────────────────────────────────────────────────
    结构与样式照抄用户已经确认过的设计稿（work/agent-tasks/T-009/demo/index.html），
    只做两处适配：卡片跟在说说卡后面，所以 margin-top 取 22px 与兄弟卡片对齐；
@@ -2321,6 +2379,7 @@ button:active:not(:disabled) {
       <button data-view="social-v1" class="nav-item"><span class="nav-icon" aria-hidden="true">◇</span>一代仿真<span class="nav-note">V1</span></button>
       <button data-view="slang" class="nav-item"><span class="nav-icon" aria-hidden="true">▤</span>黑话词库</button>
       <button data-view="affect" class="nav-item"><span class="nav-icon" aria-hidden="true">☺</span>情绪</button>
+      <button data-view="cross" class="nav-item"><span class="nav-icon" aria-hidden="true">⇄</span>跨渠道互通</button>
       <div class="nav-label">管理</div>
       <button data-view="usage" class="nav-item"><span class="nav-icon" aria-hidden="true">◧</span>令牌与花费</button>
       <button data-view="access" class="nav-item"><span class="nav-icon" aria-hidden="true">⊙</span>访问与安全</button>
@@ -3498,6 +3557,21 @@ button:active:not(:disabled) {
         <div class="meta">阈值的可填范围是 <b>0.30–0.99</b>，日配额 <b>0–10</b>（填 0 等于关掉这个出口），最小间隔 <b>10–1440 分钟</b>。超出范围的数字会被桥接夹回边界，保存后输入框会显示夹过的真实值。静默时段只挡「对外发」，情绪照常累积。</div>
       </section>
     </section>
+
+    <section id="section-cross" data-page="cross" class="card span-all">
+      <h2 data-note="停在这一页时才读取会话列表">跨渠道互通</h2>
+      <div class="meta"><b>同一个编号 = 同一个圈子：编号相同的会话可以互相回忆对方说过的话；0 = 不共享。</b>列表只显示会话元数据，不展示聊天正文。改完编号点「保存分组」，桥接收到后立刻按新分组工作。</div>
+      <div class="cross-stats" id="crossStats" role="status" aria-live="polite">会话 — · 互通组 — · 已共享 —</div>
+      <div class="cross-window">
+        <div class="cross-head" aria-hidden="true"><span>会话</span><span>编号</span><span>缓冲</span><span>最后一条</span></div>
+        <div id="crossList"><div class="cross-empty">读取中…</div></div>
+      </div>
+      <div class="cross-actions">
+        <button id="crossSave" class="primary" type="button">保存分组</button>
+        <p class="cross-hint">保存后立刻生效，不需要重启桥接。</p>
+      </div>
+      <div class="cross-buffer" id="crossBufferNote">每个会话最多保留 — 条</div>
+    </section>
       </div>
       <div class="overview-footnote" data-page="overview"><span id="accessSummary">正在读取访问范围…</span><button class="text-button" data-view="access">管理访问范围 →</button></div>
       <footer class="page-footer"><span>QQ Bridge · 连接日常，保持自主</span><span id="lastUpdated">等待首次同步</span></footer>
@@ -3637,6 +3711,9 @@ async function refresh() {
     // 情绪（T-012）：读数不在 /api/status 里，只有停在这一页才拉，复用这趟 3 秒轮询。
     // refreshAffect 自己吞异常（错误画在面板里），不会把这一趟 /api/status 拖成「连接中断」。
     if (currentConsolePage === 'affect') refreshAffect();
+    // 跨渠道互通（T-016）：同样只停在这一页才拉；5 秒节流，离开即停。
+    // refreshCross 自己吞异常（错误画在列表里并弹 toast），不会把这一趟 /api/status 拖成「连接中断」。
+    if (currentConsolePage === 'cross') refreshCross();
     const presetSel = document.getElementById('closedPreset');
     if (presetSel && document.activeElement !== presetSel) presetSel.value = s.closedAgentPreset || '';
   } catch (e) { document.getElementById('statusText').textContent = '连接中断 · 请检查桥接服务'; setConnectionError(e); }
@@ -6011,6 +6088,7 @@ const consolePages = {
   'social-v1': ['一代仿真', '为自然对话，设定合适的节奏。', '调整参与概率、活跃周期和分条发送；所有配置项完整保留。'],
   slang: ['黑话词库', '读懂群聊里的，言外之意。', '从候选到确认，让 AI 逐渐熟悉大家的表达习惯。'],
   affect: ['情绪', '它现在什么心情，为什么还没开口。', '四种情绪的强度与阈值、最近遇到的事、宣泄决策卡在哪一步，以及可以手动拨的调试开关。'],
+  cross: ['跨渠道互通', '同一个编号，就是同一个圈子。', '把群和私聊分进同一组，让 AI 记得住你在别处说过的话。'],
   usage: ['令牌与花费', '每一次思考，都算得清楚。', '实时查看 AI 的 token 消耗与花费，可下钻到每个群、每个好友、每一轮对话。'],
   access: ['访问与安全', '明确边界，安心连接。', '管理允许对话的对象、管理员权限与控制台访问凭证。'],
   operations: ['调试与运维', '让桥接，始终井然有序。', '测试消息、引导 AI，或维护桥接进程与会话工作区。'],
@@ -6054,6 +6132,9 @@ function setConsolePage(page, { updateHash = true, focus = false, target = '' } 
   // 而不是等下一拍轮询。force 绕过下面 refreshAffect 里的节流。
   // 顺手清掉「改过没保存」的脏标记：离开再回来等于放弃那笔改动，输入框重新对齐服务端真值。
   if (page === 'affect') { affectParamsDirty = false; paintAffect(); refreshAffect(true); }
+  // 跨渠道互通：先用上一份快照画一遍，再强拉一次；进入即清掉没保存的草稿，
+  // 与情绪页同一口径——离开再回来等于放弃那笔改动，输入框重新对齐服务端真值。
+  if (page === 'cross') { crossDraft.clear(); crossRenderedSig = null; paintCross(); refreshCross(true); }
   document.querySelectorAll('[data-page]').forEach(el => { el.hidden = el.dataset.page !== page; });
   // 视图已经可见，再让沙盘脚本开始跑（它只会在第一次进入时真正插入一次）。
   if (page === 'sandbox') initSandbox();
@@ -7197,6 +7278,217 @@ document.getElementById('afEventAdd').addEventListener('click', affectAddEvent);
 document.getElementById('afSaveConfig').addEventListener('click', affectSaveConfig);
 document.getElementById('afDebug').addEventListener('input', markAffectParamsDirty);
 document.getElementById('afDebug').addEventListener('change', markAffectParamsDirty);
+
+// ── 跨渠道互通（T-016）──────────────────────────────────────────────────────
+// 数据只有一个来源：GET /api/socialV2/cross。桥接只给元数据（key / label / gid /
+// count / lastAt），控制台不碰消息正文 —— 这一页要做的只是「把会话分进同一个圈子」。
+// 读写都走控制台令牌（POST 在 adminOnlyV2Paths 里）；保存后立刻重拉，不猜桥接的内部状态。
+let lastCross = null;
+let crossFetchedAt = 0;
+let crossLoading = false;
+let crossAgain = false;
+let crossReadError = '';
+let crossErrorShown = '';
+let crossBusy = false;
+// 改过但没保存的编号：key → 输入框里的原始字符串。轮询重绘以它为准，
+// 否则每 5 秒一次的刷新会把用户正在敲的数字抹掉。进页/保存成功后清空。
+const crossDraft = new Map();
+// 当前 DOM 是按哪一版列表画的（key / label / gid 的签名）。签名没变就只就地更新
+// 「缓冲条数 / 最后一条时间」，绝不重建输入框 —— 重建等于把焦点和光标一起扔掉。
+let crossRenderedSig = null;
+const CROSS_SAVE_REASONS = {
+  bad_key: '会话 key 不合法',
+  bad_gid: '编号必须是非负整数',
+  bad_body: '提交内容不合法',
+  config_write_failed: '写 config.json 失败，详情见桥接日志'
+};
+
+function crossGid(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.floor(n);
+}
+function crossCountText(count) {
+  const n = Number(count);
+  return (Number.isFinite(n) && n > 0 ? Math.floor(n) : 0) + ' 条';
+}
+// 毫秒时间戳 → 「刚刚 / N 分钟前 / 昨天 / —」。桥接给 0 表示这个会话还没缓冲到消息。
+function crossAgo(lastAt) {
+  const at = Number(lastAt);
+  if (!Number.isFinite(at) || at <= 0) return '—';
+  const diff = Math.max(0, Date.now() - at);
+  if (diff < 60_000) return '刚刚';
+  if (diff < 3_600_000) return Math.floor(diff / 60_000) + ' 分钟前';
+  if (diff < 86_400_000) return Math.floor(diff / 3_600_000) + ' 小时前';
+  if (diff < 172_800_000) return '昨天';
+  return Math.floor(diff / 86_400_000) + ' 天前';
+}
+function crossConversations() {
+  return lastCross && Array.isArray(lastCross.conversations) ? lastCross.conversations : [];
+}
+// 输入框里正在敲的值优先于服务端快照；只有没改过的 key 才用快照里的 gid。
+function crossEffectiveGid(conversation) {
+  const key = String(conversation.key || '');
+  return crossDraft.has(key) ? crossGid(crossDraft.get(key)) : crossGid(conversation.gid);
+}
+function crossSignature(list) {
+  return list.map((conversation) => [conversation.key, conversation.label, conversation.gid].join('\u0001')).join('\u0002');
+}
+function crossRowHtml(conversation) {
+  const key = String(conversation.key || '');
+  const label = String(conversation.label || key);
+  const group = key.startsWith('group:');
+  const raw = crossDraft.has(key) ? String(crossDraft.get(key)) : String(crossGid(conversation.gid));
+  return '<div class="cross-row" data-key="' + esc(key) + '">'
+    + '<div class="cross-conv">'
+    + '<span class="cross-tag ' + (group ? 'g' : 'p') + '">' + (group ? '群' : '私聊') + '</span>'
+    + '<span class="cross-name">' + esc(label) + '</span>'
+    + '<span class="cross-key">' + esc(key) + '</span>'
+    + '</div>'
+    + '<input type="number" class="cross-num" min="0" step="1" inputmode="numeric" data-key="' + esc(key)
+    + '" value="' + esc(raw) + '" aria-label="' + esc(label + ' 的分组编号') + '">'
+    + '<div class="cross-count">' + crossCountText(conversation.count) + '</div>'
+    + '<div class="cross-time">' + esc(crossAgo(conversation.lastAt)) + '</div>'
+    + '</div>';
+}
+function paintCrossStats() {
+  const el = document.getElementById('crossStats');
+  if (!el) return;
+  if (lastCross === null) {
+    el.textContent = '会话 — · 互通组 — · 已共享 —';
+    return;
+  }
+  const conversations = crossConversations();
+  const gids = new Set();
+  let shared = 0;
+  conversations.forEach((conversation) => {
+    const gid = crossEffectiveGid(conversation);
+    if (gid > 0) { shared += 1; gids.add(gid); }
+  });
+  // M = 去重后的 gid>0 数量，K = gid>0 的会话数（同一个组里的会话逐个计数）。
+  const suffix = lastCross.enabled === false ? ' · 互通开关已关闭' : '';
+  el.textContent = '会话 ' + conversations.length + ' · 互通组 ' + gids.size + ' · 已共享 ' + shared + suffix;
+}
+function paintCrossShared() {
+  const conversations = crossConversations();
+  const gids = new Map();
+  conversations.forEach((conversation) => gids.set(String(conversation.key || ''), crossEffectiveGid(conversation)));
+  const groupSize = new Map();
+  gids.forEach((gid) => { if (gid > 0) groupSize.set(gid, (groupSize.get(gid) || 0) + 1); });
+  document.querySelectorAll('#crossList .cross-row').forEach((row) => {
+    const gid = gids.get(row.dataset.key) || 0;
+    row.classList.toggle('is-shared', gid > 0 && (groupSize.get(gid) || 0) > 1);
+  });
+}
+function paintCross() {
+  const listEl = document.getElementById('crossList');
+  if (!listEl) return;
+  const bufferEl = document.getElementById('crossBufferNote');
+  const live = lastCross !== null;
+  const conversations = crossConversations();
+  if (bufferEl) {
+    const max = live ? Number(lastCross.bufferPerConversation) : NaN;
+    bufferEl.textContent = '每个会话最多保留 ' + (Number.isFinite(max) && max > 0 ? Math.floor(max) : '—') + ' 条';
+  }
+  if (!live || conversations.length === 0) {
+    const text = live
+      ? '还没有任何会话记录；等 AI 收发过消息后再来看。'
+      : (crossReadError ? '读取失败：' + crossReadError : '读取中…');
+    listEl.innerHTML = '<div class="cross-empty">' + esc(text) + '</div>';
+    crossRenderedSig = null;
+    paintCrossStats();
+    return;
+  }
+  const signature = crossSignature(conversations);
+  if (signature !== crossRenderedSig) {
+    listEl.innerHTML = conversations.map(crossRowHtml).join('');
+    crossRenderedSig = signature;
+  } else {
+    // 结构没变：只刷新每行的条数与相对时间，输入框（焦点 / 光标 / 草稿）原样保留。
+    const rows = listEl.querySelectorAll('.cross-row');
+    if (rows.length !== conversations.length) {
+      listEl.innerHTML = conversations.map(crossRowHtml).join('');
+      crossRenderedSig = signature;
+    } else {
+      conversations.forEach((conversation, index) => {
+        const row = rows[index];
+        const countEl = row.querySelector('.cross-count');
+        const timeEl = row.querySelector('.cross-time');
+        if (countEl) countEl.textContent = crossCountText(conversation.count);
+        if (timeEl) timeEl.textContent = crossAgo(conversation.lastAt);
+      });
+    }
+  }
+  paintCrossStats();
+  paintCrossShared();
+}
+// 读失败不吞：列表里画错误，toast 也只对「新的错误」弹一次，避免 3 秒轮询刷屏。
+// 上一份快照会留着继续显示（总比整页突然空掉好），下一次成功再对齐。
+async function refreshCross(force = false) {
+  if (crossLoading) { if (force) crossAgain = true; return; }
+  if (!force && crossFetchedAt > 0 && Date.now() - crossFetchedAt < 5000) { paintCross(); return; }
+  crossLoading = true;
+  crossFetchedAt = Date.now();
+  let failure = '';
+  try {
+    const r = await api('/api/socialV2/cross');
+    if (r && r.ok === true) lastCross = r;
+    else failure = (r && (r.error || r.reason)) ? String(r.error || r.reason) : '接口没有返回原因';
+  } catch (error) {
+    failure = error && error.message ? error.message : String(error);
+  }
+  crossReadError = failure;
+  crossLoading = false;
+  paintCross();
+  if (failure && failure !== crossErrorShown) {
+    crossErrorShown = failure;
+    showConsoleToast('跨渠道互通读取失败：' + failure);
+  }
+  if (!failure) crossErrorShown = '';
+  if (crossAgain) { crossAgain = false; refreshCross(true); }
+}
+function crossOnInput(event) {
+  const target = event.target;
+  const input = target && target.closest ? target.closest('input[data-key]') : null;
+  if (!input || !input.dataset.key) return;
+  crossDraft.set(input.dataset.key, input.value);
+  paintCrossStats();
+  paintCrossShared();
+}
+async function crossSave() {
+  if (crossBusy) return;
+  const inputs = [...document.querySelectorAll('#crossList input[data-key]')];
+  if (inputs.length === 0) { showConsoleToast('现在没有可以保存的会话'); return; }
+  const groups = {};
+  for (const input of inputs) {
+    const gid = crossGid(input.value);
+    groups[input.dataset.key] = gid;
+    // 小数/空值统一夹成非负整数再提交，桥接那边只认这个形状。
+    input.value = String(gid);
+    crossDraft.set(input.dataset.key, String(gid));
+  }
+  const button = document.getElementById('crossSave');
+  crossBusy = true;
+  if (button) button.disabled = true;
+  try {
+    const r = await api('/api/socialV2/cross', 'POST', { groups });
+    if (!r || r.ok !== true) {
+      const reason = r && typeof r.reason === 'string' ? r.reason : '';
+      throw new Error((r && r.error) || CROSS_SAVE_REASONS[reason] || '桥接拒绝了这次改动');
+    }
+    crossDraft.clear();
+    crossRenderedSig = null;
+    showConsoleToast('已保存');
+    await refreshCross(true);
+  } catch (error) {
+    showConsoleToast('保存失败：' + (error && error.message ? error.message : error));
+  } finally {
+    crossBusy = false;
+    if (button) button.disabled = false;
+  }
+}
+document.getElementById('crossList').addEventListener('input', crossOnInput);
+document.getElementById('crossSave').addEventListener('click', crossSave);
 
 setConsolePage(location.hash.slice(1), { updateHash:false });
 // 带 #sandbox 直接打开时，上面这次调用发生在沙盘脚本容器还没解析的时候（容器在 </body> 前），

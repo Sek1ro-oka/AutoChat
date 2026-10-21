@@ -293,8 +293,9 @@ check('私聊复用端点的限频口径（sendTimes 每分钟/每小时）', pr
 check('私聊失败回滚预占的 sendTimes', privateFn.includes('st.sendTimes = (st.sendTimes || []).filter((t) => t !== now);'));
 check('私聊有 disabled / rate / onebot 三层返回', ["layer: 'disabled'", "layer: 'rate'", "layer: 'onebot'"].every((needle) => privateFn.includes(needle)));
 check('私聊缺少 ownerQQ 直接拒（no_owner）', privateFn.includes("reason: 'no_owner'"));
-// 日记：key 带 private: 前缀、ownerQQ 缺失时 no_owner、走 writeDiaryEntry
-check('日记 key 带 private: 前缀', diaryFn.includes('key: `private:${owner}`'));
+// 日记：key 先按互通组归一（T-016：同组共用一本，未分组时仍是 private:<owner>）、
+// ownerQQ 缺失时 no_owner、走 writeDiaryEntry
+check('日记 key 经 diaryKeyFor 归一（T-016 共用本子）', diaryFn.includes('const diaryKey = diaryKeyFor(`private:${owner}`)') && diaryFn.includes('key: diaryKey'));
 check('日记 ownerQQ 缺失时返回 no_owner（不写 private:undefined）', diaryFn.includes("reason: 'no_owner'") && !diaryFn.includes('private:undefined'));
 check('日记走 writeDiaryEntry({ root: DIARY_ROOT, … mode: \'append\' })', diaryFn.includes('root: DIARY_ROOT') && diaryFn.includes("mode: 'append'") && diaryFn.includes('content: String(content ?? \'\')'));
 check('日记成功返回 date', diaryFn.includes('return { ok: true, date: data.date };'));

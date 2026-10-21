@@ -56,6 +56,10 @@ import * as profileCore from '../src/profile-core.js';
 // bridge.js 顶层 import 了 16 个导出名，loadConfig 期间就调 normalizeAutomation，少这一行
 // VM 里立刻 ReferenceError → 所有走 VM 的用例一起红。
 import * as socialAuto from '../src/social-auto.js';
+// 跨会话互通（T-016）：分组 / 滚动缓冲 / 同组检索都是纯逻辑模块（零依赖、零 I/O、
+// 时钟由 now 注入）。bridge.js 顶层 import 会被下面按行剥掉，这里补上同名绑定：
+// loadConfig 期间就调 normalizeCrossConfig，少了这一行 VM 里立刻 ReferenceError。
+import * as crossCore from '../src/cross-core.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -198,6 +202,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...stall, ...consoleAuth, ...qzone, ...presetPrompt,
     ...socialAuto,
+    ...crossCore,
     ...affectCore, ...affectVent, ...affectText,
     ...profileCore,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的

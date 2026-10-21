@@ -46,6 +46,19 @@ try {
   throws(() => diaryFilePath(root, groupKey, '2026-13-01'), '非法月份抛错');
   throws(() => diaryFilePath(root, groupKey, '2026-02-30'), '不存在的日期抛错');
 
+  console.log('## 互通组共用一本（cross:<gid>）');
+  ok(diaryKeyOk('cross:3'), 'cross:3 是合法 key（同组共用一本）');
+  ok(diaryFolderName('cross:3') === 'cross_3', '互通组文件夹名是 cross_3');
+  ok(diaryDirOf(root, 'cross:3') === path.join(path.resolve(root), 'cross_3'), '互通组目录落在 diaries/cross_3');
+  ok(!diaryKeyOk('cross:') && !diaryKeyOk('cross:abc') && !diaryKeyOk('cross:1x2') && !diaryKeyOk('cross:3/../x'), 'cross 缺编号 / 非数字 / 带路径被拒');
+  let crossErr = '';
+  try { diaryFolderName('cross:abc'); } catch (error) { crossErr = String(error?.message ?? error); }
+  ok(crossErr.includes('cross:<互通组编号>'), '错误文案提到 cross:<互通组编号>', crossErr);
+  const crossNow = new Date(2026, 9, 20, 22, 31, 5).getTime();
+  const wc = writeDiaryEntry({ root, key: 'cross:3', content: '群里和私聊共用的一页。', now: crossNow });
+  ok(wc.ok && fs.existsSync(path.join(path.resolve(root), 'cross_3', '2026-10-20.md')), '互通组日记写进 cross_3/<日期>.md');
+  ok(diaryDirOf(root, 'cross:3') !== diaryDirOf(root, groupKey), '互通组本子与本群自己的本子分开');
+
   console.log('## 日期');
   const now = new Date(2026, 9, 20, 22, 31, 5).getTime(); // 本地 2026-10-20 22:31
   ok(normalizeDiaryDate('', now) === '2026-10-20', '空日期 = 今天（本地时区）');

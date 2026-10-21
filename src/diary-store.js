@@ -1,18 +1,21 @@
 // 小鲸鱼的日记本：每个聊天一个文件夹，一天一个 .md 文件。
 //
 // 目录形状（默认 ROOT = 仓库根，运行时被 state/ 忽略规则覆盖，不进版本库）：
-//   state/diaries/<group_群号 | private_QQ号>/<YYYY-MM-DD>.md
+//   state/diaries/<group_群号 | private_QQ号 | cross_互通组号>/<YYYY-MM-DD>.md
 //
 // 设计要点：
-// - **key 来自模型**，所以必须当不可信输入处理：只接受 `group:<数字>` / `private:<数字>`，
-//   目录名由 key 派生后再 resolve 校验必须仍落在 diaries 根目录内（防 `../` 穿越）。
+// - **key 来自模型**，所以必须当不可信输入处理：只接受 `group:<数字>` / `private:<数字>`
+//   / `cross:<数字>`，目录名由 key 派生后再 resolve 校验必须仍落在 diaries 根目录内
+//   （防 `../` 穿越）。
+// - `cross:<编号>` 是「跨渠道互通组共用的那一本」：同组的群聊与私聊写进同一个文件夹，
+//   于是 AI 在群里记下的那一页，私聊里翻日记也看得到（编号由桥接的 diaryKeyFor 归一）。
 // - 一天可以写多则，按 `## HH:MM · 标题` 分节，节间空行；同一天最多 MAX_ENTRIES_PER_DAY 则。
 // - 写入先落 `.tmp` 再 rename，避免半个文件（同一会话并发写时也不会互相截断）。
 // - 这里不判断"该不该写"——那是提示词的事；本模块只负责安全落盘与读回。
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const DIARY_KEY_RE = /^(group|private):\d{1,20}$/;
+export const DIARY_KEY_RE = /^(group|private|cross):\d{1,20}$/;
 export const DIARY_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 export const MAX_ENTRIES_PER_DAY = 20;
 export const MAX_ENTRY_CHARS = 4000;
@@ -30,7 +33,7 @@ export function diaryKeyOk(key) {
 /** 会话 key → 文件夹名，例如 `group:123456789` → `group_123456789`。 */
 export function diaryFolderName(key) {
   const k = String(key ?? '').trim();
-  if (!diaryKeyOk(k)) throw new Error('会话 key 非法：只接受 group:<群号> / private:<QQ号>');
+  if (!diaryKeyOk(k)) throw new Error('会话 key 非法：只接受 group:<群号> / private:<QQ号> / cross:<互通组编号>');
   return k.replace(':', '_');
 }
 
@@ -134,7 +137,7 @@ function composeEntry({ time, title, mood, tags, content }) {
  */
 export function writeDiaryEntry({ root, key, content, date, title, mood, tags, mode = 'append', now = Date.now() }) {
   const k = String(key ?? '').trim();
-  if (!diaryKeyOk(k)) throw new Error('会话 key 非法：只接受 group:<群号> / private:<QQ号>');
+  if (!diaryKeyOk(k)) throw new Error('会话 key 非法：只接受 group:<群号> / private:<QQ号> / cross:<互通组编号>');
   const day = normalizeDiaryDate(date, now);
   const body = sanitizeDiaryText(content, MAX_ENTRY_CHARS);
   if (!body) throw new Error('日记正文为空');
@@ -187,7 +190,7 @@ function previewOf(text) {
 /** 列出最近若干天的日记（新→旧）。 */
 export function listDiaryEntries({ root, key, limit = 7, now = Date.now() }) {
   const k = String(key ?? '').trim();
-  if (!diaryKeyOk(k)) throw new Error('会话 key 非法：只接受 group:<群号> / private:<QQ号>');
+  if (!diaryKeyOk(k)) throw new Error('会话 key 非法：只接受 group:<群号> / private:<QQ号> / cross:<互通组编号>');
   const dir = diaryDirOf(root, k);
   const max = Math.min(Math.max(Number(limit) || 7, 1), 30);
   let names = [];
@@ -228,7 +231,7 @@ export function listDiaryEntries({ root, key, limit = 7, now = Date.now() }) {
 /** 读某一天的日记全文（超长按 maxChars 截断并标记）。 */
 export function readDiaryEntry({ root, key, date, maxChars = MAX_READ_CHARS, now = Date.now() }) {
   const k = String(key ?? '').trim();
-  if (!diaryKeyOk(k)) throw new Error('会话 key 非法：只接受 group:<群号> / private:<QQ号>');
+  if (!diaryKeyOk(k)) throw new Error('会话 key 非法：只接受 group:<群号> / private:<QQ号> / cross:<互通组编号>');
   const day = normalizeDiaryDate(date, now);
   const file = diaryFilePath(root, k, day);
   let text;
@@ -253,7 +256,7 @@ export function readDiaryEntry({ root, key, date, maxChars = MAX_READ_CHARS, now
 /** 该会话日记的汇总读数（控制台/工具列表用）。 */
 export function diaryStatsOf({ root, key, now = Date.now() }) {
   const k = String(key ?? '').trim();
-  if (!diaryKeyOk(k)) throw new Error('会话 key 非法：只接受 group:<群号> / private:<QQ号>');
+  if (!diaryKeyOk(k)) throw new Error('会话 key 非法：只接受 group:<群号> / private:<QQ号> / cross:<互通组编号>');
   const dir = diaryDirOf(root, k);
   let days = 0;
   let entries = 0;

@@ -505,6 +505,18 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
           case '/api/tokens/series': return json(usageSeriesFixture(url.searchParams.get('hours')));
           case '/api/tokens/turns': return json(usageTurnsFixture(url.searchParams.get('key')));
           case '/api/tokens/recent': return json({ ok: true, symbol: '¥', entries: usageRecentFixture() });
+          // 跨渠道互通（T-016）：三行演示数据，其中私聊 20002 的编号是 0（不共享）。
+          case '/api/socialV2/cross':
+            return json({
+              ok: true,
+              enabled: true,
+              bufferPerConversation: 500,
+              conversations: [
+                { key: 'private:10001', label: '私聊 10001', gid: 1, count: 37, lastAt: Date.now() - 60000 },
+                { key: 'group:123456789', label: '群 123456789', gid: 1, count: 214, lastAt: Date.now() - 180000 },
+                { key: 'private:20002', label: '私聊 20002', gid: 0, count: 9, lastAt: Date.now() - 86400000 },
+              ],
+            });
         }
       }
       if (method === 'POST') {
@@ -590,6 +602,7 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
             return json({ ok: true, count: ids.length, confirmed: ids.length, rejected: ids.length, deleted: ids.length });
           }
           case '/api/social/flush':
+          case '/api/socialV2/cross':
           case '/api/socialV2/wake':
           case '/api/socialV2/memory-clear':
           case '/api/socialV2/memory-update':

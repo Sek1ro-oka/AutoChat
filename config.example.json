@@ -380,6 +380,11 @@
         "windowCap": 5,
         "minGapMs": 60000
       }
+    },
+    "cross": {
+      "enabled": true,
+      "bufferPerConversation": 500,
+      "groups": {}
     }
   },
   "webSearch": {

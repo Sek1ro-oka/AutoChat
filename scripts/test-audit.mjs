@@ -122,6 +122,22 @@ const tests = [
   // 额度是 4 小时 5 次的滑动窗口硬约束）、qq_get_avatar 的 image content 形状、
   // agentApi 把 400/403/429 的 reason/retryAfterMs 透传给模型。含 node --check。
   'test-profile-tools.mjs',
+  // 跨渠道互通的纯函数（T-016 第一步）：编号归一、同号分组、缓冲追加与超限丢弃、
+  // 时间窗/按人/关键词检索打分、序列化容错。零 IO，纯函数直接 import。
+  'test-cross-core.mjs',
+  // 跨渠道互通的桥接接线（T-016 第二步）：三个端点（GET 列表 / POST 分组 / POST recall）、
+  // recall 的 gid<=0 空结果与 5 分钟 3 次限流、四个消息钩子、提示词只给元数据、
+  // 唤醒提示的「≥2 条新消息且隔 3 轮」阈值。import bridge 会真起服务，只读源码。
+  'test-cross-endpoints.mjs',
+  // 跨渠道共享记忆与日记共用（T-016 第三步）：印象按 QQ 合并、旧名字键兼容、
+  // 同组共享展示（外来条目带出处、去重、30 行裁剪）、日记 key 归一成 cross:<gid>。
+  'test-cross-memory.mjs',
+  // 工具 qq_recall（T-016 第四步）：注册位置、启用判据、六个参数、
+  // 三种文案（查不到/429/未开启）与请求路径。只读源码。
+  'test-cross-tools.mjs',
+  // 控制台「跨渠道互通」面板（T-016 第五步）：导航与 section 注册、
+  // 滑动窗口、编号输入与保存请求、离开视图不轮询。只读 HTML。
+  'test-console-cross.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

@@ -163,6 +163,7 @@ async function agentApi(path, init = {}) {
     // 表达「内容不合格 / 冷却中 / 网关拒绝」，只留一句「HTTP 429」等于把
     // retryAfterMs 与 reasons 丢掉，模型只能换个参数硬试。挂载不解读，与下面 body.ok 分支一致。
     error.body = body && typeof body === 'object' ? body : null;
+    error.status = res.status;
     error.reason = error.body?.reason;
     error.retryAfterMs = error.body?.retryAfterMs;
     throw error;
@@ -1225,6 +1226,75 @@ server.tool(
     }
   }
 );
+
+// ── 跨渠道回忆（T-016）：只读同组其它会话说过的话 ─────────────────────────
+//
+// 与 qq_memory_query 单列而不是塞进记忆块：那个只读**本会话**，这个读的是**同组别的会话**，
+// 语义、鉴权（桥接要求 x-agent-token + key）与失败处理都不一样。
+// 工具描述每轮都随 system prompt 重发，所以「不要每轮都查」必须写进描述本身——
+// 否则模型最自然的行为就是每轮先 recall 一次，把省下来的 token 又烧回去。
+if (cfg.socialV2?.cross?.enabled !== false) {
+  server.tool(
+    'qq_recall',
+    '只读回忆同组其它会话里说过的话，返回逐条消息与出处（时间、哪个会话、谁说的）。只在当前对话确实需要回忆时才查，不要每轮都查；没给记录就别猜，查不到就直说没找到。',
+    {
+      token: z.string().optional().describe('二代会话令牌（见唤醒提示中的【会话令牌】）；桥接要求带上它才做会话归属校验'),
+      key: z.string().describe('当前会话 key，格式 group:群号 或 private:QQ号'),
+      query: z.string().optional().describe('关键词（中文短句/词），按正文模糊匹配'),
+      person: z.string().optional().describe('只看某个人：QQ 号或名字'),
+      hours: z.number().optional().describe('往回翻多少小时，默认 24，范围 1–168'),
+      limit: z.number().optional().describe('最多返回多少条，默认 20，范围 1–50')
+    },
+    async ({ token, key, query, person, hours, limit }) => {
+      // 注册期之外再看一眼配置：桥接热更新 config.json，而这个 MCP 进程是常驻的。
+      if (getConfig().socialV2?.cross?.enabled === false) {
+        return { content: [{ type: 'text', text: '跨渠道回忆没有开启。' }], isError: true };
+      }
+      try {
+        const payload = { key };
+        if (query) payload.query = String(query);
+        if (person) payload.person = String(person);
+        if (Number.isFinite(Number(hours))) payload.hours = Math.min(168, Math.max(1, Math.floor(Number(hours))));
+        if (Number.isFinite(Number(limit))) payload.limit = Math.min(50, Math.max(1, Math.floor(Number(limit))));
+        const data = await agentApi('/api/socialV2/cross/recall', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+          // 照 qq_set_nickname 的写法：token 只在真有时才进 header，不覆盖控制台令牌。
+          ...(token ? { headers: { 'x-agent-token': token } } : {})
+        });
+        const gid = Number(data?.gid);
+        const total = Number(data?.total);
+        // hint 原样转述：桥接的「没有找到匹配记录，请不要推测。」是刻意写给模型看的
+        // （gid<=0 时它故意回 200 空结果而不是 403，就是为了让模型停下来）。
+        const hint = typeof data?.hint === 'string' && data.hint.trim() ? data.hint.trim() : '没有找到匹配记录，请不要推测。';
+        const lines = Array.isArray(data?.lines)
+          ? data.lines.filter((line) => typeof line === 'string' && line.trim())
+          : [];
+        // gid<=0 = 当前会话没参与互通；total=0 = 时间范围内没查到。两者都照实说没找到。
+        // 判据只看 gid/total（不看 lines）：桥接说有 N 条时，空 lines 只会出现在它自己
+        // 格式化的极端情况，那不是「没找到」。
+        if (!(gid > 0) || !(total > 0)) {
+          return { content: [{ type: 'text', text: `${hint}\n（当前会话没有和别的会话互通，或时间范围内没有相关记录。）` }] };
+        }
+        const text = [`已找到 ${total} 条（来自互通组 ${gid}）：`, ...lines, hint].join('\n');
+        return { content: [{ type: 'text', text }] };
+      } catch (error) {
+        // 429 是桥接侧限流（5 分钟内第 4 次），不是参数错：换参数硬试只会继续 429。
+        const reason = String(error?.body?.reason ?? error?.reason ?? '');
+        if (reason === 'rate_limited' || Number(error?.status) === 429) {
+          const retry = Number(error?.body?.retryAfterMs ?? error?.retryAfterMs);
+          const seconds = Number.isFinite(retry) && retry > 0 ? Math.max(1, Math.ceil(retry / 1000)) : 30;
+          return { content: [{ type: 'text', text: `查得太频繁了，约 ${seconds} 秒后再试。` }], isError: true };
+        }
+        if (reason === 'disabled') {
+          return { content: [{ type: 'text', text: '跨渠道回忆没有开启。' }], isError: true };
+        }
+        const detail = error?.body?.reason ? `（reason=${error.body.reason}）` : '';
+        return { content: [{ type: 'text', text: `回忆失败：${error?.message ?? error}${detail}` }], isError: true };
+      }
+    }
+  );
+}
 
 server.tool(
   'qq_memory_remove',

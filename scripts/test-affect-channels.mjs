@@ -80,10 +80,10 @@ check('私聊失败回滚预占额度', privateFn.includes('filter((t) => t !== 
 check('publishVentPrivate 只有一个调用点', (BRIDGE.match(/await publishVentPrivate\(\{/g) ?? []).length === 1);
 check('调用私聊时只传 content', dispatch.includes('await publishVentPrivate({ content: text })'));
 
-// ── ③ 日记：private: 前缀 + ownerQQ 缺失时 no_owner ────────────────────────
+// ── ③ 日记：按互通组归一的 key + ownerQQ 缺失时 no_owner ────────────────────
 console.log('③ 日记出口');
 
-check('日记 key 带 private: 前缀', diaryFn.includes('key: `private:${owner}`'));
+check('日记 key 经 diaryKeyFor 归一（T-016 共用本子）', diaryFn.includes('const diaryKey = diaryKeyFor(`private:${owner}`)') && diaryFn.includes('key: diaryKey'));
 check('日记走 DIARY_ROOT + append', diaryFn.includes('root: DIARY_ROOT') && diaryFn.includes("mode: 'append'"));
 check('日记缺 owner 直接拒（不落 private:undefined）', diaryFn.includes("reason: 'no_owner'") && !diaryFn.includes('private:undefined'));
 check('日记成功回 date', diaryFn.includes('return { ok: true, date: data.date };'));

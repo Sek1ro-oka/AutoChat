@@ -146,6 +146,28 @@ import {
   avatarUrl,
   AVATAR_SIZES
 } from './profile-core.js';
+// 跨会话互通（T-016）：分组编号 / 滚动缓冲 / 同组检索 / 行格式化全是纯函数，
+// 模块不读时钟、不碰文件；桥接只负责 IO、配置与端点（见 main() 里的 cross 区块）。
+import {
+  CROSS_MAX_LIMIT,
+  CROSS_DEFAULT_SINCE_MS,
+  CROSS_DEFAULTS,
+  CROSS_LIMITS,
+  normalizeCrossConfig,
+  normalizeGid,
+  nextFreeGid,
+  assignGroups,
+  groupOf,
+  membersOf,
+  appendEntry,
+  recallEntries,
+  crossIndex,
+  formatRecallLines,
+  humanKeyLabel,
+  serializeCrossState,
+  emptyCrossState,
+  parseCrossState
+} from './cross-core.js';
 // 文案生成的三件纯函数（T-012 第五步）：清洗模型输出 / 拼提示词 / 保守兜底模板。
 // 单行 import：scripts/audit-bridge-harness.mjs 按行剥顶层 import，单行最不容易出岔子
 // （同名绑定由 harness 的 `...affectText` 注入 VM）。
@@ -162,6 +184,10 @@ const SOCIAL_V2_FILE = path.join(STATE_DIR, 'social-v2.json');
 // 日记本根目录：state/diaries/<group_群号|private_QQ号>/<YYYY-MM-DD>.md
 // 放在 state/ 下（已被 .gitignore 忽略），一个聊天一个文件夹，一天一个文件。
 const DIARY_ROOT = path.join(STATE_DIR, 'diaries');
+// 跨会话互通的每会话滚动缓冲：state/cross/<group_123|private_456>.ndjson
+// 一行一条消息（JSON），只保留最近 bufferPerConversation 条。单独一个目录、单独写：
+// 混进 social-v2.json 的话，每次 saveSocialV2State 都要重写全部历史，代价太大。
+const CROSS_DIR = path.join(STATE_DIR, 'cross');
 // 操作者为每个会话预写的「初始提示词」（见 main() 里的 initialPrompts）。
 // 单独一个文件：它属于操作者配置，不能随 social-v2.json 的会话状态一起被重置清掉。
 const INITIAL_PROMPTS_FILE = path.join(STATE_DIR, 'initial-prompts.json');
@@ -1043,6 +1069,12 @@ function loadConfig() {
   // 缺省段 = 出厂默认（enabled: true）——没写这一段也照常可用，不用先改 config.json。
   // 刻意**不**进控制台：这是 AI 自己的资料，不是操作者的面板开关（dev-doc §6）。
   cfg.socialV2.profile = normalizeProfileConfig(cfg.socialV2?.profile);
+
+  // socialV2.cross：跨会话互通（T-016）。groups 是唯一真源：{ '<channelKey>': gid }，
+  // gid 相同即同一组、可以互相 recall；gid 0 表示「暂不共享」。缺省段 = 出厂默认
+  // （enabled: true、每会话 500 条、没有任何分组）。和 profile 一样只在这里归一，
+  // 端点/控制台/记录钩子读到的永远是归一后的 cfg，不用各自补默认值。
+  cfg.socialV2.cross = normalizeCrossConfig(cfg.socialV2?.cross);
 
   // socialV2.voice：语音发送（把准备好的音频文件当 QQ 语音发出去）。
   // dir 为相对仓库根目录的语音库路径；AI 的 qq_send_voice 默认只能从这个目录取文件，
@@ -2003,6 +2035,18 @@ let stateDirHardened = null;
 // ── 主流程 ──────────────────────────────────────────────────────────────────
 async function main() {
   const cfg = loadConfig();
+  // 跨会话互通（T-016）的内存缓冲。必须在这里建好，不能等到下面 cross 子系统那段：
+  // main() 中段的 server.listen 之后还有 await，请求可能先到，撞上 const 的 TDZ。
+  const crossStore = emptyCrossState();
+  // 最近用到的 20 个会话 entries（值就是 crossStore.conversations[key].entries）；
+  // 淘汰时同步删掉 store 里的会话，下次 loadCrossChannel 重读 ndjson，不是第二份真源。
+  const crossChannelCache = new Map();
+  const crossChannelLines = new Map();
+  const CROSS_CACHE_LIMIT = 20;
+  // recall 限流：同一会话 5 分钟窗口最多 3 次。放内存、重启清零 —— 防模型反复试探。
+  const crossRecallRate = new Map();
+  const CROSS_RECALL_WINDOW_MS = 5 * 60 * 1000;
+  const CROSS_RECALL_MAX_PER_WINDOW = 3;
   fs.mkdirSync(STATE_DIR, { recursive: true });
   hardenStateDirAcl();
   acquireLock();
@@ -2408,6 +2452,14 @@ async function main() {
     st.lastActionAt = entry.at;
     st.wakeConfig.noActionCount = 0;
     saveSocialV2State();
+    // 跨会话互通（T-016）：语音也记一条，text 用现成的 `[语音 …]` 描述。
+    recordCrossMessage(key, {
+      ts: entry.at,
+      from: '我',
+      fromQq: null,
+      isSelf: true,
+      text: display
+    });
   }
 
   /**
@@ -4294,15 +4346,17 @@ async function main() {
         return { ok: false, layer: 'diary', reason: 'no_owner', error: '未配置 ownerQQ，日记出口不可用' };
       }
       try {
+        // 宣泄日记同样并入互通组：与 owner 的私聊若和某些群同组，就写进共用的那一本。
+        const diaryKey = diaryKeyFor(`private:${owner}`);
         const data = writeDiaryEntry({
           root: DIARY_ROOT,
-          // 私聊目录就是「与 owner 的会话」：diary-store 的 key 只认 private:<QQ> / group:<QQ>。
-          key: `private:${owner}`,
+          // 私聊目录就是「与 owner 的会话」：diary-store 的 key 认 group/private/cross:<数字>。
+          key: diaryKey,
           content: String(content ?? ''),
           mode: 'append',
           now: Number.isFinite(now) ? now : Date.now()
         });
-        log(`[affect] 日记出口已写入 private:${owner} ${data.date}`);
+        log(`[affect] 日记出口已写入 ${diaryKey} ${data.date}`);
         return { ok: true, date: data.date };
       } catch (error) {
         return { ok: false, layer: 'diary', reason: 'diary_write_failed', error: String(error?.message ?? error) };
@@ -4946,9 +5000,13 @@ async function main() {
         // 情绪宣泄的两个**写**端点也在这里（T-012 第五步）：
         //   affect/vent   —— 会（在 dryRun:false 时）真的往 QQ 空间发一条；
         //   affect/config —— 改写 config.json 里的阈值/开关，等于改运行行为。
+        //   cross         —— 改写 config.json 里的跨会话分组（谁能看到谁），同样是管理语义：
+        //                     AI 不能自己把某个群拉进自己的互通组。反过来，cross/recall 只是
+        //                     「读同组已经存在的缓冲」，不是管理动作，所以**不**进本名单；
+        //                     它靠 x-agent-token + 会话白名单 + 5 分钟 3 次限流把关。
         // 两者都是控制台动作，AI 不该自己触发：AI 的心情由它上报（affect/events），
         // 「发不发」由桥接的判定与操作者决定。
-        const adminOnlyV2Paths = ['/api/socialV2/config', '/api/socialV2/activity', '/api/socialV2/reset', '/api/socialV2/states', '/api/socialV2/wake', '/api/socialV2/initial-prompt', '/api/socialV2/automation', '/api/socialV2/affect/vent', '/api/socialV2/affect/config'];
+        const adminOnlyV2Paths = ['/api/socialV2/config', '/api/socialV2/activity', '/api/socialV2/reset', '/api/socialV2/states', '/api/socialV2/wake', '/api/socialV2/initial-prompt', '/api/socialV2/automation', '/api/socialV2/affect/vent', '/api/socialV2/affect/config', '/api/socialV2/cross'];
         if (req.headers['x-agent-token'] && (adminOnlyV2Paths.includes(url.pathname) || (url.pathname === '/api/socialV2/feedback' && req.method === 'GET') || (url.pathname === '/api/socialV2/tool-log' && req.method === 'GET'))) {
           sendJson({ ok: false, error: '该接口仅控制台可用' }, 403);
           return;
@@ -5887,6 +5945,172 @@ async function main() {
           await runProfileUpdate(req, res, 'groupCard');
           return;
         }
+
+        // ── 跨会话互通（T-016）────────────────────────────────────────────────
+        // 控制台的「分组」面板与 AI 的只读视图共用这个 GET。只返回元数据：
+        // 哪些会话在组里、每组几条、最后一条什么时候 —— **绝不**返回消息正文。
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/cross') {
+          try {
+            const groups = crossGroups();
+            // 会话来源 = 已配置分组的 key ∪ 当前进程见过的二代会话。
+            // 后者保证「刚聊过但还没分组」的会话也能出现在控制台里，等着被拖进某个组。
+            const keys = new Set(Object.keys(groups));
+            for (const key of socialV2.conversations.keys()) keys.add(key);
+            const conversations = [];
+            for (const key of keys) {
+              const entries = loadCrossChannel(key);
+              let lastAt = 0;
+              for (const item of entries) {
+                const ts = Number(item?.ts) || 0;
+                if (ts > lastAt) lastAt = ts;
+              }
+              conversations.push({
+                key,
+                label: humanKeyLabel(key),
+                gid: groupOf(groups, key),
+                count: entries.length,
+                lastAt
+              });
+            }
+            conversations.sort((a, b) => (b.lastAt - a.lastAt) || a.key.localeCompare(b.key));
+            sendJson({
+              ok: true,
+              enabled: cfg.socialV2?.cross?.enabled !== false,
+              bufferPerConversation: crossBufferLimit(),
+              conversations
+            });
+          } catch (error) {
+            log(`[cross] 列表生成失败：${error?.message ?? error}`);
+            sendJson({ ok: false, reason: 'internal', error: '跨会话列表生成失败，详情见桥接日志' }, 500);
+          }
+          return;
+        }
+
+        // 分组写回：控制台专用（在 adminOnlyV2Paths 里）。body.groups 是**部分更新**：
+        // 只提交要改的 key，其余保持原值。写盘成功后才热更新内存 cfg —— 否则一次
+        // 磁盘失败会让控制台显示新分组、重启后又弹回旧分组。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/cross') {
+          const body = await readBody();
+          const patch = body?.groups;
+          if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+            sendJson({ ok: false, reason: 'bad_body', error: 'body.groups 必须是对象' }, 400);
+            return;
+          }
+          const merged = { ...crossGroups() };
+          for (const [key, value] of Object.entries(patch)) {
+            if (!/^(group|private):\d{1,20}$/.test(key)) {
+              sendJson({ ok: false, reason: 'bad_key', error: `会话 key 不合法：${key}` }, 400);
+              return;
+            }
+            const gid = normalizeGid(value);
+            if (gid === null) {
+              sendJson({ ok: false, reason: 'bad_gid', error: `分组号必须是非负整数：${key}` }, 400);
+              return;
+            }
+            merged[key] = gid;
+          }
+          try {
+            writeCrossGroups(merged);
+            sendJson({ ok: true, groups: cfg.socialV2.cross.groups });
+          } catch (error) {
+            log(`[cross] 写回分组失败：${error?.message ?? error}`);
+            sendJson({ ok: false, reason: 'config_write_failed', error: '写 config.json 失败，详情见桥接日志' }, 500);
+          }
+          return;
+        }
+
+        // 同组回忆：AI 用（x-agent-token + key），**不在** adminOnlyV2Paths 里。
+        // 三道闸门：会话令牌 / 当前模式白名单 / 互通开关；之后才看 gid 和限流。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/cross/recall') {
+          const body = await readBody();
+          const key = String(body?.key ?? '').trim();
+          if (!/^(group|private):\d{1,20}$/.test(key)) {
+            sendJson({ ok: false, reason: 'bad_key', error: '会话 key 不合法' }, 400);
+            return;
+          }
+          const agentToken = String(req.headers['x-agent-token'] ?? '').trim();
+          if (!agentTokenOk(key, agentToken)) {
+            sendJson({ ok: false, reason: 'bad_token', error: 'agent token 无效' }, 403);
+            return;
+          }
+          if (!v2SessionAllowed(key)) {
+            sendJson({ ok: false, reason: 'session_not_allowed', error: '目标不在当前模式允许范围内' }, 403);
+            return;
+          }
+          if (cfg.socialV2?.cross?.enabled === false) {
+            sendJson({ ok: false, reason: 'disabled', error: '跨会话互通未启用' }, 403);
+            return;
+          }
+          const groups = crossGroups();
+          const gid = groupOf(groups, key);
+          // gid <= 0 = 这个会话不参与互通。**故意返回 200 空结果而不是 403**：
+          // 模型遇到 403 会当成「参数/权限不对」反复换着试；一句「没有找到，请不要推测」
+          // 才能让它停下来。这里不消耗限流次数，避免把「没共享」和「查太多」混为一谈。
+          if (gid <= 0) {
+            sendJson({
+              ok: true,
+              total: 0,
+              rows: [],
+              lines: [],
+              hint: '没有找到匹配记录，请不要推测。'
+            });
+            return;
+          }
+          const now = Date.now();
+          const rate = crossRecallRateCheck(key, now);
+          if (!rate.ok) {
+            sendJson({
+              ok: false,
+              reason: 'rate_limited',
+              error: '查得太频繁了，稍后再试',
+              retryAfterMs: Math.max(0, Math.round(rate.retryAfterMs || 0))
+            }, 429);
+            return;
+          }
+          // recallEntries 只认识 store 里已加载的会话：先把同组成员全读进来，
+          // 否则「同组但这轮还没收到过消息」的会话会被静默漏掉。
+          for (const member of membersOf(groups, gid)) loadCrossChannel(member);
+          const rawLimit = Number(body?.limit);
+          const limit = Number.isFinite(rawLimit)
+            ? Math.min(CROSS_MAX_LIMIT, Math.max(1, Math.floor(rawLimit)))
+            : 50;
+          const rawSince = Number(body?.sinceMs);
+          const rawHours = Number(body?.hours);
+          const sinceMs = Number.isFinite(rawSince) && rawSince > 0
+            ? rawSince
+            : (Number.isFinite(rawHours) && rawHours > 0 ? rawHours * 3600000 : CROSS_DEFAULT_SINCE_MS);
+          const excludeSelf = body?.excludeSelf === true;
+          const result = recallEntries({
+            store: crossStore,
+            gid,
+            groups,
+            now,
+            sinceMs,
+            // excludeSelf 是结果过滤：先按上限多取再滤再截，否则 limit=3 时自己的
+            // 三条就占满名额，别人的消息根本进不来。
+            limit: excludeSelf ? CROSS_MAX_LIMIT : limit,
+            excludeKey: key,
+            query: typeof body?.query === 'string' ? body.query : undefined,
+            person: typeof body?.person === 'string' ? body.person : undefined
+          });
+          let total = result.total;
+          let rows = result.rows;
+          if (excludeSelf) {
+            const filtered = rows.filter((row) => row?.isSelf !== true);
+            total = filtered.length;
+            rows = filtered.slice(0, limit);
+          }
+          sendJson({
+            ok: true,
+            gid,
+            total,
+            rows,
+            lines: formatRecallLines(rows),
+            hint: '以上内容来自其它会话；引用时请说明出处，不要向当前对话的第三方透露。'
+          });
+          return;
+        }
+
         // 配置：POST body 支持四键的**部分更新**（enabled / windowHours / windowCap / ugcRight）。
         // 写的是 config.json 里的 qzone.*：这是运行配置，不是运行时状态 —— 只改内存的话，
         // 重启一次就回到文件里的旧值，控制台上那些输入框会「自己弹回去」。
@@ -7275,12 +7499,33 @@ async function main() {
                 hint: `改自己的资料：qq_set_nickname / qq_set_signature / qq_set_group_card，看自己：qq_get_profile。${hours} 小时内最多 ${cap} 次、两次之间至少 60 秒；自己想改就改，不用问谁。`
               };
             })(),
+            // 跨会话互通（T-016）：只给「同组还有谁、各有几条、最后一条何时」的元数据。
+            // **绝不**把别的会话的消息正文塞进 prompt —— 那会让当前对话的第三方内容
+            // 无提示地泄漏；要看细节让模型自己调 qq_recall（带出处提示，且有频率上限）。
+            cross: (() => {
+              const groups = cfg.socialV2?.cross?.groups ?? {};
+              const gid = groupOf(groups, key);
+              if (!cfg.socialV2?.cross?.enabled || gid <= 0) return { enabled: false };
+              // crossIndex 只统计已加载的会话：冷启动后的第一次 prompt 会显示「没有别人」，
+              // 所以先把同组成员读进 store（loadCrossChannel 有 20 个会话的 LRU 缓存）。
+              for (const member of membersOf(groups, gid)) loadCrossChannel(member);
+              const idx = crossIndex(crossStore, { key, groups, gid, now: Date.now() });
+              const others = idx.others.map((o) => ({ key: o.key, label: humanKeyLabel(o.key), count: o.count, lastAt: o.lastAt }));
+              return {
+                enabled: true,
+                group: gid,
+                others,
+                hint: others.length
+                  ? '同组还有其它会话；要回忆细节用 qq_recall，不必每轮都查。'
+                  : '这个会话暂时没有和别的会话互通。'
+              };
+            })(),
             replyTiming: replyTimingV2(st),
             unreadCount: st.unread.length,
             recentCount: st.recentMessages.length,
             currentWakeConfig: st.wakeConfig,
             wakeSafety: computeWakeSafetyV2(st.wakeConfig),
-            memory: formatMemoryV2(st),
+            memory: formatSharedMemoryV2(key),
             participation: formatParticipationV2(st),
             slang: {
               enabled: cfg.slang?.enabled !== false,
@@ -9113,7 +9358,7 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_append' }, 403); return; }
           const st = getSocialV2State(key);
-          appendMemoryV2(st, category, content, extra);
+          appendMemoryV2(st, category, content, extra, { key });
           sendJson({ ok: true, key, category, content, memory: formatMemoryV2(st) });
           return;
         }
@@ -9156,22 +9401,45 @@ async function main() {
           } else if (category === 'memberImpression' && st.memberImpressions && typeof st.memberImpressions === 'object') {
             const oldTarget = target;
             if (['__proto__', 'constructor', 'prototype'].includes(oldTarget)) { sendJson({ ok: false, error: '非法的群友名字' }, 400); return; }
+            // 先按原键命中（旧的显示名键，或调用方直接给的 qq:<id>）；不命中再看这个名字
+            // 能不能反查到 QQ —— 同一个人换了群名片时，AI 仍然能用新名字编辑旧条目。
+            const findImpressionKey = (raw) => {
+              if (Object.prototype.hasOwnProperty.call(st.memberImpressions, raw)) return raw;
+              const qq = resolveMemberQq(key, raw);
+              return qq && Object.prototype.hasOwnProperty.call(st.memberImpressions, `qq:${qq}`) ? `qq:${qq}` : '';
+            };
+            const hitTarget = findImpressionKey(oldTarget);
             // 必须命中**已有**条目（own property）：否则任意 target 都能凭空建一条，
             // 而 'toString'/'valueOf' 这类名字会从 Object.prototype 上取到继承来的函数，
             // 往函数对象上写 traits —— JSON.stringify 又会把它整个丢掉（静默数据丢失）。
-            if (!Object.prototype.hasOwnProperty.call(st.memberImpressions, oldTarget)) {
+            if (!hitTarget) {
               sendJson({ ok: false, error: '找不到要编辑的群友印象（新印象请用 qq_memory_append 添加）' }, 404);
               return;
             }
-            const im = st.memberImpressions[oldTarget];
+            const im = st.memberImpressions[hitTarget];
+            const qqKey = /^qq:\d{1,20}$/.test(hitTarget);
             const newTarget = String(cleanNewExtra.target || oldTarget).trim().slice(0, 64);
             if (!newTarget || ['__proto__', 'constructor', 'prototype'].includes(newTarget)) { sendJson({ ok: false, error: '非法的群友名字' }, 400); return; }
             if (newContent !== undefined) {
               im.traits = newContent.split(/[,，、]/).map((s) => s.trim()).filter(Boolean).slice(0, 20);
             }
             if (cleanNewExtra.interactionCount !== undefined) im.interactionCount = Math.max(0, Number(cleanNewExtra.interactionCount) || 0);
-            if (newTarget !== oldTarget) delete st.memberImpressions[oldTarget];
-            st.memberImpressions[newTarget] = im;
+            if (qqKey) {
+              // qq 键不迁移：改名只更新 names 里的显示名（同一个人可以有很多群名片），
+              // 但绝不允许把键改成非 qq —— 那会把这个人重新拆回按名字记的旧形态。
+              if (newTarget !== oldTarget && !/^qq:\d{1,20}$/.test(newTarget)) {
+                const names = im.names && typeof im.names === 'object' && !Array.isArray(im.names) ? { ...im.names } : {};
+                names[newTarget] = Date.now();
+                im.names = Object.fromEntries(Object.entries(names)
+                  .sort((a, b) => (Number(b[1]) || 0) - (Number(a[1]) || 0))
+                  .slice(0, 10));
+              }
+            } else if (newTarget !== hitTarget) {
+              // 旧的名字键仍允许改名（搬键），值里的 name 同步更新。
+              delete st.memberImpressions[hitTarget];
+              im.name = newTarget;
+              st.memberImpressions[newTarget] = im;
+            }
             // 与控制台/AI 的 append 路径保持一致：条目数上限 50，超了按 lastSeenAt 淘汰最旧，
             // 否则 memory-update 能无限塞名字（每次 1MB 请求 → 状态文件与每轮 prompt 一起膨胀）。
             const impressionEntries = Object.entries(st.memberImpressions);
@@ -9230,7 +9498,13 @@ async function main() {
           } else if (category === 'pendingThought' && Array.isArray(st.pendingThoughts)) {
             st.pendingThoughts = st.pendingThoughts.filter((t) => String(t?.text ?? '') !== content);
           } else if (category === 'memberImpression' && st.memberImpressions && typeof st.memberImpressions === 'object') {
-            delete st.memberImpressions[target];
+            let removeKey = target;
+            if (!Object.prototype.hasOwnProperty.call(st.memberImpressions, removeKey)) {
+              // 名字键没命中（可能换过群名片）时，按显示名反查 QQ 再删 qq:<id>。
+              const qq = resolveMemberQq(key, target);
+              if (qq) removeKey = `qq:${qq}`;
+            }
+            delete st.memberImpressions[removeKey];
           }
           saveSocialV2State();
           sendJson({ ok: true, key, category, memory: formatMemoryV2(st) });
@@ -9267,10 +9541,12 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('diary')) { sendJson({ ok: false, error: '工具未启用：qq_diary_write' }, 403); return; }
           const mode = String(body.mode ?? 'append').trim() === 'replace' ? 'replace' : 'append';
+          // 日记按互通组共用：同组会话写进同一本 cross:<gid>，未分组仍用自己的 key。
+          const diaryKey = diaryKeyFor(key);
           try {
             const data = writeDiaryEntry({
               root: DIARY_ROOT,
-              key,
+              key: diaryKey,
               content: redactKnownTokensOnly(String(body.content ?? '')),
               date: body.date === undefined ? '' : String(body.date),
               title: body.title === undefined ? '' : String(body.title),
@@ -9278,7 +9554,7 @@ async function main() {
               tags: body.tags,
               mode
             });
-            sendJson({ ...data, folder: diaryFolderName(key) });
+            sendJson({ ...data, folder: diaryFolderName(diaryKey) });
           } catch (error) {
             sendJson({ ok: false, error: String(error?.message ?? error) }, 400);
           }
@@ -9291,7 +9567,7 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('diary')) { sendJson({ ok: false, error: '工具未启用：qq_diary_list' }, 403); return; }
           try {
-            const data = listDiaryEntries({ root: DIARY_ROOT, key, limit: url.searchParams.get('limit') });
+            const data = listDiaryEntries({ root: DIARY_ROOT, key: diaryKeyFor(key), limit: url.searchParams.get('limit') });
             sendJson(data);
           } catch (error) {
             sendJson({ ok: false, error: String(error?.message ?? error) }, 400);
@@ -9307,7 +9583,7 @@ async function main() {
           try {
             const data = readDiaryEntry({
               root: DIARY_ROOT,
-              key,
+              key: diaryKeyFor(key),
               date: url.searchParams.get('date'),
               maxChars: url.searchParams.get('maxChars')
             });
@@ -10920,6 +11196,11 @@ async function main() {
         preSleepWaitAccumMs: 0,
         lastUnreadSeq: 0,
         lastReadThroughSeq: 0,
+        // 跨会话互通（T-016）：wakeSeq 是真实唤醒轮次；crossHintTs/crossHintWake
+        // 记录上一次「别处动静」通知的时间与轮次，用来做 ≥2 条 / ≥3 轮的免打扰门槛。
+        wakeSeq: 0,
+        crossHintTs: 0,
+        crossHintWake: 0,
         modelSeenSeqs: new Set(),
         activeTopics: [],
         pendingThoughts: [],
@@ -10989,6 +11270,9 @@ async function main() {
             lastUnreadSeq: Number(val.lastUnreadSeq) || 0,
             lastReadThroughSeq: Number.isSafeInteger(val.lastReadThroughSeq) && val.lastReadThroughSeq >= 0
               ? Math.min(val.lastReadThroughSeq, Number(val.lastUnreadSeq) || 0) : 0,
+            wakeSeq: Number(val.wakeSeq) || 0,
+            crossHintTs: Number(val.crossHintTs) || 0,
+            crossHintWake: Number(val.crossHintWake) || 0,
             modelSeenSeqs: new Set(),
             activeTopics: Array.isArray(val.activeTopics) ? val.activeTopics : [],
             pendingThoughts: Array.isArray(val.pendingThoughts) ? val.pendingThoughts : [],
@@ -11077,6 +11361,9 @@ async function main() {
           preSleepWaitAccumMs: st.preSleepWaitAccumMs || 0,
           lastUnreadSeq: st.lastUnreadSeq || 0,
           lastReadThroughSeq: st.lastReadThroughSeq || 0,
+          wakeSeq: st.wakeSeq || 0,
+          crossHintTs: st.crossHintTs || 0,
+          crossHintWake: st.crossHintWake || 0,
           activeTopics: Array.isArray(st.activeTopics) ? st.activeTopics.slice(-50) : [],
           pendingThoughts: Array.isArray(st.pendingThoughts) ? st.pendingThoughts.slice(-50) : [],
           memberImpressions: st.memberImpressions && typeof st.memberImpressions === 'object' ? st.memberImpressions : {},
@@ -11282,6 +11569,77 @@ async function main() {
     return defaultMs;
   }
 
+  /**
+   * 印象条目的展示名与 QQ。
+   *
+   * 两种键并存（旧数据**不自动迁移**）：
+   *   · `qq:<QQ>` —— T-016 起的新写法，值里有 `names`（显示名 → 最近一次见到的时间）；
+   *   · 显示名本身 —— 旧写法，值里没有 names/qq。
+   * 展示取「最近的名字」（names 里时间戳最大的那个），没有则退回字面 name / 键名；
+   * 有 QQ 时由调用方追加 `（QQ <qq>）`。
+   */
+  function impressionDisplayV2(entryKey, im) {
+    const key = String(entryKey ?? '');
+    const value = im && typeof im === 'object' ? im : {};
+    const qqFromKey = /^qq:(\d{1,20})$/.exec(key);
+    const rawQq = String(value.qq ?? (qqFromKey ? qqFromKey[1] : '')).trim();
+    let name = '';
+    let nameAt = Number.NEGATIVE_INFINITY;
+    if (value.names && typeof value.names === 'object' && !Array.isArray(value.names)) {
+      for (const [alias, ts] of Object.entries(value.names)) {
+        const at = Number(ts);
+        const stamp = Number.isFinite(at) ? at : 0;
+        if (stamp > nameAt) {
+          nameAt = stamp;
+          name = String(alias).trim();
+        }
+      }
+    }
+    if (!name) name = String(value.name ?? '').trim();
+    if (!name) name = key;
+    return { name: name || key, qq: /^\d{1,20}$/.test(rawQq) ? rawQq : '', nameAt: Number.isFinite(nameAt) ? nameAt : 0 };
+  }
+
+  /**
+   * 显示名 → QQ。同一个人的群名片在不同群里可以完全不同（「阿花」/「花姐」），
+   * 只按名字记印象会把一个人拆成好几张卡；跨渠道合并必须先归到 QQ。
+   *
+   * 只在两个地方找，且取**最近**的一次同名映射：
+   *   1) 该会话 st.recentMessages 的 sender + userId（二代入站消息两个字段都写）；
+   *   2) cross 缓冲（loadCrossChannel）的 from + fromQq —— 更久，且能跨会话。
+   * 名字比较大小写不敏感、必须完全相等（不做包含匹配，避免「小」误命中「小鲸鱼」）。
+   * 找不到返回 null（调用方退回按名字记）。
+   */
+  function resolveMemberQq(key, name) {
+    const wanted = String(name ?? '').trim().toLowerCase();
+    const canonical = canonicalV2Key(key);
+    if (!wanted || !canonical) return null;
+    let best = null; // { qq, ts }
+    const consider = (from, qq, ts) => {
+      if (from === undefined || from === null || qq === undefined || qq === null) return;
+      if (String(from).trim().toLowerCase() !== wanted) return;
+      const id = String(qq).trim();
+      if (!/^\d{1,20}$/.test(id)) return;
+      const stamp = Number(ts) || 0;
+      if (!best || stamp >= best.ts) best = { qq: id, ts: stamp };
+    };
+    // 直接读 Map，不用 getSocialV2State：后者会给没见过的会话建状态、排定时器。
+    const st = socialV2.conversations.get(canonical);
+    if (st) {
+      for (const m of Array.isArray(st.recentMessages) ? st.recentMessages : []) {
+        if (!m || m.isSelf) continue;
+        consider(m.sender ?? m.senderId, m.userId ?? m.qq ?? m.senderId, m.time);
+      }
+    }
+    try {
+      for (const item of loadCrossChannel(canonical)) {
+        if (!item || item.isSelf) continue;
+        consider(item.from, item.fromQq, item.ts);
+      }
+    } catch { /* 缓冲损坏时退回只有 recentMessages 的映射 */ }
+    return best ? best.qq : null;
+  }
+
   function formatMemoryV2(st) {
     if (!st) return '';
     const lines = [];
@@ -11302,19 +11660,20 @@ async function main() {
       }
     }
     const impressions = st.memberImpressions && typeof st.memberImpressions === 'object' ? st.memberImpressions : {};
-    const names = Object.keys(impressions);
-    if (names.length) {
+    const impressionKeys = Object.keys(impressions);
+    if (impressionKeys.length) {
       lines.push('【对群友的印象】');
-      for (const name of names.slice(-10)) {
-        const im = impressions[name] || {};
+      for (const entryKey of impressionKeys.slice(-10)) {
+        const im = impressions[entryKey] || {};
         const traits = Array.isArray(im.traits) ? im.traits : [];
-        lines.push(`- ${name}：${traits.length ? traits.join('、') : '暂无记录'}（互动 ${Number(im.interactionCount) || 0} 次）`);
+        const shown = impressionDisplayV2(entryKey, im);
+        lines.push(`- ${shown.name}${shown.qq ? `（QQ ${shown.qq}）` : ''}：${traits.length ? traits.join('、') : '暂无记录'}（互动 ${Number(im.interactionCount) || 0} 次）`);
       }
     }
     return lines.join('\n');
   }
 
-  function appendMemoryV2(st, category, content, extra = {}) {
+  function appendMemoryV2(st, category, content, extra = {}, ctx = {}) {
     if (!st) return;
     const text = redactKnownTokensOnly(String(content ?? '')).trim();
     const cat = String(category || '').trim();
@@ -11364,14 +11723,46 @@ async function main() {
       const target = String(extra.target || '').trim();
       if (!target || ['__proto__', 'constructor', 'prototype'].includes(target)) return;
       if (!st.memberImpressions || typeof st.memberImpressions !== 'object') st.memberImpressions = {};
-      const old = st.memberImpressions[target] || {};
-      const traits = Array.isArray(old.traits) ? old.traits.slice(0, 10) : [];
-      if (text && !traits.includes(text.slice(0, 50))) traits.push(text.slice(0, 50));
-      st.memberImpressions[target] = {
-        traits,
-        interactionCount: (Number(old.interactionCount) || 0) + 1,
-        lastSeenAt: Date.now()
-      };
+      const channelKey = String(ctx.key ?? '').trim();
+      const explicitQq = String(extra.qq ?? '').trim();
+      // 优先用调用方给的 QQ；否则按显示名从最近消息/跨会话缓冲反查，反查不到才退回按名字记。
+      const qq = /^\d{1,20}$/.test(explicitQq) ? explicitQq : resolveMemberQq(channelKey, target);
+      const memoryKey = qq ? `qq:${qq}` : target;
+      const old = st.memberImpressions[memoryKey] || {};
+      const traits = Array.isArray(old.traits) ? old.traits.map((t) => String(t)).slice(0, 10) : [];
+      const trait = text ? text.slice(0, 50) : '';
+      if (trait && !traits.includes(trait)) {
+        traits.push(trait);
+        if (traits.length > 10) traits.splice(0, traits.length - 10);
+      }
+      const interactionCount = (Number(old.interactionCount) || 0) + 1;
+      if (qq) {
+        // names 记「这个 QQ 见过的所有显示名 → 最近一次的时间」：群里一个名、私聊另一个名，
+        // 也仍然是同一个人（展示时取最近的那个）。
+        const names = old.names && typeof old.names === 'object' && !Array.isArray(old.names) ? { ...old.names } : {};
+        names[target] = Date.now();
+        const recentNames = Object.entries(names)
+          .sort((a, b) => (Number(b[1]) || 0) - (Number(a[1]) || 0))
+          .slice(0, 10);
+        const channels = Array.isArray(old.channels) ? old.channels.map((c) => String(c)).filter(Boolean) : [];
+        if (channelKey && !channels.includes(channelKey)) channels.push(channelKey);
+        st.memberImpressions[memoryKey] = {
+          qq,
+          names: Object.fromEntries(recentNames),
+          traits,
+          interactionCount,
+          lastSeenAt: Date.now(),
+          channels: channels.slice(0, 10)
+        };
+      } else {
+        // 解析不到 QQ：保持旧行为（键 = 名字），值里补 name 让展示与合并都能拿到显示名。
+        st.memberImpressions[memoryKey] = {
+          name: target,
+          traits,
+          interactionCount,
+          lastSeenAt: Date.now()
+        };
+      }
       const impressionEntries = Object.entries(st.memberImpressions);
       if (impressionEntries.length > 50) {
         impressionEntries.sort((a, b) => (Number(a[1]?.lastSeenAt) || 0) - (Number(b[1]?.lastSeenAt) || 0));
@@ -11381,6 +11772,135 @@ async function main() {
       }
     }
     saveSocialV2State();
+  }
+
+  /**
+   * 跨渠道共享记忆：同组（cfg.socialV2.cross.groups 同号）的群聊与私聊共用一份
+   * 「话题 / 想法 / 印象」；gid=0 的会话等价于单会话视图。
+   *
+   * 只读约束（每轮唤醒都会调用一次）：同组会话直接从 socialV2.conversations 取，
+   * 不为没见过的会话建状态/排定时器；也不 saveSocialV2State、不读盘。
+   *
+   * 裁剪：整体 ≤30 行。超了按「印象 > 想法 > 话题」的优先级反向丢 —— 先丢话题里
+   * 最旧的，再丢想法，最后才动印象（印象是跨渠道归人的结果，最贵）。
+   */
+  function formatSharedMemoryV2(key) {
+    const gid = crossGidOf(key);
+    if (!(gid > 0)) return formatMemoryV2(getSocialV2State(key));
+    const groups = cfg.socialV2?.cross?.groups ?? {};
+    const selfKey = canonicalV2Key(key) ?? String(key ?? '').trim();
+    const states = [{ key: selfKey, st: socialV2.conversations.get(selfKey) || getSocialV2State(selfKey), isSelf: true }];
+    for (const member of membersOf(groups, gid)) {
+      const memberKey = String(member);
+      if (memberKey === selfKey) continue;
+      const st = socialV2.conversations.get(memberKey);
+      // 没加载过的会话不在这里 getSocialV2State：那会造 token、排定时器，还会把一个
+      // 从没说过话的会话塞进状态文件。
+      if (st) states.push({ key: memberKey, st, isSelf: false });
+    }
+    const now = Date.now();
+    const topicRows = [];
+    const thoughtRows = [];
+    for (const { key: memberKey, st, isSelf } of states) {
+      const origin = isSelf ? '' : `（来自 ${humanKeyLabel(memberKey)}）`;
+      for (const t of Array.isArray(st.activeTopics) ? st.activeTopics : []) {
+        if (!t || !t.text) continue;
+        const at = Number(t.lastMentionAt) || 0;
+        const ago = at ? Math.round((now - at) / 60000) : 0;
+        const stale = at && now - at > 2 * 60 * 60 * 1000 ? '（已搁置）' : '';
+        topicRows.push({
+          text: String(t.text),
+          at,
+          line: `- ${t.text}${stale}（${ago > 0 ? ago + '分钟前' : '刚刚'}）${t.pendingQuestion ? `；待追问：${t.pendingQuestion}` : ''}${origin}`
+        });
+      }
+      for (const t of Array.isArray(st.pendingThoughts) ? st.pendingThoughts : []) {
+        if (!t || !t.text || (t.expiresAt && now >= Number(t.expiresAt))) continue;
+        thoughtRows.push({
+          text: String(t.text),
+          at: Number(t.createdAt) || 0,
+          line: `- ${t.text}${t.motivation ? `（${t.motivation}）` : ''}${origin}`
+        });
+      }
+    }
+    // 同一段文本只留最近一次（同一个话题在群里说过、私聊又提一次时不该重复两行）。
+    const recentRows = (rows) => {
+      const byText = new Map();
+      for (const row of rows) {
+        const old = byText.get(row.text);
+        if (!old || row.at >= old.at) byText.set(row.text, row);
+      }
+      return [...byText.values()].sort((a, b) => a.at - b.at).slice(-10);
+    };
+    const topics = recentRows(topicRows);
+    const thoughts = recentRows(thoughtRows);
+
+    // 印象：键统一成 qq:<id> / name:<name> 再合并。同一个人在不同会话里的两张卡
+    // （群名片不同）在这里并成一张；名字取最近一次见到的那个。
+    const merged = new Map();
+    for (const { st } of states) {
+      const impressions = st.memberImpressions && typeof st.memberImpressions === 'object' ? st.memberImpressions : {};
+      for (const [entryKey, im] of Object.entries(impressions)) {
+        const value = im && typeof im === 'object' ? im : {};
+        const shown = impressionDisplayV2(entryKey, value);
+        const mapKey = shown.qq ? `qq:${shown.qq}` : `name:${shown.name}`;
+        let row = merged.get(mapKey);
+        if (!row) {
+          row = { name: '', nameAt: Number.NEGATIVE_INFINITY, qq: shown.qq, traits: [], interactionCount: 0, lastSeenAt: 0, channels: [] };
+          merged.set(mapKey, row);
+        }
+        if (!row.name || shown.nameAt >= row.nameAt) {
+          row.name = shown.name;
+          row.nameAt = shown.nameAt;
+        }
+        for (const trait of Array.isArray(value.traits) ? value.traits : []) {
+          const s = String(trait).trim();
+          if (s && row.traits.length < 10 && !row.traits.includes(s)) row.traits.push(s);
+        }
+        row.interactionCount += Number(value.interactionCount) || 0;
+        row.lastSeenAt = Math.max(row.lastSeenAt, Number(value.lastSeenAt) || 0);
+        for (const channel of Array.isArray(value.channels) ? value.channels : []) {
+          const c = String(channel).trim();
+          if (c && row.channels.length < 10 && !row.channels.includes(c)) row.channels.push(c);
+        }
+      }
+    }
+    const impressions = [...merged.values()]
+      .sort((a, b) => (a.lastSeenAt || 0) - (b.lastSeenAt || 0))
+      .slice(-10)
+      .map((row) => ({
+        at: row.lastSeenAt || 0,
+        line: `- ${row.name}${row.qq ? `（QQ ${row.qq}）` : ''}：${row.traits.length ? row.traits.join('、') : '暂无记录'}（互动 ${row.interactionCount} 次）`
+      }));
+
+    const sections = [
+      { title: '【进行中的话题】', rows: topics },
+      { title: '【你想说但还没说的】', rows: thoughts },
+      { title: '【对群友的印象】', rows: impressions }
+    ].filter((section) => section.rows.length);
+    const lineCount = () => sections.reduce((n, section) => n + 1 + section.rows.length, 0);
+    // 逆序裁剪：话题（最旧）→ 想法 → 印象。三块都空时循环自然退出。
+    while (lineCount() > 30) {
+      const topicSection = sections.find((section) => section.title === '【进行中的话题】');
+      if (topicSection && topicSection.rows.length) {
+        topicSection.rows.shift();
+        if (!topicSection.rows.length) sections.splice(sections.indexOf(topicSection), 1);
+        continue;
+      }
+      const thoughtSection = sections.find((section) => section.title === '【你想说但还没说的】');
+      if (thoughtSection && thoughtSection.rows.length) {
+        thoughtSection.rows.shift();
+        if (!thoughtSection.rows.length) sections.splice(sections.indexOf(thoughtSection), 1);
+        continue;
+      }
+      break;
+    }
+    const out = [];
+    for (const section of sections) {
+      out.push(section.title);
+      for (const row of section.rows) out.push(row.line);
+    }
+    return out.join('\n');
   }
 
   loadSocialV2State();
@@ -12283,6 +12803,181 @@ async function main() {
     return false;
   }
 
+  // ── 跨会话互通（T-016）：每会话一个 ndjson 滚动缓冲 ─────────────────────
+  //
+  // 纯逻辑（分组编号、逐条归一、同组检索、行格式化）全在 cross-core.js；这里只做 IO：
+  //   1) 把每条入站/出站消息追加到 state/cross/<key>.ndjson（完整原文 + 时间）；
+  //   2) 首次见到某个会话时补组号并**立刻**写回 config.json（否则重启就丢分组）；
+  //   3) 把已加载的缓冲拼成 recall / prompt / 唤醒提示要的形状。
+  // 缓冲只保留最近 bufferPerConversation 条：内存由 appendEntry 裁，文件由
+  // maybeRewriteCrossFile 在超出上限一段后整文件重写（不能每条都重写，见那里注释）。
+  // 状态（crossStore / 缓存 / 限流表）在 main() 开头就建好了，原因见那里注释。
+  function crossBufferLimit() {
+    const value = Number(cfg.socialV2?.cross?.bufferPerConversation);
+    if (!Number.isFinite(value)) return CROSS_DEFAULTS.bufferPerConversation;
+    return Math.min(
+      CROSS_LIMITS.bufferPerConversation[1],
+      Math.max(CROSS_LIMITS.bufferPerConversation[0], Math.round(value))
+    );
+  }
+
+  function crossGroups() {
+    const groups = cfg.socialV2?.cross?.groups;
+    // 防御测试里手搓的 cfg：groups 不是对象时当空对象，绝不让 record 钩子抛错。
+    return groups && typeof groups === 'object' && !Array.isArray(groups) ? groups : {};
+  }
+
+  /** 会话 key → 互通组号（0 = 不共享）。只读 cfg，不加载缓冲、不写盘。 */
+  function crossGidOf(key) {
+    return groupOf(cfg.socialV2?.cross?.groups ?? {}, String(key ?? '').trim());
+  }
+
+  /**
+   * 日记本按**互通组**共用：同组的群聊与私聊写进同一本（cross:<gid>），
+   * 没分组（gid=0）的会话仍按自己的 key 独立成册。
+   *
+   * 写与读必须走同一个函数，否则会出现「写进 cross_3、读 private_x」的灵异现象。
+   */
+  function diaryKeyFor(key) {
+    const k = String(key ?? '').trim();
+    return crossGidOf(k) > 0 ? `cross:${crossGidOf(k)}` : k;
+  }
+
+  function crossChannelFile(key) {
+    // ':' 在 Windows 文件名里非法（也是 NTFS 数据流分隔符），统一换成 '_'。
+    return path.join(CROSS_DIR, `${String(key).replace(/:/g, '_')}.ndjson`);
+  }
+
+  /** 读一个会话的缓冲；文件不存在/坏行都当空，只取最后 bufferPerConversation 条。 */
+  function loadCrossChannel(key) {
+    const cached = crossChannelCache.get(key);
+    if (cached) return cached;
+    const limit = crossBufferLimit();
+    let entries = [];
+    try {
+      const text = fs.readFileSync(crossChannelFile(key), 'utf8');
+      // 坏行逐行跳过：进程被杀时最后一行可能只写了一半，不能让它拖垮整个会话。
+      const lines = text.split(/\r?\n/).filter((line) => line.trim() !== '');
+      crossChannelLines.set(key, lines.length);
+      const rawEntries = [];
+      for (const line of lines.slice(-limit)) {
+        try {
+          const item = JSON.parse(line);
+          if (item && typeof item === 'object' && !Array.isArray(item)) rawEntries.push(item);
+        } catch { /* 跳过坏行 */ }
+      }
+      // 复用 cross-core 的 parseCrossState 做逐条归一（ts 校验、text 截 2000、from 截 40），
+      // 让「从文件读回来的 entry」和「appendEntry 写进去的 entry」形状完全一致。
+      const parsed = parseCrossState(JSON.stringify({
+        version: 1,
+        conversations: { [key]: { gid: groupOf(crossGroups(), key), entries: rawEntries, evicted: 0 } }
+      }));
+      entries = parsed.conversations[key]?.entries ?? [];
+    } catch {
+      entries = [];
+      if (!crossChannelLines.has(key)) crossChannelLines.set(key, 0);
+    }
+    crossStore.conversations[key] = { gid: groupOf(crossGroups(), key), entries, evicted: 0 };
+    crossChannelCache.set(key, entries);
+    while (crossChannelCache.size > CROSS_CACHE_LIMIT) {
+      const oldest = crossChannelCache.keys().next().value;
+      crossChannelCache.delete(oldest);
+      if (oldest !== key) delete crossStore.conversations[oldest];
+    }
+    return entries;
+  }
+
+  /**
+   * 写回 groups。桥接没有统一的 config 写回 helper，既有端点（qzone / affect /
+   * socialV2/config）都是内联「读原始文件 → 只换目标段 → atomicWriteJson → 换内存」，
+   * 这里照同一套做：先落盘，成功了才热更新 cfg，避免磁盘失败时内存与文件分叉。
+   */
+  function writeCrossGroups(nextGroups) {
+    const configFile = path.join(ROOT, 'config.json');
+    const file = readConfigObject(configFile);
+    const social = (file.socialV2 && typeof file.socialV2 === 'object' && !Array.isArray(file.socialV2)) ? file.socialV2 : {};
+    const cross = (social.cross && typeof social.cross === 'object' && !Array.isArray(social.cross)) ? social.cross : {};
+    file.socialV2 = { ...social, cross: { ...cross, groups: nextGroups } };
+    atomicWriteJson(configFile, file);
+    cfg.socialV2.cross = { ...(cfg.socialV2.cross ?? normalizeCrossConfig(undefined)), groups: nextGroups };
+  }
+
+  /**
+   * 记录「文件现在有多少行」，超出上限一段后整文件重写。
+   *
+   * 为什么不在 `entries.length > limit` 时每条都重写：appendEntry 已经把内存裁到
+   * limit，此后**每条**新消息都满足「超过上限」，逐条重写等于每条群消息都写 500 行。
+   * 这里留 20%（至少 50 行）的 slack，文件最多比内存多这么多，重写频率降到约每
+   * slack 条一次；缓存淘汰后重读文件会把行数校正回真实值。
+   */
+  function maybeRewriteCrossFile(key, limit) {
+    const lines = (crossChannelLines.get(key) ?? 0) + 1; // appendFileSync 已经写完一行
+    crossChannelLines.set(key, lines);
+    const slack = Math.max(50, Math.floor(limit / 5));
+    if (lines <= limit + slack) return;
+    const entries = crossStore.conversations[key]?.entries ?? [];
+    const body = entries.map((item) => JSON.stringify(item)).join('\n');
+    atomicWriteText(crossChannelFile(key), body ? `${body}\n` : '');
+    crossChannelLines.set(key, entries.length);
+  }
+
+  /**
+   * 追加一条跨会话消息。entry = { ts, from, fromQq, isSelf, text }，text 要传**完整原文**
+   * （调用方负责从 plainContent/textContent 取，不要传已截 200 的 msg.text）。
+   */
+  function recordCrossMessage(key, entry) {
+    if (cfg.socialV2?.cross?.enabled === false) return;
+    if (typeof key !== 'string' || !/^(group|private):\d{1,20}$/.test(key)) return;
+    let groups = crossGroups();
+    if (groups[key] === undefined) {
+      // 首次真正收到这个会话的消息：补一个组号（nextFreeGid 不会复用已有号，
+      // 新会话因此默认独占一组；控制台要合并就把它改成同号）。立刻写 config ——
+      // 只改内存的话重启后分组丢失，已经写进 ndjson 的消息会变成「无主」。
+      const assigned = assignGroups([key], groups);
+      try {
+        writeCrossGroups(assigned.map);
+        groups = cfg.socialV2.cross.groups;
+      } catch (error) {
+        // 写盘失败不能丢这条消息：按内存里的新组号先记。代价是重启后这个会话可能
+        // 被重新编号（配置里仍然没有它），但消息本身已经落在 ndjson 里，不会丢。
+        log(`[cross] 自动分组写回 config 失败 ${key}：${error?.message ?? error}`);
+        groups = assigned.map;
+      }
+    }
+    const gid = groupOf(groups, key);
+    loadCrossChannel(key);
+    const limit = crossBufferLimit();
+    const result = appendEntry(crossStore, { key, gid, entry, limit });
+    if (!result.added) return;
+    const conv = crossStore.conversations[key];
+    if (conv) conv.gid = gid;
+    try {
+      fs.mkdirSync(CROSS_DIR, { recursive: true });
+      const last = conv?.entries?.[conv.entries.length - 1];
+      if (!last) return;
+      // 追加一行，不重写整个文件：这是热路径（每条群消息都会走）。
+      fs.appendFileSync(crossChannelFile(key), `${JSON.stringify(last)}\n`, 'utf8');
+      if (!crossChannelLines.has(key)) crossChannelLines.set(key, Math.max(0, (conv?.entries?.length ?? 1) - 1));
+      maybeRewriteCrossFile(key, limit);
+    } catch (error) {
+      log(`[cross] 写入跨会话缓冲失败 ${key}：${error?.message ?? error}`);
+    }
+  }
+
+  /** 每个会话 5 分钟最多 3 次 recall；第 4 次返回 retryAfterMs。 */
+  function crossRecallRateCheck(key, now) {
+    const hit = crossRecallRate.get(key);
+    if (!hit || now - hit.ts >= CROSS_RECALL_WINDOW_MS) {
+      crossRecallRate.set(key, { ts: now, count: 1 });
+      return { ok: true };
+    }
+    if (hit.count >= CROSS_RECALL_MAX_PER_WINDOW) {
+      return { ok: false, retryAfterMs: CROSS_RECALL_WINDOW_MS - (now - hit.ts) };
+    }
+    hit.count += 1;
+    return { ok: true };
+  }
+
   // ── 二代仿真模式（reserved2）唤醒调度 ──────────────────────────────────
   function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = []) {
     const st = getSocialV2State(key);
@@ -12356,6 +13051,17 @@ async function main() {
       if (topicHit || participantHit) t.lastMentionAt = Date.now();
     }
     saveSocialV2State();
+    // 跨会话互通（T-016）：另存一份**完整原文**。msg.text/plain 已被截到 200，
+    // 拿它们入缓冲会把长消息的后半段永久丢掉；plainContent 是这条消息自己的文字
+    // （不含引用前缀），为空才退回 textContent。截到 2000 由 cross-core 负责。
+    const crossText = String(plainContent ?? '').trim() !== '' ? String(plainContent) : String(textContent ?? '');
+    recordCrossMessage(key, {
+      ts: msg.time,
+      from: sender,
+      fromQq: userId,
+      isSelf: false,
+      text: crossText
+    });
   }
 
   // 二代拍一拍事件写入最近/未读消息流，让 AI 能看到“谁拍了拍谁/拍了拍我”。
@@ -12367,7 +13073,8 @@ async function main() {
     const target = targetIsSelf ? '你' : (String(targetId || '未知'));
     const actionText = action ? String(action) : '拍了拍';
     const suffixText = suffix ? ` ${String(suffix)}` : '';
-    const text = `[拍一拍] ${actor} ${actionText} ${target}${suffixText}`.slice(0, 200);
+    const fullText = `[拍一拍] ${actor} ${actionText} ${target}${suffixText}`;
+    const text = fullText.slice(0, 200);
     const msg = {
       seq: (st.lastUnreadSeq || 0) + 1,
       messageId: null,
@@ -12398,6 +13105,14 @@ async function main() {
     st.unread.push(msg);
     if (st.unread.length > unreadLimit) st.unread.splice(0, st.unread.length - unreadLimit);
     saveSocialV2State();
+    // 跨会话互通（T-016）：拍一拍也是「在那个会话里发生的事」，用描述原文入缓冲。
+    recordCrossMessage(key, {
+      ts: msg.time,
+      from: actor,
+      fromQq: userId,
+      isSelf: false,
+      text: fullText
+    });
     return msg;
   }
 
@@ -12407,7 +13122,9 @@ async function main() {
     const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
     const list = Array.isArray(messages) ? messages : [];
     for (let i = 0; i < list.length; i++) {
-      const text = redactKnownTokensOnly(String(list[i] ?? '')).slice(0, 200);
+      // 留一份截断前的原文给跨会话缓冲；recentMessages 仍然只存 200 字（省状态文件）。
+      const fullText = redactKnownTokensOnly(String(list[i] ?? ''));
+      const text = fullText.slice(0, 200);
       st.recentMessages.push({
         sender: '我',
         text,
@@ -12417,6 +13134,13 @@ async function main() {
         ownerLabel: '我',
         isSelf: true,
         time: now + i * 1000
+      });
+      recordCrossMessage(key, {
+        ts: now + i * 1000,
+        from: '我',
+        fromQq: null,
+        isSelf: true,
+        text: fullText
       });
     }
     if (st.recentMessages.length > recentLimit) st.recentMessages.splice(0, st.recentMessages.length - recentLimit);
@@ -12685,13 +13409,54 @@ async function main() {
     return `【你的身份】你在 QQ 上的昵称是${label}${idText}。${callBits}；群名片可能与昵称不同，at/引用段里带${id ? ` ${id} ` : '你的 QQ 号'}就是在叫你。\n\n`;
   }
 
+  /**
+   * 「别处动静」：同组其它会话的新消息只做一次极短通知，正文绝不带进来。
+   * 门槛：至少 2 条新消息 + 距上次通知至少 3 次真实唤醒 —— 单条太吵，
+   * 每轮都提会让 AI 把「别处」误当成当前对话，抢当前话题。
+   * 注入后立刻记 st.crossHintTs / st.crossHintWake，同一条消息不再重复出现。
+   */
+  function buildCrossHintLineV2(key, st) {
+    if (cfg.socialV2?.cross?.enabled === false) return '';
+    const groups = cfg.socialV2?.cross?.groups ?? {};
+    const gid = groupOf(groups, key);
+    if (gid <= 0) return '';
+    const hintTs = Number(st.crossHintTs) || 0;
+    let freshTotal = 0;
+    let lastAt = 0;
+    let lastLabel = '';
+    for (const member of membersOf(groups, gid)) {
+      if (member === key) continue;
+      for (const item of loadCrossChannel(member)) {
+        const ts = Number(item?.ts) || 0;
+        if (ts <= hintTs) continue;
+        freshTotal += 1;
+        if (ts > lastAt) {
+          lastAt = ts;
+          lastLabel = humanKeyLabel(member);
+        }
+      }
+    }
+    const wakeSeq = Number(st.wakeSeq) || 0;
+    const crossHintWake = Number(st.crossHintWake) || 0;
+    if (freshTotal >= 2 && wakeSeq - crossHintWake >= 3) {
+      // 记到「这批新消息的最后一条」而不是 now：扫描到注入之间可能又进来一条，
+      // 用 now 会把它当成已通知、永远不再提醒；用 lastAt 则下轮仍能数到它。
+      st.crossHintTs = lastAt || Date.now();
+      st.crossHintWake = wakeSeq;
+      saveSocialV2State();
+      const minutes = lastAt ? Math.max(0, Math.round((Date.now() - lastAt) / 60000)) : 0;
+      return `【别处动静】同组的「${lastLabel}」还有 ${freshTotal} 条新消息（最后一条 ${minutes} 分钟前）。这只是通知，不需要现在处理；当前对话相关时才用 qq_recall 查看。\n\n`;
+    }
+    return '';
+  }
+
   function buildWakePromptV2(key, reason) {
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
     const identityLine = selfIdentityTextV2();
     const st = getSocialV2State(key);
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
-    const memoryText = formatMemoryV2(st);
+    const memoryText = formatSharedMemoryV2(key);
     const memoryLine = memoryText ? `${memoryText}\n\n` : '';
     // 注意：黑话表不在这里注入，deliverPromptNow 的 withSlangContext 会统一注入，
     // 避免唤醒 prompt 出现两份黑话表。
@@ -12714,6 +13479,8 @@ async function main() {
     if (lastMsg && looksLikeUnfinished(String(lastMsg.tail || lastMsg.plain || lastMsg.text || ''))) statusBits.push('对方可能没说完');
     if (lastAiMin != null) statusBits.push(`你上次发言 ${lastAiMin} 分钟前`);
     const statusLine = `【此刻状态】${statusBits.join('；')}\n\n`;
+    // 「别处动静」：只提醒同组有动静，不带正文；不满足门槛时是空串，base 不受影响。
+    const crossLine = buildCrossHintLineV2(key, st);
     const wc = st.wakeConfig || {};
     const wcTr = wc.triggers || {};
     const wcMode = wc.mode === 'active' ? '活跃' : '潜水';
@@ -12733,7 +13500,7 @@ async function main() {
     // 后续唤醒不再带它 —— 那时它已经在这条 DSH 会话的上下文里了。
     const initialPromptText = reason === 'bootstrap' ? formatInitialPromptV2(key) : '';
     const initialPromptLine = initialPromptText ? `${initialPromptText}\n\n` : '';
-    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + participationLine + preSleepLine;
+    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + crossLine + wakeLine + memoryLine + participationLine + preSleepLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }
@@ -12842,12 +13609,17 @@ async function main() {
     st.wakeConfig.lastWakeAt = now;
     st.wakeConfig.wakeCount = (st.wakeConfig.wakeCount || 0) + 1;
     st.lastWakeReason = reason;
+    // 跨会话通知的轮次计数：只在真实唤醒时 +1（繁忙/限频的提前 return 不算轮）。
+    st.wakeSeq = (Number(st.wakeSeq) || 0) + 1;
     saveSocialV2State();
     const promptText = buildWakePromptV2(key, reason);
     log(`[reserved2] 唤醒 ${key}（${reason}）`);
     const rollbackWakeTime = () => {
       const idx = st.wakeTimes.lastIndexOf(wakeTime);
       if (idx >= 0) st.wakeTimes.splice(idx, 1);
+      // 投递失败不算一轮真实唤醒：把 +1 退回去，否则「距上次别处动静」会被
+      // 失败重试偷走轮次，通知反而更难出现。
+      st.wakeSeq = Math.max(0, (Number(st.wakeSeq) || 0) - 1);
       saveSocialV2State();
     };
     try {
