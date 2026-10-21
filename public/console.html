@@ -7785,7 +7785,8 @@ async function identityRefreshNow() {
   identityBusy = true;
   if (button) button.disabled = true;
   try {
-    const r = await api('/api/socialV2/identity/refresh', 'POST');
+    // 空对象是必须的：api() 只有带 body 时才发 content-type，桥接的 POST 校验会 415。
+    const r = await api('/api/socialV2/identity/refresh', 'POST', {});
     if (!r || r.ok !== true) throw new Error((r && (r.error || r.reason)) || '桥接拒绝了这次刷新');
     showConsoleToast('名字表已刷新');
     identityFetchedAt = 0;

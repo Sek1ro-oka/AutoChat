@@ -64,7 +64,8 @@ console.log('## 读写接口');
 ok(/api\(identityUrl\(\)\)/.test(identityJs) && /'\/api\/socialV2\/identity\?' \+ params\.toString\(\)/.test(identityJs), 'GET /api/socialV2/identity?q=&limit= 读名字表');
 ok(/const IDENTITY_LIMIT = 50;/.test(identityJs) && /params\.set\('limit', String\(IDENTITY_LIMIT\)\)/.test(identityJs), '每页上限 50（limit 由常量带）');
 ok(/params\.set\('q', query\)/.test(identityJs) && /const query = identityQuery\.trim\(\);/.test(identityJs), '查询词先 trim 再进 q，空词不带 q');
-ok(/api\('\/api\/socialV2\/identity\/refresh', 'POST'\)/.test(identityJs), 'POST /api/socialV2/identity/refresh 手动同步一次');
+// 空对象 body 是硬要求：api() 只有带 body 才发 content-type，桥接 POST 校验会 415。
+ok(/api\('\/api\/socialV2\/identity\/refresh', 'POST', \{\}\)/.test(identityJs), 'POST /api/socialV2/identity/refresh 手动同步一次（必须带空 body）');
 ok(/showConsoleToast\('名字表已刷新'\)/.test(identityJs), '刷新成功 toast「名字表已刷新」');
 ok(/identityFetchedAt = 0;\s*\n\s*await refreshIdentity\(true\);/.test(identityJs), '刷新成功后立刻强拉当前搜索词');
 ok(/if \(button\) button\.disabled = true;/.test(identityJs) && /if \(button\) button\.disabled = false;/.test(identityJs), '刷新按钮在请求期间 disabled，结束后恢复');
