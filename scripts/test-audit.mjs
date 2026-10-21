@@ -165,6 +165,12 @@ const tests = [
   // 控制台「名字映射」面板（T-018 第四步）：导航与 section、搜索防抖、刷新 POST、
   // 视图守卫与 15 秒节流、五列表格与空态。只读 HTML。
   'test-console-identity.mjs',
+  // 小黑盒纯函数（T-022 第一步）：配置钳制、北京日界、日限与最小间隔、审计六种拒绝、
+  // 近似去重、跨日重置、错误码翻译、额度文案。零网络零磁盘。
+  'test-heybox-core.mjs',
+  // 小黑盒 MCP 工具（T-022 第二步）：假 CLI 桩验证 dry-run 不记账、真发记账 + 回读、
+  // 额度/审计/重复拦截、验证码暂停、错误映射。不碰真实 CLI 与真实 state/。
+  'test-heybox-tools.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

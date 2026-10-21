@@ -220,6 +220,14 @@ import {
   readIndex,
   saveIndexEntry
 } from './image-gen.js';
+// 小黑盒（T-022）：配置归一、日限 + 最小间隔的额度判定、评论内容审计、近似去重都是
+// src/heybox-core.js 的纯函数（零依赖、零 I/O、时钟由 now 注入）。桥接这边只用三处：
+//   - normalizeHeyboxConfig：loadConfig 里归一 config.json 的**顶层** heybox 段；
+//   - heyboxQuota：prompt 里现算「今天还能评几条」（只读快照，不写盘）；
+//   - parseUsage：读 MCP 子进程落的 state/heybox-usage.json（坏/缺都回落空账本）。
+// 真正发评论的闸门与记账在 src/mcp-heybox-safe.js 里，桥接不参与、也不起定时器。
+// 单行 import：scripts/audit-bridge-harness.mjs 按行剥顶层 import，单行不会踩多行剥错的坑。
+import { normalizeHeyboxConfig, heyboxQuota, parseUsage } from './heybox-core.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -266,6 +274,14 @@ const PROFILE_STATE_FILE = path.join(STATE_DIR, 'profile-changes.json');
 // 单独一个文件而不是塞进 social-v2.json：这张表最大能到 200 群 × 2000 成员，
 // 而 social-v2.json 每个会话都在频繁重写（saveSocialV2State），混在一起会把它撑爆。
 const IDENTITY_FILE = path.join(STATE_DIR, 'identity-map.json');
+
+// 小黑盒（T-022）：评论额度账本。形状 { day, count, lastTs, pausedUntil, pausedReason }，
+// 由 MCP 子进程在**每次真发**之后写（src/mcp-heybox-safe.js 的 USAGE_FILENAME），桥接这边
+// **只读** —— 一次 GET /api/socialV2/prompt 不该往 state/ 里落一个空账本。
+// 路径必须和 MCP 的落盘位置逐字一致：那边是 DEFAULT_STATE_DIR + 'heybox-usage.json'，
+// 也就是 state/heybox-usage.json。注意 dev-doc §二 的目录图写的是 state/heybox/usage.json，
+// 那是设计稿的旧写法；以 mcp-heybox-safe.js 的实际实现为准（否则 prompt 里的额度永远是 0）。
+const HEYBOX_USAGE_FILE = path.join(STATE_DIR, 'heybox-usage.json');
 
 // ── 生图 / 发图（T-017）：三份落盘位置 + 两个体积上限 ─────────────────────────
 // 图片本体（state/images/）、索引（哪张图在哪个文件）、额度账本（谁在什么时候画了 /
@@ -1263,6 +1279,15 @@ function loadConfig() {
     log(`[qzone] 老配置迁移：没有 windowCap，按 dailyCap=${legacyCap} 换算成「每 ${cfg.qzone.windowHours} 小时最多 ${cfg.qzone.windowCap} 条」；dailyCap / minIntervalMs 已不再参与限流（旧键保留在 config.json 里）`);
   }
 
+  // 小黑盒（T-022）：配置段在 config.json **顶层**的 heybox —— 与 qzone / file / bili 同级，
+  // 不在 socialV2 里（这是 T-022 dev-doc 定的口径；socialV2 只放"聊天行为"，工具类能力都在顶层）。
+  // 和 qzone 一样把归一全交给纯模块 src/heybox-core.js：缺字段补出厂默认（enabled: true、
+  // 评论关着、默认 dry-run）、数字类字段 clamp 到 HEYBOX_LIMITS，normalizeHeyboxConfig 永不抛。
+  // 所以「config.json 里没有 heybox 段」= 出厂默认（可读、可评论方向仍默认关），而**不是**
+  // undefined 一路传进端点被当成"没配置所以随便评"。这里只归一，不读盘、不建定时器。
+  // 注意取的是 file.heybox：cfg 的字面量里没有 heybox 键，写成 cfg.heybox 会永远是 undefined。
+  cfg.heybox = normalizeHeyboxConfig(file.heybox);
+
   // 人格卡注入上限（字符）。历史硬编码 6000，现在可配：每条约 4~6k token 的成本护栏。
   cfg.role = { maxInjectChars: ROLE_INJECT_MAX_CHARS_DEFAULT, ...(file.role ?? {}) };
   roleInjectMaxChars = applyRoleInjectLimit(cfg.role.maxInjectChars);
@@ -1941,6 +1966,22 @@ async function readImageIndex() {
 /** 记一条索引（同 id 替换；超过 IMAGE_INDEX_MAX 条删最旧文件，删文件失败忽略）。 */
 async function writeImageIndex(entry) {
   return saveIndexEntry(IMAGE_INDEX_FILE, entry, IMAGE_INDEX_MAX);
+}
+
+// ── 小黑盒（T-022）：额度账本（只读） ───────────────────────────────────────
+// 判定逻辑（日限、最小/最大间隔、暂停窗口、评论审计、近似去重）全在 src/heybox-core.js，
+// 账本的**写**在 MCP 子进程（src/mcp-heybox-safe.js）。这里只读，且和 profile / affect /
+// images 一样不做进程内缓存：文件很小，手删 heybox-usage.json 就该立刻把计数清零。
+/**
+ * 读评论额度账本（纯读，不落盘）。
+ *
+ * 没有文件 / JSON 坏了 / 形状不对 → parseUsage 的出厂空账本（day 是 1970-01-01、count 0、
+ * pausedUntil 0），于是 heyboxQuota 算出「今天 0 条、还能评满额」。它接受对象、JSON 字符串
+ * 和 null，且永不抛，所以这里连 try 都省了 —— 这是 readImageUsage 的同款写法。
+ * 读接口绝不制造副作用：否则一次 GET /api/socialV2/prompt 就会往 state/ 里落一个空账本。
+ */
+function readHeyboxUsage() {
+  return parseUsage(readJsonSafe(HEYBOX_USAGE_FILE, null));
 }
 
 /**
@@ -8340,7 +8381,16 @@ async function main() {
             // 清单里没登记，模型不知道能查。总开关分别是 cross / identity / affect。
             recall: 'qq_recall',
             lookup: 'qq_lookup',
-            affectReport: 'qq_affect_report'
+            affectReport: 'qq_affect_report',
+            // 小黑盒（T-022）：刷首页 / 看帖 / 搜内容 / 发帖 / 评论。总开关是**顶层**
+            // cfg.heybox.enabled（缺省即开，与 normalizeHeyboxConfig 的默认一致）；评论
+            // 还多一道 allowComment —— 但那是提示词层面的事（见下面的 heybox 块），五个工具
+            // 一起跟总开关走：关掉就整组消失，模型看不到就不会对着 403 反复试。
+            heyboxStatus: 'heybox_status',
+            heyboxFeed: 'heybox_feed',
+            heyboxPost: 'heybox_post',
+            heyboxSearch: 'heybox_search',
+            heyboxComment: 'heybox_comment'
           };
           const tools = cfg.socialV2?.tools ?? {};
           const stickerToolFlags = new Set(['listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker']);
@@ -8361,9 +8411,16 @@ async function main() {
           const crossEnabled = cfg.socialV2?.cross?.enabled !== false;
           const identityEnabled = cfg.socialV2?.identity?.enabled !== false;
           const affectEnabled = cfg.socialV2?.affect?.enabled !== false;
+          // 小黑盒（T-022）：总开关是顶层 cfg.heybox.enabled（loadConfig 已归一，缺省即开）。
+          // 关掉时五个工具一起从清单里消失 —— 与 profile / images 同一套「模型看不到就不会
+          // 去试，省得对着 403 反复调」。判据用 `!== false`：没写这一段也照常可用。
+          // hb 在这里取一次，下面的 heybox prompt 块复用（只读快照，不写盘）。
+          const hb = cfg.heybox;
+          const heyboxToolFlags = new Set(['heyboxStatus', 'heyboxFeed', 'heyboxPost', 'heyboxSearch', 'heyboxComment']);
+          const heyboxEnabled = hb?.enabled !== false;
           const enabledTools = [];
           for (const [flag, name] of Object.entries(toolMap)) {
-            if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled()) && !(profileToolFlags.has(flag) && !profileEnabled) && !(imageToolFlags.has(flag) && (!imagesEnabled || (flag === 'drawImage' && !drawEnabled))) && !(flag === 'recall' && !crossEnabled) && !(flag === 'lookup' && !identityEnabled) && !(flag === 'affectReport' && !affectEnabled)) enabledTools.push(name);
+            if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled()) && !(profileToolFlags.has(flag) && !profileEnabled) && !(imageToolFlags.has(flag) && (!imagesEnabled || (flag === 'drawImage' && !drawEnabled))) && !(flag === 'recall' && !crossEnabled) && !(flag === 'lookup' && !identityEnabled) && !(flag === 'affectReport' && !affectEnabled) && !(heyboxToolFlags.has(flag) && !heyboxEnabled) && !(flag === 'heyboxComment' && hb?.allowComment !== true)) enabledTools.push(name);
           }
           sendJson({
             ok: true,
@@ -8508,6 +8565,36 @@ async function main() {
                 hint: others.length
                   ? 'recent 是同组其它会话最近的消息（带出处，已经在眼前）；要更早或更细的用 qq_recall 查；要说话就用带 key 的发送工具，同组互发不需要额外权限。'
                   : '这个会话暂时没有和别的会话互通。'
+              };
+            })(),
+            // 小黑盒（T-022）：只读快照 —— 开关、评论额度、工具清单与一句话提示。
+            // 额度用 heyboxQuota（纯函数）现算，读的是 MCP 子进程落的 state/heybox-usage.json；
+            // 这里**不写盘、不起定时器**：一次 GET /api/socialV2/prompt 不该有任何副作用。
+            // 评论没开时不列 heybox_comment（allowComment 出厂就是关的），dryRunDefault 让模型
+            // 知道"默认只演练、不会真发"——这两条都是提示词层面的软闸门，硬闸门在 MCP 里。
+            heybox: (() => {
+              if (!heyboxEnabled) return { enabled: false };
+              const quota = heyboxQuota(readHeyboxUsage(), hb, Date.now());
+              return {
+                enabled: true,
+                allowComment: hb.allowComment === true,
+                dryRunDefault: hb.dryRunDefault !== false,
+                quota: {
+                  usedToday: quota.usedToday,
+                  remaining: quota.remaining,
+                  dailyComments: quota.dailyComments
+                },
+                tools: [
+                  'heybox_status',
+                  'heybox_feed',
+                  'heybox_post',
+                  'heybox_search',
+                  ...(hb.allowComment ? ['heybox_comment'] : [])
+                ],
+                hint: '小黑盒：用 heybox_feed 刷首页、heybox_post 看帖、heybox_search 搜内容；'
+                  + (hb.allowComment
+                    ? '真心想回一句时才用 heybox_comment（默认 dry-run，不会真发）。'
+                    : '评论能力默认关着，不要尝试。')
               };
             })(),
             replyTiming: replyTimingV2(st),

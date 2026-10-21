@@ -58,6 +58,16 @@
     "ugcRight": 4,
     "maxChars": 300
   },
+  "heybox": {
+    "enabled": true,
+    "allowComment": false,
+    "dryRunDefault": true,
+    "dailyComments": 10,
+    "minGapMs": 360000,
+    "maxGapMs": 1200000,
+    "postMaxChars": 200,
+    "cliPath": "xiaoheihe-cli"
+  },
   "ownerQQ": null,
   "sessionCwd": "",
   "agentPreset": "qq-chat",

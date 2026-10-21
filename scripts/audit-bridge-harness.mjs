@@ -76,6 +76,15 @@ import * as imageGen from '../src/image-gen.js';
 // apply* / identityKey / lookupIdentity / identityPromptBlock / formatIdentityRows
 // 与其它 spread 模块均不重名。
 import * as identityCore from '../src/identity-core.js';
+// 小黑盒（T-022）：heybox-core 是纯逻辑模块（北京日界 / 配置归一 / 日限与最小间隔 /
+// 评论内容审计 / 近似去重 / 账本序列化，零依赖、零 I/O、时钟由 now 注入）。bridge.js 顶层
+// import 会被下面按行剥掉，这里补上同名绑定：loadConfig 期间就调 normalizeHeyboxConfig，
+// prompt 的 heybox 块又会调 parseUsage + heyboxQuota，少了这一行 VM 里立刻 ReferenceError
+// → 所有走 VM 的用例一起红（与 cross / image / profile / identity 同理）。
+// 导出名已核对：13 个导出（HEYBOX_* / dayKeyOf / normalizeHeyboxConfig / heyboxQuota /
+// auditComment / nearDuplicate / createHeyboxState / recordAction / parseUsage /
+// serializeUsage / describeCliError / commentReasonText）与其它 spread 模块均不重名。
+import * as heyboxCore from '../src/heybox-core.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -221,6 +230,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...crossCore,
     ...imageCore, ...imageGen,
     ...identityCore,
+    ...heyboxCore,
     ...affectCore, ...affectVent, ...affectText,
     ...profileCore,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的

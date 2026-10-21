@@ -22,6 +22,9 @@ import { serializeModelData } from './qq-model-view.js';
 // 名字表查询的文案格式化是纯函数（零 IO），放 identity-core，桥接与 MCP 共用一套
 // 「私聊 名字（QQ 123）→ private:123」的 label 格式，避免两边各写一份慢慢漂移。
 import { formatIdentityRows } from './identity-core.js';
+// 小黑盒的 5 个 heybox_* 工具注册在这里（T-022）：DSH 的 MCP server 清单启动时固定，
+// 新增独立 server 要重启 DSH 才生效，所以日常运行挂在 snowluma 这个已有的 server 上。
+import { registerHeyboxTools } from './heybox-tools.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -2347,5 +2350,12 @@ server.tool(
     }
   }
 );
+
+// 小黑盒工具单独兜一层：heybox 的依赖或注册出问题，不能把整个 snowluma server 拖死。
+try {
+  registerHeyboxTools(server);
+} catch (err) {
+  console.error('[heybox] 工具注册失败：' + (err?.message || err));
+}
 
 await server.connect(new StdioServerTransport());

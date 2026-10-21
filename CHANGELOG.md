@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+### 小黑盒：看帖、搜索与自主评论（2026-10-21，T-022）
+
+- 新增五个 MCP 工具（注册进 snowluma 服务器，随 DSH 重拉子进程生效）：`heybox_status`（登录态 + 今日额度）、`heybox_feed`（首页推荐，返回链接 id 与摘要）、`heybox_post`（正文 + 前 20 条评论）、`heybox_search`（搜帖子/游戏/话题/用户）、`heybox_comment`（发评论，默认 dry-run）。
+- 底层用 `xiaoheihe-cli`（Python，扫码登录一次，Cookie 只存在它自己的会话文件里）；spawn 前清空所有代理环境变量——本机 `NO_PROXY` 里的 `[::1]` 会让 httpx 0.28 抛 `Invalid port: ':1]'`。
+- 评论硬闸门全在 `src/heybox-core.js` 纯函数里：日限 10 条、两条间隔 6–20 分钟、内容审计（长度 / 链接 / 手机号 / 邮箱 / 身份证 / 拉人 / 纯表情 / 连续复读）、与最近 5 条近似去重（3-gram Jaccard ≥ 0.55）、默认 `dry-run`、真发后回读校验（找不到只标 `verified:false`，不改记账）。
+- 出厂 `heybox.allowComment=false`（只读能上线，评论要显式打开）；验证码即暂停到当日 24:00 并写明原因；每次真发与失败都写 `state/heybox-actions.jsonl`。
+- 配置在 `config.json` **顶层** `heybox` 段（与 `qzone` / `file` / `bili` 同级），缺段即出厂默认；prompt 的 `heybox` 块只给额度与工具名，`allowComment=false` 时不列 `heybox_comment`。
+- 已知限制：小黑盒**搜索端点**比其它接口更容易触发验证码（连发几次就会被要），搜太勤时模型会收到 `captcha`，隔一会儿再试即可。
+
 ### qq_recall 限流改成控制台可调（2026-10-21，T-021）
 
 - 新增 `socialV2.cross.recallWindowMs`（60 秒–60 分钟，默认 5 分钟）与 `recallMaxPerWindow`（0–100，默认 3，**0 = 不限次数**）。

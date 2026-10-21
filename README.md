@@ -100,6 +100,7 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
   - 一代仿真模式（`reserved`）按空格分句：AI 用空格表示拆成多条消息；中英文/数字之间的空格也会被当成分条信号，不想分条就不要加空格（`reserved2` 不适用，分条请用 `qq_send_message` 数组）
   - **私聊群聊互通（跨渠道）**：会话按「编号」分组，同号互通的会话共用一个记忆池——prompt 里自动带上同组其它会话最近几条消息（默认 5 条 / 2 小时内，带出处），更早或更细的用 `qq_recall` 按需检索（默认每会话 5 分钟 3 次，控制台可调，0 = 不限）、共享成员印象与日记本；编号 `0` = 不共享。同组内 AI 可以跨会话发言（拿本会话令牌就能发到同组另一个群/私聊），不同编号仍然 403。控制台「跨渠道互通」页改编号，「名字映射」页可搜好友/群/群成员的名字与号码（`qq_lookup`），配置在 `socialV2.cross` / `socialV2.identity`
   - **生图与资料**：AI 可以自己画图（`qq_draw_image`，Pollinations 免登录直连，中文提示词即可），画完能直接发到会话（`qq_send_image`）、存进收藏表情（`qq_save_sticker`）、或换成自己的头像（`qq_set_avatar`）。提示词先过长度/链接/联系方式/黑名单/真人照意图审计；额度硬闸门是出图 20 张/24 小时且两次至少隔 45 秒、收藏表情 5 个/24 小时、换头像 1 次/24 小时，上游 402 会把真实等待秒数转成 429。图片只存本机 `state/images/`，对外域名只认 `image.pollinations.ai` 与 `q1.qlogo.cn`。出图渠道质量不达标时可只关生图（`socialV2.images.generateEnabled: false`），发图、存表情、换头像不受影响
+  - **小黑盒（`heybox_*` 五个工具 + `src/heybox-core.js`）**：AI 可以刷小黑盒首页（`heybox_feed`）、看帖子和评论（`heybox_post`）、搜索（`heybox_search`），想回一句时用 `heybox_comment`。登录态由 `xiaoheihe-cli` 自己维护（扫码一次），桥接不读 Cookie。评论出厂**关闭**（`heybox.allowComment: false`），打开后依次过：日限 10 条 → 两条间隔 6–20 分钟 → 内容审计（长度/链接/联系方式/纯表情/复读）→ 与最近 5 条近似去重 → 默认 `dry-run` → 真发后回读校验；验证码即暂停到当日 24:00，所有写操作记 `state/heybox-actions.jsonl`
   - **社交自动化（出厂全关）**：桥接自己处理「同意入群邀请 / 进群后加群白名单 / 同意白名单群成员的好友申请 / 同意好友后加私聊白名单」，每个动作有每日额度（默认 5/3/5，`0` 是合法值）并私聊通知 `ownerQQ`；判定一律 fail-closed（只有 `true` 算开），全程写 `state/social-auto.jsonl` 审计。**主动加群做不到**——上游没有搜群/申请加群的接口。控制台「开关」页有开关卡片、今日额度与最近自动动作，详见 [docs/guides/SOCIAL-AUTO.md](docs/guides/SOCIAL-AUTO.md)
 
 ## 前置条件
