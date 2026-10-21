@@ -16,6 +16,11 @@
   `quoteTargetIsSelf`；两者都算「被点名」。
 - 回归：`test-audit-regressions.mjs` R17 故意把 `minQuietAfterNewMs` 设成 70 秒、`selfMentionQuietMs` 设成
   300ms，断言被 @ 后 5 秒内返回（实现若又被下限抬回去，这条会卡满 70 秒而失败）。
+- **修掉「两次 wait 之间的消息会被吞」**（这才是「@ 了没反应」的真正主因）：`/api/socialV2/wait` 的基线
+  从「最后一条消息序号」改成「模型已读水位（`readThroughSeq`）」。原来如果消息落在「上一次 wait 已返回、
+  下一次 wait 还没发起」的几秒缝里，它既不在这次 wait 的 newMessages 里、下次 wait 又只看更新的，
+  于是一次都没送到模型眼前。现在没展示过的消息会作为 backlog 一起交出去。
+  回归：R18 —— 消息在 wait 之前到达，断言 `arrived=true` 且 `newMessages` 里包含那条 @。
 
 ### 小黑盒：验证码自动暂停与评论 id 回读（2026-10-21，T-022 收尾）
 

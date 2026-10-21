@@ -1,4 +1,4 @@
-// 全项目体检后的「已确认缺陷」回归：每条都钉住一个真实故障形态，
+﻿// 全项目体检后的「已确认缺陷」回归：每条都钉住一个真实故障形态，
 // 防止以后有人在不知情的情况下改回去。
 //
 // 覆盖（对应体检报告里的编号）：
@@ -464,9 +464,36 @@ await test('R17 被点名的消息把静默窗口收紧到 selfMentionQuietMs，
   } finally { await h.close(); }
 });
 
+// ── R18. 两次 wait 之间到达的消息不得被吞 ──────────────────────────────────
+// 事故（2026-10-21）：群友的 @ 落在「上一次 wait 已返回、下一次 wait 还没发起」的缝里。
+// 老实现把基线设成「最后一条消息序号」，下一次 wait 只取比它更新的消息 —— 于是这条 @
+// 一次都没送到模型眼前，用户看到的就是「@ 了没反应」。
+await test('R18 两次 wait 之间到达的消息会作为 backlog 交出，而不是被跳过', async () => {
+  const h = await bridgeHarness({
+    config: { socialV2: { wait: { minMs: 200, maxMs: 30000, defaultQuietMs: 200, minQuietAfterNewMs: 200, selfMentionQuietMs: 200 } } }
+  });
+  try {
+    h.setMode('reserved2');
+    const token = h.getSocialV2State('group:456').agentToken;
+    // 关键：消息在 wait 之前就到（模拟「缝里到达」）
+    h.appendSocialV2Message('group:456', '群友A', '@南溟 在吗', '@南溟 在吗', false, false, 'msg-9101', [], '999', [], true);
+    await withServer(h, async (port) => {
+      const res = await call(port, '/api/socialV2/wait', {
+        method: 'POST', token, body: { key: 'group:456', purpose: 'messages', timeoutMs: 3000, quietMs: 200 }
+      });
+      assert.equal(res.status, 200, JSON.stringify(res.body));
+      assert.equal(res.json?.arrived, true, '已缓冲的未展示消息必须算作 arrived');
+      const texts = (res.json?.newMessages || []).map((m) => String(m?.plain || m?.text || ''));
+      assert.ok(texts.some((t) => t.includes('在吗')), `newMessages 必须包含那条 @（实得 ${JSON.stringify(texts)}）`);
+    });
+  } finally { await h.close(); }
+});
+
 if (failures) {
   console.error(`\n${failures} 项失败`);
   process.exitCode = 1;
 } else {
   console.log('\n全部通过');
 }
+
+

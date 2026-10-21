@@ -10073,7 +10073,15 @@ async function main() {
           // A reply wait must also include messages received while the model
           // was reading/thinking after its snapshot, before this HTTP request.
           const requestSeq = st.lastUnreadSeq || 0;
-          const baseline = replyWait && (v2ToolEnabled('getUnread') || v2ToolEnabled('getRecent')) ? readThroughSeqV2(st) : requestSeq;
+          // 基线用「模型已读水位」而不是「最后一条消息序号」：
+          // 用后者时，**上一次 wait 返回到这一次 wait 发起之间**到达的消息会被永远跳过
+          // —— 2026-10-21 群友的 @ 就是这样一次都没送到模型眼前（wait 返回时它还没到，
+          // 下一次 wait 又把基线抬到了它后面）。readThrough 只认「已给模型看过的序号」，
+          // 没被展示过的消息会作为 backlog 一起交出去。
+          const modelReadSeq = readThroughSeqV2(st);
+          const baseline = replyWait
+            ? ((v2ToolEnabled('getUnread') || v2ToolEnabled('getRecent')) ? modelReadSeq : requestSeq)
+            : modelReadSeq;
           const start = Date.now();
           let arrived = false;
           let lastNewAt = 0;
