@@ -14,9 +14,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { createGrant } from '../src/device-grant.js';
 import { serializeDeviceState } from '../src/device-core.js';
 import {
   DEVICE_ACTION_LOG,
+  DEVICE_GRANT_FILE,
   DEVICE_SHOT_DIR,
   DEVICE_STATE_FILE,
   DEVICE_TOOL_NAMES,
@@ -110,11 +112,21 @@ function makeRunAdb(routes) {
 /**
  * 造一套工具：独立临时 state 目录 + 假 adb + 可拨的时钟。
  * `seed` 会先写进 device-state.json（模拟「昨天/今天已经玩过」）。
+ *
+ * 授权（T-024）默认**是有效的**（`grant` 缺省 `makeGrant()`）：否则每个用例都会先撞
+ * `not_granted`，把「预算 / 黑名单 / 收尾」这些本来要验的东西全挡住。
+ * 要验没授权就用 `grant: null`，要验过期/撤销就传一份改过的授权对象。
+ * `grantFile` 可以换一个路径（验「测试可注入临时路径」这条）。
  */
-function makeEnv({ device = {}, routes = {}, seed = null, clock = T0 } = {}) {
+function makeEnv({ device = {}, routes = {}, seed = null, clock = T0, grant = makeGrant(), grantFile = null } = {}) {
   const dir = fs.mkdtempSync(path.join(TMP_ROOT, 'env-'));
   fs.mkdirSync(dir, { recursive: true });
   if (seed) fs.writeFileSync(path.join(dir, DEVICE_STATE_FILE), serializeDeviceState(seed), 'utf8');
+  const grantPath = grantFile === null ? path.join(dir, DEVICE_GRANT_FILE) : grantFile;
+  if (grant) {
+    fs.mkdirSync(path.dirname(grantPath), { recursive: true });
+    fs.writeFileSync(grantPath, JSON.stringify(grant), 'utf8');
+  }
   const runAdb = makeRunAdb({ ...baseRoutes(), ...routes });
   let at = clock;
   const tools = createDeviceTools({
@@ -122,11 +134,13 @@ function makeEnv({ device = {}, routes = {}, seed = null, clock = T0 } = {}) {
     readConfig: () => ({ device }),
     now: () => at,
     stateDir: dir,
+    ...(grantFile === null ? {} : { grantFile }),
   });
   return {
     dir,
     runAdb,
     tools,
+    grantPath,
     now: () => at,
     advance: (ms) => {
       at += ms;
@@ -139,6 +153,16 @@ function makeEnv({ device = {}, routes = {}, seed = null, clock = T0 } = {}) {
         return null;
       }
     },
+    readGrant: () => {
+      try {
+        return JSON.parse(fs.readFileSync(grantPath, 'utf8'));
+      } catch {
+        return null;
+      }
+    },
+    writeGrant: (value) => {
+      fs.writeFileSync(grantPath, JSON.stringify(value), 'utf8');
+    },
     stateExists: () => fs.existsSync(path.join(dir, DEVICE_STATE_FILE)),
     actionLog: () => {
       try {
@@ -148,6 +172,11 @@ function makeEnv({ device = {}, routes = {}, seed = null, clock = T0 } = {}) {
       }
     },
   };
+}
+
+/** 缺省授权：管理员 1691642607 在 T0 说了一句「去玩平板 30 分钟」。 */
+function makeGrant(overrides = {}) {
+  return { ...createGrant(T0, { grantedBy: 1691642607, viaKey: 'private:1691642607', minutes: 30 }), ...overrides };
 }
 
 /** 今天还没玩的状态。 */
@@ -571,6 +600,8 @@ const YESTERDAY_FULL = { day: '2026-03-14', usedMs: 30 * MIN, steps: 60, lastTs:
 {
   const dir = fs.mkdtempSync(path.join(TMP_ROOT, 'register-'));
   fs.writeFileSync(path.join(dir, DEVICE_STATE_FILE), serializeDeviceState(todayState()), 'utf8');
+  // 注册层不传 grantFile，所以授权文件要落在 stateDir 下的默认位置（否则每个工具都 not_granted）。
+  fs.writeFileSync(path.join(dir, DEVICE_GRANT_FILE), JSON.stringify(makeGrant()), 'utf8');
   const runAdb = makeRunAdb({ ...baseRoutes(), screencap: { ok: true, code: 0, stderr: '', stdout: '', stdoutBuffer: makePng(800, 1280) } });
   const registered = [];
   const server = { tool: (name, description, schema, handler) => registered.push({ name, description, schema, handler }) };
@@ -626,6 +657,8 @@ const YESTERDAY_FULL = { day: '2026-03-14', usedMs: 30 * MIN, steps: 60, lastTs:
 {
   const captured = [];
   const boomDir = fs.mkdtempSync(path.join(TMP_ROOT, 'boom-'));
+  // 授权先给上：这个用例验的是「adb 抛异常也要兜住」，不能先被 not_granted 拦住。
+  fs.writeFileSync(path.join(boomDir, DEVICE_GRANT_FILE), JSON.stringify(makeGrant()), 'utf8');
   registerDeviceTools(
     { tool: (name, description, schema, handler) => captured.push({ name, handler }) },
     {
@@ -803,6 +836,101 @@ const YESTERDAY_FULL = { day: '2026-03-14', usedMs: 30 * MIN, steps: 60, lastTs:
   check('额度用完仍可列应用', exhausted.ok === true, exhausted);
   const noDev = await makeEnv({ routes: { devices: okReply('List of devices attached\n') } }).tools.deviceListApps();
   check('没设备 → no_device', noDev.ok === false && noDev.reason === 'no_device');
+}
+
+// ── 14. 授权闸门（T-024） ─────────────────────────────────────────────────
+{
+  // ① 没授权：每个工具都拒，且**不碰 adb、不记步**
+  const env = makeEnv({ grant: null });
+  const tap = await env.tools.deviceTap({ x: 10, y: 20 });
+  check('无授权 device_tap 被拒', tap.ok === false && tap.reason === 'not_granted', tap);
+  check('无授权提示要管理员说「去玩平板」', String(tap.message).includes('去玩平板'), tap.message);
+  check('无授权回执带 granted:false / canPlay:false', tap.granted === false && tap.canPlay === false);
+  check('无授权时一次 adb 都没调', env.runAdb.calls.length === 0, env.runAdb.calls.length);
+  check('无授权不写 device-state.json（不记步）', env.stateExists() === false);
+  check('无授权不写动作日志', env.actionLog() === '');
+
+  const swipe = await env.tools.deviceSwipe({ x1: 0, y1: 0, x2: 10, y2: 10 });
+  check('无授权 device_swipe 也被拒', swipe.reason === 'not_granted', swipe);
+  const typed = await env.tools.deviceType({ text: 'hi' });
+  check('无授权 device_type 也被拒', typed.reason === 'not_granted', typed);
+  const key = await env.tools.deviceKey({ key: 'home' });
+  check('无授权 device_key 也被拒（home 逃生口也不通）', key.reason === 'not_granted', key);
+  const openApp = await env.tools.deviceOpenApp({ package: 'com.example.game' });
+  check('无授权 device_open_app 也被拒', openApp.reason === 'not_granted', openApp);
+  const listApps = await env.tools.deviceListApps();
+  check('无授权 device_list_apps 也被拒（只读工具同样要授权）', listApps.reason === 'not_granted', listApps);
+  const shot = await env.tools.deviceScreenshot();
+  check('无授权 device_screenshot 也被拒', shot.reason === 'not_granted', shot);
+  check('以上全拒之后仍然没有 adb 调用', env.runAdb.calls.length === 0, env.runAdb.calls.length);
+  check('以上全拒之后仍然没有状态文件', env.stateExists() === false);
+
+  // ② status 是唯一的例外：能回答，但必须说清楚「不能玩」
+  const status = await env.tools.deviceStatus();
+  check('无授权 device_status 仍能回答', status.ok === true, status);
+  check('无授权 status 带 granted:false', status.granted === false, status.granted);
+  check('无授权 status 的 canPlay:false', status.canPlay === false, status.canPlay);
+  check('无授权 status 不带 grant 详情', status.grant === null, status.grant);
+  check('无授权 status 的 grantMessage 说明还没授权', String(status.grantMessage).includes('还没有'), status.grantMessage);
+  check('无授权 status 仍然报设备信息', status.connected === true && status.battery.level === 87);
+  check('无授权 status 不消耗步数', env.stateExists() === false);
+
+  // ③ 有授权：照常干活、照常记步
+  const allowed = makeEnv({ seed: todayState() });
+  const allowedTap = await allowed.tools.deviceTap({ x: 3, y: 4 });
+  check('有授权时 device_tap 正常', allowedTap.ok === true, allowedTap);
+  check('有授权时真的调了 adb', allowed.runAdb.count('input tap') === 1);
+  check('有授权时记了一步', allowed.readState()?.steps === 1);
+  const allowedStatus = await allowed.tools.deviceStatus();
+  check('有授权时 status 带 granted:true', allowedStatus.granted === true);
+  check('有授权时 status 带剩余分钟', allowedStatus.grant?.leftMinutes === 30, allowedStatus.grant);
+  // 刚点完还在 minGapMs 冷却里，往前拨 1.5 秒再看额度（否则 canPlay 会被 cooldown 判 false）。
+  allowed.advance(1500);
+  check('有授权时 status 的 canPlay 由额度决定', (await allowed.tools.deviceStatus()).canPlay === true);
+
+  // ④ 授权过期：与「从来没授权」分开说
+  const expiredEnv = makeEnv({ seed: todayState(), grant: makeGrant({ expiresAt: T0 - 1 }) });
+  const expiredTap = await expiredEnv.tools.deviceTap({ x: 1, y: 1 });
+  check('授权过期 → not_granted', expiredTap.reason === 'not_granted', expiredTap);
+  check('授权过期文案点名「过期」', String(expiredTap.message).includes('过期'), expiredTap.message);
+  check('授权过期不调 adb', expiredEnv.runAdb.calls.length === 0);
+  const expiredStatus = await expiredEnv.tools.deviceStatus();
+  check('授权过期 status 的 granted:false / canPlay:false', expiredStatus.granted === false && expiredStatus.canPlay === false);
+  check('授权过期 status 说「过期」', String(expiredStatus.grantMessage).includes('过期'), expiredStatus.grantMessage);
+
+  // ⑤ 撤销：立刻失效（哪怕 expiresAt 还没到）
+  const revokedEnv = makeEnv({ seed: todayState(), grant: makeGrant({ revokedAt: T0 - 1000 }) });
+  const revokedTap = await revokedEnv.tools.deviceTap({ x: 2, y: 2 });
+  check('撤销后 → not_granted', revokedTap.reason === 'not_granted', revokedTap);
+  check('撤销文案点名「撤销」', String(revokedTap.message).includes('撤销'), revokedTap.message);
+
+  // ⑥ 时间往前走：同一个 env 里「先能玩、到点就不能玩」
+  const live = makeEnv({ seed: todayState(), grant: makeGrant({ minutes: 5, expiresAt: T0 + 5 * MIN }) });
+  const before = await live.tools.deviceTap({ x: 5, y: 5 });
+  check('授权期内可以动', before.ok === true, before);
+  live.advance(5 * MIN);
+  const after = await live.tools.deviceTap({ x: 6, y: 6 });
+  check('授权到期那一刻就不能动', after.ok === false && after.reason === 'not_granted', after);
+
+  // ⑦ 坏授权文件只能是「没授权」（fail-closed）
+  const broken = makeEnv({ grant: null });
+  fs.writeFileSync(broken.grantPath, '{ not json', 'utf8');
+  const brokenTap = await broken.tools.deviceTap({ x: 1, y: 1 });
+  check('授权文件坏 JSON → not_granted', brokenTap.reason === 'not_granted', brokenTap);
+  check('授权文件坏 JSON 不调 adb', broken.runAdb.calls.length === 0);
+
+  // ⑧ grantFile 可注入：授权放在别的目录也能被读到
+  const outer = fs.mkdtempSync(path.join(TMP_ROOT, 'grant-'));
+  const customGrantPath = path.join(outer, 'custom-grant.json');
+  fs.writeFileSync(customGrantPath, JSON.stringify(makeGrant()), 'utf8');
+  const custom = makeEnv({ seed: todayState(), grant: null, grantFile: customGrantPath });
+  const customTap = await custom.tools.deviceTap({ x: 7, y: 8 });
+  check('grantFile 注入的自定义路径生效', customTap.ok === true, customTap);
+  check('默认路径没有授权文件（确认读的是注入的那份）', fs.existsSync(path.join(custom.dir, DEVICE_GRANT_FILE)) === false);
+
+  // ⑨ 授权与预算互不替代：额度用完，授权在也照样拒
+  const noBudget = await makeEnv({ seed: todayState({ usedMs: 30 * MIN, steps: 60 }) }).tools.deviceTap({ x: 9, y: 9 });
+  check('授权在、额度用完 → daily_budget（不是 not_granted）', noBudget.reason === 'daily_budget', noBudget);
 }
 
 // ── 清理与结果 ──────────────────────────────────────────────────────────────

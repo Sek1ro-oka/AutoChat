@@ -13,6 +13,11 @@
  * 跑法：
  *   node scripts/smoke-device.mjs                      （npm run smoke:device）
  *   node scripts/smoke-device.mjs --state-dir state/device-smoke   （独立账本，不占正式额度）
+ *   node scripts/smoke-device.mjs --grant              （给当前 state 目录写一份 10 分钟的临时授权）
+ *
+ * 授权（T-024）：脚本**不替你授权**。没有有效授权时 `device_status` 会如实回 `granted:false`，
+ * 后面的动作都会被 `not_granted` 挡住 —— 这正是要验的契约。要跑动作就加 `--grant`，
+ * 它等价于管理员说了句「去玩平板 10 分钟」（同目录下的 `state/device-grant.json`）。
  *
  * 代价：tap / swipe / key / open_app 每一步都会**真的动一下平板**，并按正式账本记 3–4 步
  * （截图与列应用不记步）。平板没连上时第一步就退出，不会空转、不会瞎点。
@@ -23,6 +28,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { expandEnvPath, normalizeDeviceConfig } from '../src/device-core.js';
+import { DEVICE_GRANT_FILE, createGrant } from '../src/device-grant.js';
 import { DEFAULT_STATE_DIR, createDeviceTools, defaultReadConfig } from '../src/device-tools.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -90,6 +96,21 @@ async function main() {
   }
 
   const tools = createDeviceTools({ stateDir });
+
+  // 授权闸门（T-024）：默认**不碰**授权文件 —— 没授权时 status 会如实回 `granted:false`，
+  // 这本身就是一条要验的契约。加 `--grant` 才在**当前 state 目录**写一份 10 分钟的临时授权
+  // （等价于管理员说了句「去玩平板 10 分钟」；不传 --state-dir 时会覆盖正式的授权文件）。
+  const grantPath = path.join(stateDir, DEVICE_GRANT_FILE);
+  if (argv.includes('--grant')) {
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(grantPath, JSON.stringify(createGrant(Date.now(), {
+      grantedBy: (defaultReadConfig() ?? {}).ownerQQ ?? null,
+      viaKey: 'smoke:device',
+      minutes: 10,
+    })), 'utf8');
+    say(`已写入临时授权：${path.relative(ROOT, grantPath)}（10 分钟）`);
+    say('');
+  }
   // 两步之间至少等 minGapMs（默认 1 秒）+ 200ms 余量：闸门按毫秒卡，抖动会把第二步判成 cooldown。
   const gapMs = Math.max(200, cfg.minGapMs) + 200;
 
@@ -110,7 +131,17 @@ async function main() {
   pass('device_status', `${status.model || status.serial} · 电量 ${status.battery?.level ?? '?'}%`
     + ` · 屏幕 ${status.screen?.width}x${status.screen?.height}`
     + ` · 剩余 ${status.leftMinutes} 分钟 / ${status.leftSteps} 步`
+    + ` · 授权 ${status.granted === true ? `还有 ${status.grant?.leftMinutes ?? 0} 分钟` : '没有'}`
     + ` · 前台 ${status.foreground ?? '(解析不出)'}`);
+
+  // 授权（T-024）：没有授权就不是代码问题，后面每一步都只会得到 not_granted，直接停。
+  if (status.granted !== true) {
+    say(`❌ 没有玩平板的授权：${status.grantMessage}`);
+    say('   让管理员在 QQ 里说「去玩平板」之后重跑；或者加 `--grant` 给这个 state 目录写一份 10 分钟的临时授权。');
+    summary();
+    process.exitCode = 1;
+    return;
+  }
 
   // 额度 / 暂停：不是代码问题，继续跑只会得到一串假的失败，所以直接停。
   if (status.canPlay !== true) {

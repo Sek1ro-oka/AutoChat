@@ -11,19 +11,20 @@
  * 与状态文件名是「两侧必须逐字一致」的事实地来源 —— 断言它们与桥接里的字面量相等，
  * 比断言桥接里「有这八个字符串」更能挡住漂移。
  *
- * 断言分成十组：
+ * 断言分成十一组：
  *   一 bridge 的 device-core import     二 常量 + 配置归一
  *   三 读状态（只读、坏/缺兜底）        四 toolMap 八项
  *   五 enabledTools 过滤               六 prompt 的 device 块
  *   七 MCP 侧 import 与 try/catch       八 config.example.json 的 device 段
- *   九 测试接线（audit / harness / 夹具 / 冒烟脚本） 十 node --check
+ *   九 授权闸门（T-024：谁能授权 / 写盘 / 门控 / 日记 key）
+ *   十 测试接线（audit / harness / 夹具 / 冒烟脚本） 十一 node --check
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { DEVICE_DEFAULTS, normalizeDeviceConfig } from '../src/device-core.js';
-import { DEVICE_STATE_FILE as DEVICE_STATE_FILENAME, DEVICE_TOOL_NAMES } from '../src/device-tools.js';
+import { DEVICE_GRANT_FILE as DEVICE_GRANT_FILENAME, DEVICE_STATE_FILE as DEVICE_STATE_FILENAME, DEVICE_TOOL_NAMES } from '../src/device-tools.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
@@ -165,10 +166,12 @@ check('有 deviceEnabled 判据', bridge.includes('const deviceEnabled = cfg.dev
 check('判据用 !== false（缺省即开，与 normalizeDeviceConfig 默认一致）', bridge.includes('cfg.device?.enabled !== false'));
 check('deviceToolFlags 覆盖八个 flag', bridge.includes("const deviceToolFlags = new Set(['deviceStatus', 'deviceScreenshot', 'deviceTap', 'deviceSwipe', 'deviceType', 'deviceKey', 'deviceOpenApp', 'deviceListApps']);"));
 const filterLine = bridge.split('\n').find((line) => line.includes('enabledTools.push(name)')) ?? '';
-check('过滤条件串末尾追加 device 判据', filterLine.includes('&& !(deviceToolFlags.has(flag) && !deviceEnabled))'));
-check('device 判据在 push 之前（同一条 if 的最后一项）', filterLine.includes('&& !(deviceToolFlags.has(flag) && !deviceEnabled)) enabledTools.push(name)'));
+check('过滤条件串末尾追加 device 判据', filterLine.includes('&& !(deviceToolFlags.has(flag) && !deviceGranted))'));
+check('device 判据在 push 之前（同一条 if 的最后一项）', filterLine.includes('&& !(deviceToolFlags.has(flag) && !deviceGranted)) enabledTools.push(name)'));
 check('device 判据排在 heyboxComment 判据之后（不动既有顺序）', filterLine.indexOf('heyboxComment') < filterLine.indexOf('deviceToolFlags'));
 check('过滤只有一处 push（没有第二套 enabledTools 逻辑）', (bridge.match(/enabledTools\.push\(name\)/g) ?? []).length === 1);
+check('deviceGranted 由「功能开着 + 有效授权」共同决定', bridge.includes('const deviceGranted = deviceEnabled && isGrantActive(readDeviceGrant(), Date.now());'));
+check('没有有效授权时 device_* 不列进 enabledTools（模型看不到就不会试）', filterLine.includes('!(deviceToolFlags.has(flag) && !deviceGranted)'));
 
 // ── 六 prompt 的 device 块 ─────────────────────────────────────────────────
 console.log('\n六 prompt 的 device 块');
@@ -179,7 +182,7 @@ check('device 块在 replyTiming 之前（仍在同一个 payload 里）', lineO
 const deviceBlock = sliceBetween(bridge, 'device: (() => {', 'replyTiming: replyTimingV2(st),');
 check('device 块切片存在', deviceBlock.length > 200, deviceBlock.length);
 check('禁用时短路成 { enabled: false }（整段不注入）', deviceBlock.includes('if (!deviceEnabled) return { enabled: false };'));
-check('现算额度：devicePromptBlock(cfg.device, readDeviceState(), Date.now())', deviceBlock.includes('const block = devicePromptBlock(cfg.device, readDeviceState(), Date.now());'));
+check('现算额度：devicePromptBlock(cfg.device, readDeviceState(), nowMs)', deviceBlock.includes('const block = devicePromptBlock(cfg.device, readDeviceState(), nowMs);'));
 check('用 { ...block, tools } 合并（devicePromptBlock 只给 enabled/apps/budget/hint）', deviceBlock.includes('...block,'));
 check('tools 数组是八个工具名', deviceBlock.includes("tools: ['device_status', 'device_screenshot', 'device_tap', 'device_swipe', 'device_type', 'device_key', 'device_open_app', 'device_list_apps']"));
 const promptTools = (deviceBlock.match(/'(device_\w+)'/g) ?? []).map((s) => s.slice(1, -1));
@@ -188,6 +191,21 @@ check('device 块不写盘（只读快照）', !deviceBlock.includes('writeFileS
 check('device 块不起定时器（本轮不做主动唤醒）', !deviceBlock.includes('setInterval') && !deviceBlock.includes('setTimeout'));
 check('桥接不直接调 adb（闸门与执行都在 MCP 侧）', !bridge.includes('runAdb') && !bridge.includes('DEVICE_ACTION_LOG'));
 check('桥接没有新增 device 唤醒理由（主动去玩是下一步）', !bridge.includes('devicePlay'));
+
+// 授权分支（T-024）：未授权只给一句话、不给工具名；已授权才给八个 + 剩余分钟 + diaryKey。
+check('未授权分支 granted:false', deviceBlock.includes('granted: false'));
+check('未授权分支 tools 为空数组（模型看不到 device_*）', deviceBlock.includes('tools: []'));
+check('未授权 hint 写明「要先得到管理员许可」', deviceBlock.includes('想玩平板要先得到管理员许可'));
+check('未授权分支在 devicePromptBlock 之后（额度仍然照算）', deviceBlock.indexOf('devicePromptBlock(') < deviceBlock.indexOf('granted: false'));
+check('授权判据来自 grantSummary(readDeviceGrant(), nowMs)', deviceBlock.includes('grantSummary(readDeviceGrant(), nowMs)'));
+check('已授权分支 granted:true', deviceBlock.includes('granted: true'));
+check('已授权分支带 grant 详情（授权人 / 时长 / 步数 / 剩余分钟）', deviceBlock.includes('grant: {') && deviceBlock.includes('leftMinutes: summary.leftMinutes') && deviceBlock.includes('steps: summary.steps'));
+check('已授权分支带 diaryKey', deviceBlock.includes('diaryKey,'));
+check('日记 key = diaryKeyFor(private:授权人)（落到管理员的互通组日记本）', deviceBlock.includes('diaryKeyFor(`private:${grantedBy}`)'));
+check('日记 key 认不出授权人时退回空串（不写脏 key）', deviceBlock.includes(": '';") && deviceBlock.includes('const diaryKey = /^\\d{1,15}$/.test(grantedBy)'));
+check('已授权 hint 要求把经过写成日记到这个 key', deviceBlock.includes('玩完把这次玩的经过写成日记，写到这个 key'));
+check('已授权 hint 带本轮剩余分钟', deviceBlock.includes('本轮还剩 ${summary.leftMinutes} 分钟'));
+check('未授权分支排在已授权分支之前（先判授权再谈工具）', deviceBlock.indexOf('granted: false') < deviceBlock.indexOf('granted: true'));
 
 // ── 七 MCP 侧 import 与 try/catch ──────────────────────────────────────────
 console.log('\n七 MCP 侧 import 与 try/catch');
@@ -223,17 +241,73 @@ const normalizedExample = normalizeDeviceConfig(deviceCfg);
 check('样例值归一后等于出厂默认（adbPath 除外）', JSON.stringify({ ...normalizedExample, adbPath: '' }) === JSON.stringify({ ...DEVICE_DEFAULTS, adbPath: '' }), JSON.stringify(normalizedExample));
 check('样例里的黑名单归一后仍是内核五项（不多不少）', JSON.stringify(normalizedExample.blockedApps) === JSON.stringify([...DEVICE_DEFAULTS.blockedApps]));
 
-// ── 九 测试接线（audit / harness / 夹具） ──────────────────────────────────
-console.log('\n九 测试接线');
+// ── 九 授权闸门（T-024） ──────────────────────────────────────────────────
+console.log('\n九 授权闸门（T-024）');
+
+const GRANT_IMPORT = "import { DEVICE_GRANT_FILE, createGrant, grantSummary, isGrantActive, parseGrant, parseGrantIntent, revokeGrant } from './device-grant.js';";
+check('bridge 里有单行 device-grant import（harness 按行剥 import 的前提）', bridge.includes(GRANT_IMPORT));
+check('device-grant 的 import 只有一处', (bridge.match(/from '\.\/device-grant\.js'/g) ?? []).length === 1);
+check('device-grant import 在 device-core import 之后', lineOf(bridge, "from './device-grant.js'") > lineOf(bridge, "from './device-core.js'"));
+check('授权文件常量用模块导出的文件名拼路径（两侧不会漂）', bridge.includes('const DEVICE_GRANT_STATE_FILE = path.join(STATE_DIR, DEVICE_GRANT_FILE);'));
+check('授权文件名与 device-grant.js / device-tools.js 的导出逐字一致', DEVICE_GRANT_FILENAME === 'device-grant.json');
+check('授权常量紧跟 DEVICE_STATE_FILE（同一批「MCP 与桥接共用」的落盘位置）', (() => {
+  const at = lineOf(bridge, 'const DEVICE_GRANT_STATE_FILE');
+  const prev = lineOf(bridge, 'const DEVICE_STATE_FILE');
+  return at > prev && at - prev <= 12;
+})());
+
+const readGrantFn = extractFunction(bridge, 'function readDeviceGrant(');
+check('有 readDeviceGrant()（只读）', readGrantFn.length > 0);
+check('读授权走 parseGrant(readJsonSafe(授权文件, null))（坏/缺都回落空授权）', readGrantFn.includes('parseGrant(readJsonSafe(DEVICE_GRANT_STATE_FILE, null))'));
+check('读授权不写盘', !readGrantFn.includes('writeFileSync') && !readGrantFn.includes('atomicWriteJson'));
+const writeGrantFn = extractFunction(bridge, 'function writeDeviceGrant(');
+check('写授权走 atomicWriteJson（原子写）', writeGrantFn.includes('atomicWriteJson(DEVICE_GRANT_STATE_FILE, grant)'));
+check('写授权失败只记日志、不抛（一条消息不该弄崩桥接）', writeGrantFn.includes('log(') && writeGrantFn.includes('return false'));
+
+const adminSetFn = extractFunction(bridge, 'function deviceGrantAdminSet(');
+check('授权人集合包含 ownerQQ', adminSetFn.includes('add(cfg.ownerQQ)'));
+check('授权人集合包含 qzone.adminQQ', adminSetFn.includes('cfg.qzone?.adminQQ'));
+check('授权人集合包含 file.adminQQ', adminSetFn.includes('cfg.file?.adminQQ'));
+check('集合按十进制字符串归一（数字/字符串两种写法都认）', adminSetFn.includes('/^\\d{1,15}$/'));
+check('loadConfig 里补了 cfg.file.adminQQ（原本没有 file 段）', bridge.includes('cfg.file = { adminQQ: normalizeAdminQqList(file.file?.adminQQ) };'));
+check('adminQQ 列表归一接受数字与数字字符串', extractFunction(bridge, 'function normalizeAdminQqList(').includes('Number.isSafeInteger'));
+
+const applyFn = extractFunction(bridge, 'function applyDeviceGrantIntent(');
+check('授权用 createGrant（授权人 / 会话 / 分钟数）', applyFn.includes('createGrant(at, { grantedBy: senderQq, viaKey: key, minutes: intent.minutes })'));
+check('撤销用 revokeGrant（读旧授权 → 写新对象）', applyFn.includes('writeDeviceGrant(revokeGrant(current, at))'));
+check('从来没授权过时不造「空撤销」（否则 status 会说原定 30 分钟）', applyFn.includes('当前没有任何授权记录'));
+check('授权与撤销都写盘', (applyFn.match(/writeDeviceGrant\(/g) ?? []).length === 2);
+check('授权与撤销都留痕（log + appendActivity）', applyFn.includes('log(`[device]') && applyFn.includes('appendActivity('));
+
+check('入站消息先判「发送者在管理员集合里」', bridge.includes("if (senderQq !== '' && deviceGrantAdminSet().has(senderQq))"));
+check('入站口令交给 applyDeviceGrantIntent(key, senderQq, plainContent)', bridge.includes('applyDeviceGrantIntent(key, senderQq, plainContent)'));
+check('授权处理排在挂起提问之前（口令不被当成答案吞掉）', lineOf(bridge, 'applyDeviceGrantIntent(key, senderQq, plainContent)') < lineOf(bridge, 'await handlePendingAnswer(p, plainContent, key, isOwner)'));
+check('授权处理不吞消息（那段代码里没有 return）', (() => {
+  const slice = sliceBetween(bridge, 'const senderQq = String(event.user_id', 'const p = pending.get(key);');
+  return slice.length > 0 && !slice.includes('return');
+})());
+check('群友说的口令不算：权限判断就在调用点（模块本身不管权限）', !read('src/device-grant.js').includes('ownerQQ'));
+
+const grantModule = read('src/device-grant.js');
+check('device-grant 零 I/O（不读不写文件）', !grantModule.includes('readFileSync') && !grantModule.includes('writeFileSync') && !grantModule.includes('fs.'));
+check('device-grant 零 import（纯函数模块）', [...grantModule.matchAll(/^import .*$/gm)].length === 0);
+check('device-grant 不读系统时钟（now 由调用方注入）', !grantModule.includes('Date.now('));
+
+// ── 十 测试接线（audit / harness / 夹具） ──────────────────────────────────
+console.log('\n十 测试接线');
 
 check('test-audit 注册 test-device-core.mjs', testAudit.includes("'test-device-core.mjs'"));
 check('test-audit 注册 test-device-tools.mjs', testAudit.includes("'test-device-tools.mjs'"));
 check('test-audit 注册 test-device-wiring.mjs', testAudit.includes("'test-device-wiring.mjs'"));
+check('test-audit 注册 test-device-grant.mjs（T-024）', testAudit.includes("'test-device-grant.mjs'"));
 check('audit-bridge-harness import * as deviceCore', harness.includes("import * as deviceCore from '../src/device-core.js';"));
 check('audit-bridge-harness 把 deviceCore 展开进 VM context（否则 loadConfig 里 ReferenceError）', /\n\s+\.\.\.deviceCore,/.test(harness));
+check('audit-bridge-harness import * as deviceGrant', harness.includes("import * as deviceGrant from '../src/device-grant.js';"));
+check('audit-bridge-harness 把 deviceGrant 展开进 VM context（否则授权处 ReferenceError）', /\n\s+\.\.\.deviceGrant,/.test(harness));
 check('test-qq-model-view 夹具复制 device-tools.js', modelView.includes("'device-tools.js'"));
 check('test-qq-model-view 夹具复制 device-core.js', modelView.includes("'device-core.js'"));
-for (const rel of ['src/device-core.js', 'src/device-tools.js', 'scripts/test-device-wiring.mjs']) {
+check('test-qq-model-view 夹具复制 device-grant.js', modelView.includes("'device-grant.js'"));
+for (const rel of ['src/device-core.js', 'src/device-tools.js', 'src/device-grant.js', 'scripts/test-device-grant.mjs', 'scripts/test-device-wiring.mjs']) {
   check(`${rel} 存在`, fs.existsSync(path.join(ROOT, rel)));
 }
 
@@ -255,10 +329,10 @@ check('冒烟失败以非 0 退出', smoke.includes('process.exitCode = 1') && s
 check('冒烟脚本只用 node: 内置模块（零新依赖）', [...smoke.matchAll(/from '([^']+)'/g)].map((m) => m[1]).filter((spec) => !spec.startsWith('node:') && !spec.startsWith('.')).length === 0);
 check('冒烟脚本两步之间等 minGapMs', smoke.includes('cfg.minGapMs') && smoke.includes('await sleep(gapMs)'));
 
-// ── 十 node --check ────────────────────────────────────────────────────────
-console.log('\n十 node --check');
+// ── 十一 node --check ──────────────────────────────────────────────────────
+console.log('\n十一 node --check');
 
-for (const rel of ['src/bridge.js', 'src/mcp-snowluma-safe.js', 'scripts/test-device-wiring.mjs']) {
+for (const rel of ['src/bridge.js', 'src/mcp-snowluma-safe.js', 'src/device-grant.js', 'scripts/test-device-wiring.mjs']) {
   const checked = spawnSync(process.execPath, ['--check', path.join(ROOT, rel)], { encoding: 'utf8' });
   check(`${rel} 语法检查通过`, checked.status === 0, (checked.stderr ?? '').trim().split('\n')[0]);
 }

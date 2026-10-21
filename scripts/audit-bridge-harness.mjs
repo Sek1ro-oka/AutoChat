@@ -90,6 +90,15 @@ import * as heyboxCore from '../src/heybox-core.js';
 // 只把导出铺进 context（spread 的是 module namespace，不是 module 本体，不会触发 device-core
 // 里对 node:child_process 的引用）。导出名已核对 21 个，与其它 spread 模块均不重名。
 import * as deviceCore from '../src/device-core.js';
+// T-024：平板授权（device-grant）同样是纯逻辑模块（口令解析 / 授权对象 / 过期与撤销 / 摘要，
+// 零依赖、零 I/O、时钟由调用方传入）。bridge 顶层现在会：用 DEVICE_GRANT_FILE 拼授权文件路径、
+// handleIncoming 里对每个管理员消息调 parseGrantIntent + createGrant / revokeGrant / parseGrant、
+// prompt 的 device 块调 isGrantActive / grantSummary。import 行会被下面剥掉，必须在 context 里
+// 补同名绑定，否则「管理员说句话」这类用例会在 ReferenceError 上直接红。
+// 导出名已核对：DEVICE_GRANT_FILE / GRANT_LIMITS / GRANT_DEFAULTS / NOT_GRANTED_MESSAGE /
+// parseGrantIntent / createGrant / parseGrant / isGrantActive / grantRemainingMs / revokeGrant /
+// grantSummary，与其它 spread 模块均不重名。
+import * as deviceGrant from '../src/device-grant.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -237,6 +246,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...identityCore,
     ...heyboxCore,
     ...deviceCore,
+    ...deviceGrant,
     ...affectCore, ...affectVent, ...affectText,
     ...profileCore,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的

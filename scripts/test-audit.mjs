@@ -177,8 +177,12 @@ const tests = [
   // 平板 MCP 工具（T-023 第二步）：假 adb 桩验证七工具的参数校验、额度/间隔闸门、
   // 截图落盘与回读、状态记账、暂停窗口。不碰真实 adb 与真实 state/。
   'test-device-tools.mjs',
-  // 平板接线（T-023 第三步）：bridge 的 import/常量/归一/读状态/toolMap/过滤/prompt 块，
-  // MCP 侧的 import 与 try/catch 注册，config.example 的 device 段。只读源码。
+  // 平板授权（T-024）：口令解析（各种说法 / 分钟钳制 / 误伤反例）、授权对象的过期与撤销、
+  // 容错解析、grantSummary 文案。纯函数，零 I/O、零依赖。
+  'test-device-grant.mjs',
+  // 平板接线（T-023 第三步 + T-024 授权）：bridge 的 import/常量/归一/读状态/toolMap/过滤/
+  // prompt 块、授权人集合与写盘、日记 key，MCP 侧的 import 与 try/catch 注册。
+  // 只读源码。
   'test-device-wiring.mjs',
 ];
 let failed = 0;

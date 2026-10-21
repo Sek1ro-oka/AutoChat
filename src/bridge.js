@@ -237,6 +237,14 @@ import { normalizeHeyboxConfig, heyboxQuota, parseUsage } from './heybox-core.js
 // —— 本轮只做「模型会用工具」，主动去平板玩是下一步。
 // 单行 import：scripts/audit-bridge-harness.mjs 按行剥顶层 import，单行不会踩多行剥错的坑。
 import { normalizeDeviceConfig, createDeviceState, parseDeviceState, devicePromptBlock } from './device-core.js';
+// 平板授权（T-024）：device-grant 同样是纯逻辑模块（口令解析 / 授权对象 / 过期与撤销 / 摘要，
+// 零依赖、零 I/O、时钟由调用方传入）。桥接这边用它做三件事：
+//   ① parseGrantIntent：把**管理员**的一句话解析成「授权 / 撤销」（权限判断在桥接，不在模块里）；
+//   ② createGrant / revokeGrant / parseGrant：写 state/device-grant.json（桥接是唯一写入方）；
+//   ③ isGrantActive / grantSummary：prompt 与 enabledTools 的门控、以及给模型看的剩余分钟。
+// 硬闸门仍在 MCP 侧（src/device-tools.js 每个工具入口都读同一份文件），桥接只负责「谁能授权」。
+// 单行 import：scripts/audit-bridge-harness.mjs 按行剥顶层 import，单行不会踩多行剥错的坑。
+import { DEVICE_GRANT_FILE, createGrant, grantSummary, isGrantActive, parseGrant, parseGrantIntent, revokeGrant } from './device-grant.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -298,6 +306,13 @@ const HEYBOX_USAGE_FILE = path.join(STATE_DIR, 'heybox-usage.json');
 // 一次 GET /api/socialV2/prompt 不该往 state/ 里落一个空状态文件，那会让「今天还没玩」
 // 看起来像「已经玩过一轮」。路径必须和 MCP 的落盘位置逐字一致（state/device-state.json）。
 const DEVICE_STATE_FILE = path.join(STATE_DIR, 'device-state.json');
+
+// 平板授权（T-024）：**桥接是唯一写入方**（管理员在 QQ 里说「去玩平板」/「别玩了」时才写），
+// MCP 侧（src/device-tools.js）只读它做闸门。文件名只从 device-grant.js 取，两边不可能漂。
+// 形状见 createGrant：{ grantedBy, viaKey, grantedAt, expiresAt, minutes, steps, revokedAt }。
+// 注意：**不删除**过期/撤销的文件（撤销是改 revokedAt），手删它等于「立刻失去授权」，
+// 这是有意的复位手段。
+const DEVICE_GRANT_STATE_FILE = path.join(STATE_DIR, DEVICE_GRANT_FILE);
 
 // ── 生图 / 发图（T-017）：三份落盘位置 + 两个体积上限 ─────────────────────────
 // 图片本体（state/images/）、索引（哪张图在哪个文件）、额度账本（谁在什么时候画了 /
@@ -898,6 +913,22 @@ function normalizeIdList(value) {
   return value.map((v) => String(v).trim()).filter((v) => /^\d+$/.test(v));
 }
 
+/**
+ * 管理员名单规范化（qzone.adminQQ / file.adminQQ）：数字或数字字符串都认，
+ * 非正整数直接丢、去重后按数值升序（与 qzone-post.js 的 normalizeAdminQQ 同口径，
+ * 区别只是这里**也收字符串** —— config.json 是手写的，写成 "123" 不该静默失效）。
+ * 平板授权（T-024）要把这两份名单并进「谁能授权」的集合里，所以得先归一。
+ */
+function normalizeAdminQqList(value) {
+  if (!Array.isArray(value)) return [];
+  const kept = new Set();
+  for (const item of value) {
+    const n = Number(item);
+    if (Number.isSafeInteger(n) && n > 0) kept.add(n);
+  }
+  return [...kept].sort((a, b) => a - b);
+}
+
 // ── 配置 ────────────────────────────────────────────────────────────────────
 function loadConfig() {
   const p = path.join(ROOT, 'config.json');
@@ -1294,6 +1325,12 @@ function loadConfig() {
     const legacyCap = file.qzone?.dailyCap;
     log(`[qzone] 老配置迁移：没有 windowCap，按 dailyCap=${legacyCap} 换算成「每 ${cfg.qzone.windowHours} 小时最多 ${cfg.qzone.windowCap} 条」；dailyCap / minIntervalMs 已不再参与限流（旧键保留在 config.json 里）`);
   }
+
+  // 文件托管（file-safe）：桥接**只取 adminQQ 这一项**（T-024 的平板授权名单要把
+  // file.adminQQ 也算进来）。目录 / 体积上限 / 扩展名这些仍由 src/mcp-file-safe.js 自己读，
+  // 桥接不掺和文件能力的判定，也就不需要把整段配置搬进内存。
+  // 控制台改 file.adminQQ 后要重启才生效（与 qzone.adminQQ 一样），这一点写在 DEVICE.md。
+  cfg.file = { adminQQ: normalizeAdminQqList(file.file?.adminQQ) };
 
   // 小黑盒（T-022）：配置段在 config.json **顶层**的 heybox —— 与 qzone / file / bili 同级，
   // 不在 socialV2 里（这是 T-022 dev-doc 定的口径；socialV2 只放"聊天行为"，工具类能力都在顶层）。
@@ -2027,6 +2064,34 @@ function readDeviceState() {
   const raw = readJsonSafe(DEVICE_STATE_FILE, null);
   if (raw === null) return createDeviceState(Date.now());
   return parseDeviceState(raw);
+}
+
+// ── 平板授权（T-024）：写入（唯一）与读取（prompt 门控） ────────────────────
+/**
+ * 读授权文件（纯读，不落盘）。
+ *
+ * 文件不存在 / 坏 JSON / 字段不对 → `parseGrant` 的空授权（`expiresAt: 0`，永远判过期），
+ * 于是 prompt 的 `device` 块走「未授权」分支、`enabledTools` 不列 `device_*`。
+ * 读接口绝不制造副作用：一次 GET /api/socialV2/prompt 不该往 state/ 里落一个空授权文件。
+ * 时钟由调用方传（`isGrantActive` / `grantSummary` 的入参），这里不读 Date.now()。
+ */
+function readDeviceGrant() {
+  return parseGrant(readJsonSafe(DEVICE_GRANT_STATE_FILE, null));
+}
+
+/**
+ * 写授权文件：走 `atomicWriteJson`（先写临时文件再 rename，自带 mkdir / 0600 / EPERM 退避），
+ * 所以进程被杀也不会留下半个文件。失败只记日志、**不抛** —— 一条 QQ 消息处理不该因为
+ * 磁盘写不进去就整条崩掉；调用方会看到文件没变（下一次工具调用仍然 `not_granted`）。
+ */
+function writeDeviceGrant(grant) {
+  try {
+    atomicWriteJson(DEVICE_GRANT_STATE_FILE, grant);
+    return true;
+  } catch (error) {
+    log(`[device] 写授权文件失败：${error?.message ?? error}`);
+    return false;
+  }
 }
 
 /**
@@ -8491,10 +8556,15 @@ async function main() {
           // 缺省即开）。关掉时八个工具一起从清单里消失 —— 与 heybox / profile / images 同一套
           // 「模型看不到就不会去试，省得对着 403 反复调」。判据用 `!== false`：没写这一段也照常可用。
           const deviceEnabled = cfg.device?.enabled !== false;
+          // 授权闸门（T-024）：**没有有效授权时 device_* 一律不列进 enabledTools**。
+          // 与 disabled 同一套思路 —— 模型看不到就不会去试；真正的硬闸门在 MCP 侧
+          // （每个工具入口读同一份 state/device-grant.json，没授权直接 not_granted）。
+          // 这里读一次文件就够（`readDeviceGrant()` 是纯读，不写盘、不建定时器）。
+          const deviceGranted = deviceEnabled && isGrantActive(readDeviceGrant(), Date.now());
           const deviceToolFlags = new Set(['deviceStatus', 'deviceScreenshot', 'deviceTap', 'deviceSwipe', 'deviceType', 'deviceKey', 'deviceOpenApp', 'deviceListApps']);
           const enabledTools = [];
           for (const [flag, name] of Object.entries(toolMap)) {
-            if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled()) && !(profileToolFlags.has(flag) && !profileEnabled) && !(imageToolFlags.has(flag) && (!imagesEnabled || (flag === 'drawImage' && !drawEnabled))) && !(flag === 'recall' && !crossEnabled) && !(flag === 'lookup' && !identityEnabled) && !(flag === 'affectReport' && !affectEnabled) && !(heyboxToolFlags.has(flag) && !heyboxEnabled) && !(flag === 'heyboxComment' && hb?.allowComment !== true) && !(deviceToolFlags.has(flag) && !deviceEnabled)) enabledTools.push(name);
+            if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled()) && !(profileToolFlags.has(flag) && !profileEnabled) && !(imageToolFlags.has(flag) && (!imagesEnabled || (flag === 'drawImage' && !drawEnabled))) && !(flag === 'recall' && !crossEnabled) && !(flag === 'lookup' && !identityEnabled) && !(flag === 'affectReport' && !affectEnabled) && !(heyboxToolFlags.has(flag) && !heyboxEnabled) && !(flag === 'heyboxComment' && hb?.allowComment !== true) && !(deviceToolFlags.has(flag) && !deviceGranted)) enabledTools.push(name);
           }
           sendJson({
             ok: true,
@@ -8671,17 +8741,48 @@ async function main() {
                     : '评论能力默认关着，不要尝试。')
               };
             })(),
-            // 平板（T-023 第三步）：只读快照 —— 白名单应用、今天还剩多少额度、一句行为约束。
-            // devicePromptBlock 只给 { enabled, apps, budget, hint }（它属于纯模块，不该知道
-            // 工具叫什么），工具清单在这里补上：模型得在 prompt 里看到工具名才会去用。
-            // 禁用时保持 { enabled: false }（整段不注入）；这里**不写盘、不起定时器、不碰 adb** ——
-            // 主动去平板玩（proactive 唤醒）是下一步，本步骤只让模型会用工具。
+            // 平板（T-023 第三步 + T-024 授权）：只读快照 —— 白名单应用、今天还剩多少额度、
+            // 一句行为约束。**授权是另一道闸门**：没有效授权时这块只给一句提示、不给工具名
+            // （`tools: []`），模型看不到就不会去试 —— 与 disabled / heybox 同一套思路。
+            // devicePromptBlock 只给 { enabled, apps, budget, hint }（纯模块，不知道工具叫什么，
+            // 也不读授权文件）；工具清单、授权剩余分钟与日记 key 在这里补。
+            // 这里**不写盘、不起定时器、不碰 adb**：授权由管理员的消息写入（见 handleIncoming），
+            // 一次 GET /api/socialV2/prompt 只读一下授权文件。
             device: (() => {
               if (!deviceEnabled) return { enabled: false };
-              const block = devicePromptBlock(cfg.device, readDeviceState(), Date.now());
+              const nowMs = Date.now();
+              const block = devicePromptBlock(cfg.device, readDeviceState(), nowMs);
+              const summary = grantSummary(readDeviceGrant(), nowMs);
+              if (!summary.active) {
+                return {
+                  enabled: true,
+                  granted: false,
+                  hint: '想玩平板要先得到管理员许可：管理员在 QQ 里说一句「去玩平板」（或「去玩平板 20 分钟」）之后才行。',
+                  tools: []
+                };
+              }
+              // 日记落点（T-024）：**管理员所在的互通组**。diaryKeyFor 会把
+              // `private:<管理员 QQ>` 归一到 `cross:<gid>`（同组群友也能看到，用户确认过）；
+              // 没有互通组时就是管理员私聊那本 `private:<QQ>`。认不出授权人的极端情况给空串，
+              // 模型退回自己当前会话的 key（至少不会因此写不出日记）。
+              const grantedBy = String(summary.grantedBy ?? cfg.ownerQQ ?? '').trim();
+              const diaryKey = /^\d{1,15}$/.test(grantedBy) ? diaryKeyFor(`private:${grantedBy}`) : '';
               return {
                 ...block,
-                tools: ['device_status', 'device_screenshot', 'device_tap', 'device_swipe', 'device_type', 'device_key', 'device_open_app', 'device_list_apps']
+                granted: true,
+                grant: {
+                  grantedBy: summary.grantedBy,
+                  minutes: summary.minutes,
+                  steps: summary.steps,
+                  leftMinutes: summary.leftMinutes,
+                  expiresAt: summary.expiresAt
+                },
+                diaryKey,
+                tools: ['device_status', 'device_screenshot', 'device_tap', 'device_swipe', 'device_type', 'device_key', 'device_open_app', 'device_list_apps'],
+                hint: `${block.hint}这次是管理员授权的，本轮还剩 ${summary.leftMinutes} 分钟（建议不超过 ${summary.steps} 步，每日额度另算）。`
+                  + (diaryKey === ''
+                    ? ''
+                    : `玩完把这次玩的经过写成日记，写到这个 key：${diaryKey}（qq_diary_write 的 key 参数就填它）。`)
               };
             })(),
             replyTiming: replyTimingV2(st),
@@ -14056,6 +14157,68 @@ async function main() {
     return crossGidOf(k) > 0 ? `cross:${crossGidOf(k)}` : k;
   }
 
+  /**
+   * 谁能授权玩平板（T-024）：`ownerQQ` ∪ `qzone.adminQQ` ∪ `file.adminQQ`。
+   *
+   * 用户拍板的口径是「控制台里配的管理员都算」——所以三份名单并起来，统一成十进制字符串
+   * 去重（QQ 号在事件里是字符串、在配置里可能是数字）。**群友/群管理一律不算**：
+   * 这里返回的是一个白名单集合，`parseGrantIntent` 只解析意图、不判权限，权限就靠它。
+   * 名单在每次入站消息时现算：控制台改 `ownerQQ` 会热更新 cfg，改 adminQQ 需要重启
+   * （与 qzone / file 原来的行为一致）。
+   */
+  function deviceGrantAdminSet() {
+    const admins = new Set();
+    const add = (value) => {
+      const s = String(value ?? '').trim();
+      if (/^\d{1,15}$/.test(s)) admins.add(s);
+    };
+    add(cfg.ownerQQ);
+    for (const qq of cfg.qzone?.adminQQ ?? []) add(qq);
+    for (const qq of cfg.file?.adminQQ ?? []) add(qq);
+    return admins;
+  }
+
+  /**
+   * 把管理员的一条消息当成授权/撤销口令处理（**只写盘 + 留痕，不吞消息、不回话**）。
+   *
+   * 三条约定：
+   * - 只认管理员（调用方用 `deviceGrantAdminSet()` 判过）—— 群友说「去玩平板」什么都不发生；
+   * - 口令由 `parseGrantIntent` 整句解析（普通聊天会得到 `action:null`，这时返回 `{handled:false}`）；
+   * - **不吞消息**：这句话本身就是「让我去玩」的指令，处理完仍交给模型（它得知道自己被允许了）。
+   *   回执由模型自己说，桥接不发额外消息（避免两句话打架）。
+   *
+   * @returns {{ handled: boolean, action: 'grant'|'revoke'|null, minutes?: number }}
+   */
+  function applyDeviceGrantIntent(key, senderQq, text) {
+    const at = Date.now();
+    const intent = parseGrantIntent(text);
+    if (intent.action === 'grant') {
+      const grant = createGrant(at, { grantedBy: senderQq, viaKey: key, minutes: intent.minutes });
+      writeDeviceGrant(grant);
+      const summary = grantSummary(grant, at);
+      log(`[device] ${key} 管理员 ${senderQq} 授权玩平板：${summary.text}`);
+      // 活动流水里带一个「到几点失效」：用 toTimeString 取本地 HH:MM（不依赖 locale / ICU）。
+      const untilClock = new Date(grant.expiresAt).toTimeString().slice(0, 5);
+      appendActivity(`${key} 管理员 ${senderQq} 授权玩平板 ${intent.minutes} 分钟（到 ${untilClock}）`);
+      return { handled: true, action: 'grant', minutes: intent.minutes };
+    }
+    if (intent.action === 'revoke') {
+      const current = readDeviceGrant();
+      // 从来没有授权过就别造一份「空撤销」：`revokeGrant` 会带出默认的 30 分钟，
+      // 于是 status 会说「这次授权已经被撤销了（原定 30 分钟）」—— 而实际上根本没授权过。
+      if (current.expiresAt <= 0) {
+        log(`[device] ${key} 管理员 ${senderQq} 说撤销口令，但当前没有任何授权记录（只记日志）`);
+        appendActivity(`${key} 管理员 ${senderQq} 撤销平板授权（当时没有授权）`);
+        return { handled: true, action: 'revoke' };
+      }
+      writeDeviceGrant(revokeGrant(current, at));
+      log(`[device] ${key} 管理员 ${senderQq} 撤销平板授权`);
+      appendActivity(`${key} 管理员 ${senderQq} 撤销平板授权`);
+      return { handled: true, action: 'revoke' };
+    }
+    return { handled: false, action: null };
+  }
+
   function crossChannelFile(key) {
     // ':' 在 Windows 文件名里非法（也是 NTFS 数据流分隔符），统一换成 '_'。
     return path.join(CROSS_DIR, `${String(key).replace(/:/g, '_')}.ndjson`);
@@ -15437,6 +15600,18 @@ async function main() {
     const savedFiles = await saveIncomingFiles(fileList, { cfg, isOwner, kind, id });
     if (savedFiles.length > 0) textContent += fileHintFor(savedFiles);
     const roleState = readRoleState();
+
+    // 平板授权（T-024）：**只认管理员**（ownerQQ ∪ qzone.adminQQ ∪ file.adminQQ）。
+    // 管理员说「去玩平板 / 玩会儿平板（+ N 分钟）」就落一份授权（state/device-grant.json），
+    // 说「别玩了 / 不玩了 / 回来 / 停下 / 先别玩」就立刻撤销；群友说同样的话什么都不发生
+    // （parseGrantIntent 只解析意图，权限判断就在这一行）。
+    // 位置刻意排在「挂起提问」之前：这是一句明确的命令，不该被当成某个提问的回答吞掉。
+    // 注意**不 return**：这句话仍要交给模型 —— 它得知道自己被允许去玩了；
+    // 桥接只把「允许」落盘并留痕，替模型的回话不在这里发（免得两句话打架）。
+    const senderQq = String(event.user_id ?? '').trim();
+    if (senderQq !== '' && deviceGrantAdminSet().has(senderQq)) {
+      applyDeviceGrantIntent(key, senderQq, plainContent);
+    }
 
     // 若该会话有挂起的提问/审批，先当作回答处理（用当前消息自己的文字，不含引用原文）。
     // 审批只有管理员消息会被消费；群友消息不能因为“审批挂起”而被吞掉，应继续走正常处理。

@@ -44,6 +44,14 @@
 - 状态在 `state/device-state.json`，动作日志 `state/device-actions.jsonl`，截图 `state/device/`。
 - 修复（真机验收 `TB375FC` / Android 16）：坐标空间改用**最近一次截图的宽高**，不再拿 `wm size` 当唯一依据。竖持时 `wm size` 报物理面板 `1840x2944`，而横屏应用的实际显示与输入空间是旋转后的 `2944x1840`（`dumpsys window displays` 的 `cur=` / `app=` 与 `screencap` 的 PNG 一致），旧实现把 x∈[1840,2944) 的合法坐标夹到 `1840`，点错位置。新增纯函数 `parsePngSize(buffer)`（`src/device-core.js`，读 PNG IHDR 偏移 16/20 的大端宽高，非 PNG/长度不足/尺寸为 0 返回 `null`）；`src/device-tools.js` 在内存里记住最近一次截图（带 serial，换设备自动作废），`device_tap` / `device_swipe` 夹取与 `device_status` 的 `screen` 优先用它，没截过图才回退 `wm size`；回执里的 `screen` 即真实使用的宽高，`clamped` 语义不变（越界夹到边界、不报错）。`docs/guides/DEVICE.md` 的已知限制补了「旋转屏幕后先知截图再点击」。
 
+### 安卓平板：管理员授权才能玩 + 玩平板的日记并入管理员互通组（2026-10-21，T-024）
+
+- 新增 `src/device-grant.js`（口令解析 / 授权对象 / 过期与撤销 / 摘要，纯函数、零 I/O、时钟由调用方注入）：`parseGrantIntent` 只认**整句**口令 —— 授权「去玩平板 / 玩会儿平板 / 去玩会儿平板 / 玩平板」（可带「20 分钟」「25 min」，钳到 5–120 分钟，缺省 30 分钟），撤销「别玩了 / 不玩了 / 回来 / 停下 / 先别玩」；「我回来啦」「刚刚玩了会儿平板」「别玩了，回来吧」（一句话两个意图）都不算。授权文件形状 `{ grantedBy, viaKey, grantedAt, expiresAt, minutes, steps, revokedAt }`，步数缺省 60。
+- **授权是独立的第二道闸门**：`src/device-tools.js` 的每个工具入口先读 `state/device-grant.json`，没有有效授权一律 `not_granted`（**不碰 adb、不记步**）；`device_status` 是唯一例外 —— 允许调用以解释原因，但回执固定带 `granted:false` / `canPlay:false`。工具层闸门顺序 `disabled` → `not_granted` → 预算，两者互不替代（授权在、额度用完照样拒）。
+- 桥接（`src/bridge.js`）：入站消息里判「发送者 ∈ `ownerQQ` ∪ `qzone.adminQQ` ∪ `file.adminQQ`」且口令命中 → 原子写 `state/device-grant.json` + 日志/活动流水；撤销同理（`revokedAt = now`）。口令那句话**不吞**，照常交给模型（它得知道自己被允许去玩了）。prompt 的 `device` 块未授权时只给 `{ enabled:true, granted:false, hint:'想玩平板要先得到管理员许可', tools: [] }`，已授权才给八个工具名 + 本轮剩余分钟 + `diaryKey`；`enabledTools` 没有有效授权时不列 `device_*`。
+- 日记落点：`diaryKey = diaryKeyFor('private:<授权人 QQ>')` —— 管理员在互通组里就是 `cross:<gid>` 的共用日记本（同组群友也能看到，用户确认过），没分组时是 `private:<QQ>`；模型玩完用现成的 `qq_diary_write` 把 `key` 填成它，没有新增工具。
+- 新增 `scripts/test-device-grant.mjs`（113 条断言：各种说法 / 分钟钳制 / 误伤反例 / 过期与撤销 / 摘要）+ `test-device-tools.mjs` 的授权用例（无授权不调 adb 不记步、到期与撤销、`grantFile` 注入路径）+ `test-device-wiring.mjs` 的接线断言（授权人集合、原子写、prompt 与 `enabledTools` 门控、日记 key），`test-audit.mjs` 已注册新脚本。`docs/guides/DEVICE.md` 增加「① 授权」一节，`README.md` 的平板条目补了「必须管理员授权」。
+
 ### 小黑盒：看帖、搜索与自主评论（2026-10-21，T-022）
 
 - 新增五个 MCP 工具（注册进 snowluma 服务器，随 DSH 重拉子进程生效）：`heybox_status`（登录态 + 今日额度）、`heybox_feed`（首页推荐，返回链接 id 与摘要）、`heybox_post`（正文 + 前 20 条评论）、`heybox_search`（搜帖子/游戏/话题/用户）、`heybox_comment`（发评论，默认 dry-run）。

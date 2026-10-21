@@ -8,6 +8,14 @@
 //   不掺业务逻辑。
 // 这样单测可以注入假 adb（不插 USB 也能跑全套），桥接侧也能换 stateDir。
 //
+// 两道**硬的**闸门（都在本层，模型绕不过去）：
+// ① 授权（T-024）：读 `state/device-grant.json`（桥接在管理员说「去玩平板」时写），
+//    没有有效授权时每个工具入口直接 `not_granted` —— **不碰 adb、不记步**；
+//    `device_status` 例外：允许调用（它要能解释「为什么不能玩」），但回执带
+//    `granted:false` / `canPlay:false`；
+// ② 预算（device-core 的 deviceBudget）：日额度 / 步数 / 步间间隔 / 暂停窗口。
+//    授权在、额度用完照样拒 —— 两者同时生效。
+//
 // 边界（每个工具的 description 里也写了一遍，模型看得见）：
 // - 只玩不越界：不改系统设置、不装/卸应用、不支付不登录不删东西；
 // - 每个**动作**执行前先读前台包名（`dumpsys window` 的 mCurrentFocus）：命中黑名单
@@ -20,6 +28,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 
+// 授权是**另一道闸门**（T-024）：文件名与判定都来自纯模块 src/device-grant.js，
+// 与桥接（写授权）用的是同一套规则，绝不各写一份。
+import {
+  DEVICE_GRANT_FILE,
+  NOT_GRANTED_MESSAGE,
+  grantSummary,
+  isGrantActive,
+  parseGrant,
+} from './device-grant.js';
 import {
   DEVICE_DEFAULTS,
   DEVICE_KEYCODES,
@@ -56,6 +73,8 @@ export const DEVICE_STATE_FILE = 'device-state.json';
 export const DEVICE_ACTION_LOG = 'device-actions.jsonl';
 /** 截图目录（在 state/ 下面）。 */
 export const DEVICE_SHOT_DIR = 'device';
+/** 授权文件（T-024）：**桥接写、本模块只读**。文件名与判定规则都来自 src/device-grant.js。 */
+export { DEVICE_GRANT_FILE };
 
 const SHOT_TIMEOUT_MS = 20 * 1000;
 const SHELL_TIMEOUT_MS = 10 * 1000;
@@ -265,20 +284,27 @@ function deviceFail(reason, extra = {}) {
  * - `runAdb(args, {adbPath, timeoutMs})` → `{ok, code, stdout, stderr, stdoutBuffer}`（**不抛**）；
  * - `readConfig()` → 整份 config.json 对象（取 `device` 块）；
  * - `now()` → 毫秒时间戳（预算与日界都靠它，单测可以随便拨）；
- * - `stateDir` → 状态文件与截图的落盘目录。
+ * - `stateDir` → 状态文件与截图的落盘目录；
+ * - `grantFile` → 授权文件路径（缺省 `<stateDir>/device-grant.json`，测试可注入临时路径）。
  *
  * 每个方法都返回朴素对象（截图例外：它返回文件路径与尺寸，由注册层再读成 base64 图片）。
- * 所有方法都做三件事：闸门（enabled / 预算）→ 干活（adb）→ 记账（成功才写）。
+ * 所有方法都做三件事：闸门（enabled / **授权** / 预算）→ 干活（adb）→ 记账（成功才写）。
  */
 export function createDeviceTools({
   runAdb = defaultRunAdb,
   readConfig = defaultReadConfig,
   now = () => Date.now(),
   stateDir = DEFAULT_STATE_DIR,
+  grantFile = null,
 } = {}) {
   const stateFile = path.join(stateDir, DEVICE_STATE_FILE);
   const actionLogFile = path.join(stateDir, DEVICE_ACTION_LOG);
   const shotDir = path.join(stateDir, DEVICE_SHOT_DIR);
+  // 授权文件跟着 stateDir 走（与桥接的 `state/device-grant.json` 同一个文件）；
+  // 显式传了 grantFile 就用它 —— 单测靠这个把授权隔离在临时目录里。
+  const grantPath = grantFile === null || grantFile === undefined
+    ? path.join(stateDir, DEVICE_GRANT_FILE)
+    : grantFile;
 
   /**
    * 最近一次截图的宽高（连同 serial）：**这才是当前显示 / 输入坐标空间**。
@@ -331,11 +357,53 @@ export function createDeviceTools({
     }
   }
 
-  /** 统一闸门：功能开关 + 预算。返回 `{ok:true, cfg, budget}` 或可直接返回的失败对象。 */
+  /**
+   * 读授权文件（只读）：文件不存在 / 坏 JSON / 形状不对 → `parseGrant` 的空授权
+   * （`expiresAt: 0`，永远判过期）。**读接口绝不写盘**：一次「看一眼能不能玩」
+   * 不该往 state/ 里落任何文件。
+   */
+  function loadGrant() {
+    return parseGrant(readJsonFile(grantPath, null));
+  }
+
+  /**
+   * 未授权的统一回执。
+   *
+   * 三种情形文案不同（模型据此决定怎么跟用户解释）：
+   * - 从来没有授权 → 让管理员说「去玩平板」；
+   * - 上次授权过期 → 说明「上一次已经过期」，再请管理员说一句；
+   * - 上次授权被撤销 → 说明「被撤销了」，别自己找补。
+   * 回执固定带 `granted:false` / `canPlay:false`，模型不用去猜。
+   */
+  function notGranted(grant, at) {
+    const summary = grantSummary(grant, at);
+    const why = summary.reason === 'expired'
+      ? '（上一次授权已经过期了）'
+      : (summary.reason === 'revoked' ? '（上一次授权被管理员撤销了）' : '');
+    return {
+      ok: false,
+      reason: 'not_granted',
+      message: `${NOT_GRANTED_MESSAGE}${why}`,
+      granted: false,
+      canPlay: false,
+    };
+  }
+
+  /**
+   * 统一闸门：功能开关 → **授权** → 预算。
+   * 返回 `{ok:true, cfg, state, budget, grant}` 或可直接返回的失败对象。
+   *
+   * 顺序是定死的：`disabled` 必须在最前（功能关着时说「没授权」会把人引去要授权），
+   * 授权排在预算前面（没授权时连额度都不该提，否则模型会以为「等额度回来就能玩」）。
+   */
   function gate(at) {
     const cfg = readDeviceConfig(readConfig);
     if (!cfg.enabled) {
       return { ok: false, cfg, budget: null, fail: { ok: false, reason: 'disabled', message: budgetReasonText('disabled', {}) } };
+    }
+    const grant = loadGrant();
+    if (!isGrantActive(grant, at)) {
+      return { ok: false, cfg, budget: null, grant, fail: notGranted(grant, at) };
     }
     const state = loadState(at);
     const budget = deviceBudget(state, cfg, at);
@@ -345,10 +413,11 @@ export function createDeviceTools({
         cfg,
         state,
         budget,
+        grant,
         fail: { ok: false, reason: budget.reason, message: budgetReasonText(budget.reason, budget) },
       };
     }
-    return { ok: true, cfg, state, budget };
+    return { ok: true, cfg, state, budget, grant };
   }
 
   /** 成功动作的记账：步数 +1（跨日自动重置）→ 写盘 → 写日志 → 回带剩余额度。 */
@@ -472,14 +541,34 @@ export function createDeviceTools({
   /**
    * 看设备与额度：不消耗步数（只是「看一眼」），但功能关着时也如实说关着。
    * 电量解析失败就给 `null` —— 用户要的是「能不能玩」，不是「dumpsys 的完整输出」。
+   *
+   * **授权是唯一的例外**：没授权时别的工具一律 `not_granted`，只有它允许调用 ——
+   * 模型得能回答「为什么不能玩」。回执固定带 `granted` / `grant`，并把 `canPlay`
+   * 与授权取交集（额度够但没授权 → `canPlay:false`），所以模型不会误以为可以动手。
+   * 它本身**不动设备**（只读电量 / 尺寸 / 前台），没授权时看一眼也没有副作用。
    */
   async function deviceStatus() {
     const at = safeNow(now);
     const cfg = readDeviceConfig(readConfig);
     const state = loadState(at);
     const budget = deviceBudget(state, cfg, at);
+    const grant = loadGrant();
+    const grantOk = isGrantActive(grant, at);
+    const grantInfo = grantSummary(grant, at);
     const base = {
       enabled: cfg.enabled,
+      // 授权（T-024）：没授权时 canPlay 一定是 false —— 额度够也不算能玩。
+      granted: grantOk,
+      grant: grantOk
+        ? {
+          grantedBy: grantInfo.grantedBy,
+          minutes: grantInfo.minutes,
+          steps: grantInfo.steps,
+          leftMinutes: grantInfo.leftMinutes,
+          expiresAt: grantInfo.expiresAt,
+        }
+        : null,
+      grantMessage: grantInfo.text,
       usedMinutes: Math.floor(budget.usedMs / 60000),
       usedMs: budget.usedMs,
       usedSteps: budget.usedSteps,
@@ -487,7 +576,7 @@ export function createDeviceTools({
       leftSteps: budget.leftSteps,
       maxMinutesPerDay: budget.maxMinutesPerDay,
       maxStepsPerDay: budget.maxStepsPerDay,
-      canPlay: budget.ok,
+      canPlay: budget.ok && grantOk,
       budgetReason: budget.reason,
       budgetMessage: budgetReasonText(budget.reason, budget),
       nextAllowedAt: budget.nextAllowedAt,
@@ -919,7 +1008,7 @@ export function createDeviceTools({
 }
 
 // ── 工具描述（模型看得见，边界写在这里） ────────────────────────────────────
-const BOUNDARY = '只玩不越界：不改系统设置、不装/卸应用、不支付不登录不删东西。一次只做一步，做完再看截图。中文输入不支持，用点击代替打字。前台一旦停在黑名单应用（支付宝 / 微信 / QQ / Play 商店 / 系统设置）上，除了 device_status / device_screenshot / device_list_apps，其它动作一律会被拒；这时唯一能自救的动作是 device_key home（只回桌面，不碰那个应用里的任何东西）。';
+const BOUNDARY = '只玩不越界：不改系统设置、不装/卸应用、不支付不登录不删东西。一次只做一步，做完再看截图。中文输入不支持，用点击代替打字。没有管理员授权时，除 device_status 外的工具一律返回 not_granted（不碰平板、不记步）——要管理员在 QQ 里说「去玩平板」；授权与每日额度是两道独立的闸门。前台一旦停在黑名单应用（支付宝 / 微信 / QQ / Play 商店 / 系统设置）上，除了 device_status / device_screenshot / device_list_apps，其它动作一律会被拒；这时唯一能自救的动作是 device_key home（只回桌面，不碰那个应用里的任何东西）。';
 
 /** 八个工具的名字（顺序即注册顺序，便于日志对照；与桥接的 toolMap 逐字同序）。 */
 export const DEVICE_TOOL_NAMES = Object.freeze([
@@ -936,7 +1025,7 @@ export const DEVICE_TOOL_NAMES = Object.freeze([
 /**
  * 把八个工具挂到 MCP server 上（只做 `server.tool(...)`，逻辑全在 `createDeviceTools` 里）。
  *
- * `opts` 原样透传给工厂（runAdb / readConfig / now / stateDir），单测可以直接传假 adb。
+ * `opts` 原样透传给工厂（runAdb / readConfig / now / stateDir / grantFile），单测可以直接传假 adb。
  * 截图工具的 handler 在这里把文件读成 base64，返回
  * `{content:[{type:'text'}, {type:'image', mimeType, data}]}` —— 和 qq_get_message_images
  * 的图片形状一致，视觉模型能直接看。
@@ -958,7 +1047,7 @@ export function registerDeviceTools(server, opts = {}) {
 
   server.tool(
     'device_status',
-    `看平板现在是什么状态：连没连上、型号/序列号、电量、屏幕尺寸、今天已经玩了几分钟和几步、还能玩多久、现在能不能动手、暂停原因。不消耗额度。${BOUNDARY}`,
+    `看平板现在是什么状态：连没连上、型号/序列号、电量、屏幕尺寸、今天已经玩了几分钟和几步、还能玩多久、现在能不能动手、暂停原因。不消耗额度。没授权时也会如实回答（granted:false、canPlay:false，并说明要管理员怎么授权）。${BOUNDARY}`,
     {},
     async (args) => textResult(await handle(tools.deviceStatus, args)),
   );
