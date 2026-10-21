@@ -11,12 +11,20 @@
 
 | 文档 | 一句话说明 | 状态 |
 | --- | --- | --- |
-| [guides/PROJECT_GUIDE.md](guides/PROJECT_GUIDE.md) | **权威项目说明书**（113 KB / 1450+ 行）：架构、内外核划分、数据流、配置全解、安全机制、调试与改进指南，含 2026-08-20 ~ 2026-09-11 的逐轮更新记录 | ✅ **唯一权威版本**（另一份同名精简版已归档到 legacy，见下） |
+| [guides/PROJECT_GUIDE.md](guides/PROJECT_GUIDE.md) | 曾被称为「权威项目说明书」（113 KB / 1450+ 行）：架构、内外核划分、数据流、配置全解、安全机制 | ⚠️ **该文件不在本仓库**（2026-10-21 核查：`docs/guides/` 下无此文件，疑从未入库）。现状读 [../README.md](../README.md) + [FOLDER_MAP.md](FOLDER_MAP.md) + 本索引；历史内容见下文 legacy 的精简版 |
 | [guides/DSH_SETUP.md](guides/DSH_SETUP.md) | DSH 端安装说明：`qq-chat` / `qq-chat-v2` preset 与三个 MCP server 怎么挂到目标设备的 DSH 上 | ✅ |
 | [guides/VOICE.md](guides/VOICE.md) | 语音发送全解：独立工具（`voice-tool/` 的图形界面与命令行）、桥接 CLI、AI 工具、控制台面板，以及**工具拆出后的配置解析顺序** | ✅ 2026 整理时已更新（工具移到上一级 `voice-tool/`） |
 | [guides/TOKEN_USAGE_CONSOLE.md](guides/TOKEN_USAGE_CONSOLE.md) | 控制台「令牌与花费」看板：数据来源、计价口径（峰谷分时）、API、配置 | ✅ |
 | [guides/CONSOLE-UI-TESTING.md](guides/CONSOLE-UI-TESTING.md) | 控制台离线预览（`npm run preview:console`）与离线浏览器回归（`npm run test:console-ui`）怎么用 | ✅ 2026 整理时自 `scripts/` 移入 |
 | [guides/SECURITY_BASELINE.md](guides/SECURITY_BASELINE.md) | **安全基线与威胁模型**：威胁主体、已实现的边界（准入/工具面/出站/控制台/落盘/网络）、已知残余风险、发布前回归清单、改动检查单 | ✅ **改动安全相关代码前必读**（2026-09-20 新增） |
+| [guides/PRIVACY.md](guides/PRIVACY.md) | **发布前隐私检查**：真实 QQ 号 / 群号 / 本机绝对路径 / 令牌 / 人格卡的扫描与处置 | ✅ **推仓库前必读**（发布流程的硬性一步，不是可选建议） |
+| [guides/BILI.md](guides/BILI.md) | B 站只读能力：搜索、看视频详情（可连带字幕 / 评论 / 相关推荐 / AI 总结） | ✅ |
+| [guides/DIARY.md](guides/DIARY.md) | 日记本（`qq_diary_write` / `_list` / `_read`）：存在哪、按天分文件、什么场合才该写 | ✅ |
+| [guides/FILES.md](guides/FILES.md) | 文件收发（`files/` 托管目录）：`adminQQ` 白名单、写/删/发文件的权限口径 | ✅ |
+| [guides/QZONE.md](guides/QZONE.md) | QQ 空间说说（出厂关闭）：开关、内容审计、配额、删除需管理员 | ✅ |
+| [guides/SOCIAL-AUTO.md](guides/SOCIAL-AUTO.md) | 社交自动化（出厂全关）：自动通过好友 / 入群等 | ✅ |
+| [guides/HEYBOX.md](guides/HEYBOX.md) | 小黑盒：看帖 / 搜索 / 自主评论；四道闸门、验证码命中后四入口一起停 30 分钟、`messageId` 三级取值 | ✅ 2026-10-21 新增（T-022） |
+| [guides/DEVICE.md](guides/DEVICE.md) | 安卓平板：截图 / 点击 / 滑动 / 输入 / 按键 / 开应用 / 列应用；预算闸门 + 黑名单前台硬闸门 + `home` 逃生口 | ✅ 2026-10-21 新增（T-023） |
 
 ## design/ —— 设计与规划（读设计意图用）
 
@@ -63,13 +71,16 @@
 
 | 我想…… | 看这个 |
 | --- | --- |
-| 搞懂整体架构 / 全部配置项 | [guides/PROJECT_GUIDE.md](guides/PROJECT_GUIDE.md) |
+| 搞懂整体架构 / 全部配置项 | [../README.md](../README.md)（能力与配置概览）、[FOLDER_MAP.md](FOLDER_MAP.md)（目录与脚本）；原 `guides/PROJECT_GUIDE.md` 不在仓库，见上表 |
 | 在新设备上把 qq-bridge 接进 DSH | [guides/DSH_SETUP.md](guides/DSH_SETUP.md) |
 | 发语音 / 换 QQ 账号后语音工具 401 | [guides/VOICE.md](guides/VOICE.md)（独立工具在仓库上一级 `../voice-tool/`） |
 | 看 AI 烧了多少钱 / 计价口径 | [guides/TOKEN_USAGE_CONSOLE.md](guides/TOKEN_USAGE_CONSOLE.md)、[audits/TOKEN_COST_ANALYSIS.md](audits/TOKEN_COST_ANALYSIS.md) |
 | 改控制台界面并做离线回归 | [guides/CONSOLE-UI-TESTING.md](guides/CONSOLE-UI-TESTING.md)、[audits/CONSOLE_UI_REDESIGN_REPORT.md](audits/CONSOLE_UI_REDESIGN_REPORT.md) |
 | 改代码前先知道有哪些坑 | [guides/DSH_020_ADAPTATION.md](guides/DSH_020_ADAPTATION.md)（最新，DSH 适配）、[audits/AUDIT_FIXES_2026-09-20.md](audits/AUDIT_FIXES_2026-09-20.md)、[audits/AUDIT_REPORT_2026-09-20.md](audits/AUDIT_REPORT_2026-09-20.md) |
-| 动安全相关代码 / 做发布前检查 | [guides/SECURITY_BASELINE.md](guides/SECURITY_BASELINE.md) |
+| 动了安全相关代码 / 做发布前检查 | [guides/SECURITY_BASELINE.md](guides/SECURITY_BASELINE.md)、[guides/PRIVACY.md](guides/PRIVACY.md) |
+| 让 agent 自己看平板屏幕、自己点 | [guides/DEVICE.md](guides/DEVICE.md) |
+| 让它刷小黑盒 / 自己发评论 | [guides/HEYBOX.md](guides/HEYBOX.md) |
+| 让它发文件 / 写日记 / 发说说 / 发 B 站 | [guides/FILES.md](guides/FILES.md)、[guides/DIARY.md](guides/DIARY.md)、[guides/QZONE.md](guides/QZONE.md)、[guides/BILI.md](guides/BILI.md) |
 | 知道某个目录/脚本是干什么的 | [FOLDER_MAP.md](FOLDER_MAP.md) |
 | 权限边界与安全承诺 | [../RULES.md](../RULES.md) |
 | 这个项目要往哪走（QSH） | 上位目录的 `../../QSH-plan/`（总索引 `README.md`；另有工具面/技能/云部署/新仓库与官网四份专项） |
