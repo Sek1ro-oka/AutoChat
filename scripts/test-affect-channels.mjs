@@ -142,6 +142,22 @@ const httpServerAt = BRIDGE.indexOf('const server = http.createServer(');
 check('宣泄定时器与 runAffectVent 同作用域（否则 ReferenceError）', ventDefAt > 0 && timerAt > ventDefAt && httpServerAt > timerAt);
 check('定时器仍每 10 分钟、仍 unref', BRIDGE.slice(timerAt, httpServerAt).includes('10 * 60 * 1000') && BRIDGE.slice(timerAt, httpServerAt).includes('.unref?.()'));
 
+// ── 文案会话容器的作用域（2026-10-21 线上事故的回归） ──────────────────────
+// 事故经过：ventSessions 这四行被塞进了 startConsoleServer() 里，而**读方** pumpMux 在 main
+// 作用域。于是每来一帧事件走到 `if (ventSessions.has(...))` 就抛
+// `ReferenceError: ventSessions is not defined` → 事件流断开重连 → 会话永远「繁忙」→
+// 群里的 @ 与拍一拍全部无响应。这里钉住「声明必须在 startConsoleServer 之前」。
+const consoleFnAt = BRIDGE.indexOf('function startConsoleServer() {');
+const ventDeclAt = BRIDGE.indexOf('const ventSessions = new Set();');
+const pumpMuxAt = BRIDGE.indexOf('async function pumpMux() {');
+check('ventSessions 声明在 startConsoleServer 之前（main 作用域）',
+  ventDeclAt > 0 && consoleFnAt > 0 && ventDeclAt < consoleFnAt,
+  `decl=${ventDeclAt} consoleFn=${consoleFnAt}`);
+check('ventSessions 只有一处声明（没留下重复 const）',
+  BRIDGE.split('const ventSessions = new Set();').length - 1 === 1);
+check('pumpMux 与 ventSessions 不同在 startConsoleServer 内（读方在 main）',
+  pumpMuxAt > 0 && pumpMuxAt > consoleFnAt && BRIDGE.slice(pumpMuxAt, pumpMuxAt + 60000).includes('ventSessions.has('));
+
 // ── 汇总 ───────────────────────────────────────────────────────────────────
 const total = passed + failed;
 console.log(`\n结果：${passed}/${total} passed${failed > 0 ? `，${failed} failed` : ''}`);

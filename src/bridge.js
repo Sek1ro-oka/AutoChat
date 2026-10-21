@@ -4457,6 +4457,23 @@ async function main() {
     return cfg.socialV2?.tools?.[flag] !== false;
   }
 
+  // ── 文案会话：与黑话学习会话同构，但状态**完全独立** ──────────────────────
+  // 为什么必须独立：学习会话一次可能要 2 分钟、文案会话 8 秒就兜底，两者混在一个 Map 里，
+  // 文案超时就会把学习中的 turn 吃掉（等待者是 shift 出来的，错位就是串台）。
+  //
+  // 为什么必须放在 main 作用域（而不是 startConsoleServer 里）：这两套容器的**读方**是
+  // pumpMux 的事件分发（turn/start、turn/end 在这里结束等待者），**写方**是 startConsoleServer
+  // 里的端点与出口。一旦放在 startConsoleServer 内，pumpMux 访问时抛
+  // `ReferenceError: ventSessions is not defined`，每来一帧事件就断一次事件流 → 桥接无限重连、
+  // 会话永久「繁忙」、群里的 @ 与拍一拍全部无响应（2026-10-21 事故）。
+  const ventSessions = new Set();   // sessionId -> 文案会话（不映射 QQ、不发送）
+  const ventCollectors = new Map(); // sessionId -> turn collector
+  const ventWaiters = new Map();    // sessionId -> [{resolve,reject,timer}]
+  let ventSessionId = null;
+  // 8 秒兜底：文案是低频后台动作，超时就发模板 —— 宁可句子平一点，
+  // 也不能让十分钟一轮的宣泄检查卡在一个不回来的 turn 上（下一轮还要判冷却与配额）。
+  const AFFECT_VENT_TEXT_TIMEOUT_MS = 8000;
+
   function startConsoleServer() {
     const port = cfg.consolePort ?? 3100;
     // 控制台鉴权：优先用 config.consoleToken，未配置则自动生成并持久化，不再默认无鉴权。
@@ -4738,15 +4755,10 @@ async function main() {
     }
 
     // ── 文案会话：与黑话学习会话同构，但状态**完全独立** ──────────────────────
-    // 为什么必须独立：学习会话一次可能要 2 分钟、文案会话 8 秒就兜底，两者混在一个 Map 里，
-    // 文案超时就会把学习中的 turn 吃掉（等待者是 shift 出来的，错位就是串台）。
-    const ventSessions = new Set();   // sessionId -> 文案会话（不映射 QQ、不发送）
-    const ventCollectors = new Map(); // sessionId -> turn collector
-    const ventWaiters = new Map();    // sessionId -> [{resolve,reject,timer}]
-    let ventSessionId = null;
-    // 8 秒兜底：文案是低频后台动作，超时就发模板 —— 宁可句子平一点，
-    // 也不能让十分钟一轮的宣泄检查卡在一个不回来的 turn 上（下一轮还要判冷却与配额）。
-    const AFFECT_VENT_TEXT_TIMEOUT_MS = 8000;
+    // 容器（ventSessions / ventCollectors / ventWaiters / ventSessionId）与超时常量都声明在
+    // **main 作用域**（见 startConsoleServer 之前那一段）。它们既被这里的端点/出口写入，
+    // 也被 pumpMux 的事件分发读取：留在本函数体里，pumpMux 访问时会抛
+    // `ReferenceError: ventSessions is not defined`（2026-10-21 事故）。
 
     /** 丢掉当前文案会话（preset 变了 / 落盘记录不可信时）。在途等待者与收集器保留。 */
     function invalidateAffectVentSession() {
