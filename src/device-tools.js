@@ -39,6 +39,7 @@ import {
   parseDevices,
   parseDeviceState,
   parseForeground,
+  parsePngSize,
   pickDevice,
   recordStep,
   serializeDeviceState,
@@ -187,24 +188,6 @@ export function parseBattery(stdout) {
 }
 
 /**
- * 从 PNG 字节里读宽高：PNG 签名 8 字节 + IHDR 长度(4) + 'IHDR'(4)，随后
- * 宽(4) 高(4) 都是大端无符号整数，即偏移 16..24。
- * 不是 PNG（没通过签名与 IHDR 校验）→ `null`，由调用方把截图当失败处理。
- */
-export function pngSize(buffer) {
-  if (!Buffer.isBuffer(buffer) || buffer.length < 24) return null;
-  const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-  for (let i = 0; i < signature.length; i += 1) {
-    if (buffer[i] !== signature[i]) return null;
-  }
-  if (buffer.toString('latin1', 12, 16) !== 'IHDR') return null;
-  const width = buffer.readUInt32BE(16);
-  const height = buffer.readUInt32BE(20);
-  if (width < 1 || height < 1) return null;
-  return { width, height };
-}
-
-/**
  * 解析 `pm list packages -3` 的 stdout：一行一个 `package:com.example.app`。
  * 噪声行（空行 / `WARNING:` / 别的输出）直接跳过；重复包名只留第一次（保留设备给的顺序）。
  */
@@ -297,6 +280,24 @@ export function createDeviceTools({
   const actionLogFile = path.join(stateDir, DEVICE_ACTION_LOG);
   const shotDir = path.join(stateDir, DEVICE_SHOT_DIR);
 
+  /**
+   * 最近一次截图的宽高（连同 serial）：**这才是当前显示 / 输入坐标空间**。
+   *
+   * `wm size` 报的是物理面板（联想小新 Pad Pro 竖持 1840x2944），横屏应用跑起来后
+   * 实际可点区域是旋转后的 2944x1840；拿物理尺寸夹取会把 x∈[1840,2944) 的合法坐标
+   * 夹到 1840，点错位置。截图就是模型看到的那张图，宽高天然正确。
+   *
+   * 只放内存、不落盘：进程重启后退回 `wm size`，下一次截图又会校准。
+   * 记 serial 是为了换一台设备时自动作废，别拿上一台的尺寸夹这一台。
+   */
+  let lastShot = null;
+
+  /** 取「这台设备」最近一次截图的尺寸；没截过 / 换了一台 → null（调用方回退 `wm size`）。 */
+  function rememberedScreen(serial) {
+    if (!lastShot || lastShot.serial !== serial) return null;
+    return { width: lastShot.width, height: lastShot.height };
+  }
+
   /** 读状态：文件不存在 / 坏 JSON → 全新状态（今天还没玩）。 */
   function loadState(at) {
     let raw = '';
@@ -376,8 +377,17 @@ export function createDeviceTools({
     return { ok: true, serial: picked.serial, device: picked.device };
   }
 
-  /** 读屏幕尺寸：`wm size`；读不到就返回 null（调用方跳过夹取，别把整个动作弄失败）。 */
+  /**
+   * 读「输入坐标空间」的宽高。
+   *
+   * **优先用最近一次截图的尺寸**：`wm size` 是物理面板（竖持 1840x2944），横屏应用的实际
+   * 显示 / 输入空间是旋转后的 2944x1840（真机 TB375FC 实测），拿它夹取会把合法横屏坐标
+   * 夹错。还没截过图时回退 `wm size`（进程刚起 / 模型直接点）；两个都读不到就返回 null
+   * （调用方跳过夹取，别把整个动作弄失败）。
+   */
   async function screenSize(cfg, serial) {
+    const remembered = rememberedScreen(serial);
+    if (remembered) return remembered;
     const res = await runAdb(['-s', serial, 'shell', 'wm', 'size'], {
       adbPath: cfg.adbPath,
       timeoutMs: SHELL_TIMEOUT_MS,
@@ -511,7 +521,10 @@ export function createDeviceTools({
       }),
     ]);
     const battery = batteryRes && batteryRes.ok === true ? parseBattery(batteryRes.stdout) : { level: null, status: null, state: 'unknown' };
-    const screen = sizeRes && sizeRes.ok === true ? parseWmSize(sizeRes.stdout) : null;
+    // 屏幕尺寸同样以最近一次截图为准：横屏时 `wm size` 给的是竖屏物理尺寸，模型照它给坐标
+    // 就会偏；没截过图才回退 `wm size`（与 tap / swipe 的夹取口径保持一致）。
+    const screen = rememberedScreen(found.serial)
+      ?? (sizeRes && sizeRes.ok === true ? parseWmSize(sizeRes.stdout) : null);
     // 前台包名：解析不出就是 null（老 ROM / dumpsys 被裁），这时不给模型编一个名字。
     const foreground = focusRes && focusRes.ok === true ? parseForeground(focusRes.stdout) : null;
 
@@ -570,10 +583,13 @@ export function createDeviceTools({
       return { ok: false, reason: described.code, message: `截图失败：${described.reason}` };
     }
     const buffer = Buffer.isBuffer(res.stdoutBuffer) ? res.stdoutBuffer : Buffer.from(res.stdout ?? '', 'utf8');
-    const size = pngSize(buffer);
+    const size = parsePngSize(buffer);
     if (size === null) {
       return { ok: false, reason: 'bad_image', message: '截图返回的不是有效 PNG（可能是 adb 版本或设备忙），再试一次' };
     }
+    // 记住这张图的宽高：它才是当前显示 / 输入坐标空间（横屏时与 `wm size` 不同）。
+    // 写盘失败也已经知道尺寸了 —— 尺寸是设备给的，与本地存图成败无关。
+    lastShot = { serial: found.serial, width: size.width, height: size.height };
 
     const file = path.join(shotDir, `shot-${at}.png`);
     try {

@@ -3,7 +3,8 @@
 //
 // 覆盖（对应任务要求的「≥70 条断言」）：
 // status（设备/电量/额度/前台包名/未连接/未授权） / screenshot（路径、PNG 尺寸、文件落盘、图片形状） /
-// tap（夹取、越界、参数校验、预算拦截、冷却） / swipe（时长钳制、参数校验） /
+// tap（夹取、越界、参数校验、预算拦截、冷却、**截图宽高优先 / 未截图回退 wm size**） /
+// swipe（时长钳制、参数校验、截图宽高） /
 // type（ASCII 编码、中文拒绝、敏感词、超长） / key（back/home 映射） /
 // open_app（白名单、黑名单、包名校验、monkey 报错） / **黑名单前台闸门（五个动作）** /
 // **list_apps（解析/过滤/截断/黑名单标记）** / 记账与不记账 / adb 报错映射 / 工具注册。
@@ -24,7 +25,6 @@ import {
   parseBattery,
   parsePackageList,
   parseWmSize,
-  pngSize,
   registerDeviceTools,
 } from '../src/device-tools.js';
 
@@ -47,7 +47,7 @@ const MIN = 60 * 1000;
 // 固定假时钟：本地时间 2026-03-15 14:30，日界与预算都按它算。
 const T0 = new Date(2026, 2, 15, 14, 30, 0, 0).getTime();
 
-/** 造一个最小但合法的 PNG（只到 IHDR 就够 pngSize 读宽高）。 */
+/** 造一个最小但合法的 PNG（只到 IHDR 就够读宽高）。 */
 function makePng(width, height) {
   const buffer = Buffer.alloc(33);
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(buffer, 0);
@@ -177,11 +177,7 @@ const YESTERDAY_FULL = { day: '2026-03-14', usedMs: 30 * MIN, steps: 60, lastTs:
   check('电量解析失败给 null', emptyBattery.level === null && emptyBattery.state === 'unknown');
   check('电量非字符串不崩', parseBattery(undefined).level === null);
 
-  const png = makePng(2560, 1600);
-  check('PNG 宽高解析', JSON.stringify(pngSize(png)) === '{"width":2560,"height":1600}');
-  check('假 PNG 拒绝（签名不对）', pngSize(Buffer.from('not a png at all, really not')) === null);
-  check('超短 buffer 拒绝', pngSize(Buffer.alloc(10)) === null);
-  check('非 Buffer 拒绝', pngSize('x') === null);
+  // PNG 宽高解析（parsePngSize）是 device-core 的纯函数，用例见 test-device-core.mjs §5.5。
 
   check('字母数字原样', encodeAdbText('abc123') === 'abc123');
   check('空格转 %s', encodeAdbText('a b') === 'a%sb');
@@ -278,6 +274,14 @@ const YESTERDAY_FULL = { day: '2026-03-14', usedMs: 30 * MIN, steps: 60, lastTs:
 
   const reset = await makeEnv({ seed: YESTERDAY_FULL }).tools.deviceStatus();
   check('跨日重置额度', reset.leftMinutes === 30 && reset.leftSteps === 60 && reset.usedSteps === 0);
+
+  // 截图宽高才是输入坐标空间（横屏时 `wm size` 报的是竖屏物理尺寸）：status 也跟着截图走。
+  const shotFirst = makeEnv({
+    routes: { screencap: { ok: true, code: 0, stderr: '', stdout: '', stdoutBuffer: makePng(2944, 1840) } },
+  });
+  await shotFirst.tools.deviceScreenshot();
+  const afterShot = await shotFirst.tools.deviceStatus();
+  check('截过图后 status 的 screen 跟截图走', afterShot.screen.width === 2944 && afterShot.screen.height === 1840, afterShot.screen);
 }
 
 // ── 3. device_screenshot ──────────────────────────────────────────────────
@@ -380,6 +384,27 @@ const YESTERDAY_FULL = { day: '2026-03-14', usedMs: 30 * MIN, steps: 60, lastTs:
   check('读不到屏幕尺寸也不拦截点击', noScreenTap.ok === true);
   check('读不到屏幕尺寸就不夹取', noScreenTap.x === 5000 && noScreenTap.screen.width === null);
 
+  // 真机 TB375FC：竖持时 `wm size` 是 1840x2944，横屏应用的实际输入空间是 2944x1840。
+  // 截过图就必须按截图宽高夹取 —— x=2400 是合法的，不能被夹成 1840。
+  const wideEnv = makeEnv({
+    seed: todayState(),
+    routes: { screencap: { ok: true, code: 0, stderr: '', stdout: '', stdoutBuffer: makePng(2944, 1840) } },
+  });
+  await wideEnv.tools.deviceScreenshot();
+  const wideTap = await wideEnv.tools.deviceTap({ x: 2400, y: 900 });
+  check('截过图后横屏坐标原样下发（不被夹）', wideTap.x === 2400 && wideTap.y === 900 && wideTap.clamped === false, wideTap);
+  check('回执 screen 是截图宽高', wideTap.screen.width === 2944 && wideTap.screen.height === 1840, wideTap.screen);
+  check('adb 收到 2400 900', wideEnv.runAdb.last('input tap')?.line.includes('input tap 2400 900') === true);
+  wideEnv.advance(1200);
+  const wideEdge = await wideEnv.tools.deviceTap({ x: 9999, y: 9999 });
+  check('横屏下越界仍夹到截图边界', wideEdge.x === 2943 && wideEdge.y === 1839 && wideEdge.clamped === true);
+
+  // 没截过图 → 回退 `wm size`（1280x800），宽坐标照旧被夹。
+  const fallbackEnv = makeEnv({ seed: todayState() });
+  const fallbackTap = await fallbackEnv.tools.deviceTap({ x: 2400, y: 900 });
+  check('没截过图回退 wm size 并夹取', fallbackTap.x === 1279 && fallbackTap.y === 799 && fallbackTap.clamped === true, fallbackTap);
+  check('回退时 screen 是 wm size', fallbackTap.screen.width === 1280 && fallbackTap.screen.height === 800);
+
   const used = await makeEnv({ seed: todayState({ usedMs: 29 * MIN, lastTs: T0 - 10 * MIN }) }).tools.deviceTap({ x: 5, y: 5 });
   check('剩最后 1 分钟还能点', used.ok === true);
   check('用满 30 分钟后拦下一下', (await makeEnv({ seed: todayState({ usedMs: 30 * MIN, lastTs: T0 - 10 * MIN }) }).tools.deviceTap({ x: 5, y: 5 })).reason === 'daily_budget');
@@ -404,6 +429,17 @@ const YESTERDAY_FULL = { day: '2026-03-14', usedMs: 30 * MIN, steps: 60, lastTs:
   const clamped = await makeEnv({ seed: todayState() }).tools.deviceSwipe({ x1: -100, y1: -100, x2: 9999, y2: 9999, durationMs: 300 });
   check('滑动两端都夹到屏幕内', clamped.x1 === 0 && clamped.y1 === 0 && clamped.x2 === 1279 && clamped.y2 === 799);
   check('夹取后标 clamped', clamped.clamped === true);
+
+  // 滑动同样按截图宽高夹：横屏终点 x=2400 不该被夹回去。
+  const wideSwipeEnv = makeEnv({
+    seed: todayState(),
+    routes: { screencap: { ok: true, code: 0, stderr: '', stdout: '', stdoutBuffer: makePng(2944, 1840) } },
+  });
+  await wideSwipeEnv.tools.deviceScreenshot();
+  const wideSwipe = await wideSwipeEnv.tools.deviceSwipe({ x1: 100, y1: 900, x2: 2400, y2: 900 });
+  check('截过图后滑动终点不被夹', wideSwipe.x2 === 2400 && wideSwipe.clamped === false, wideSwipe);
+  check('滑动回执 screen 是截图宽高', wideSwipe.screen.width === 2944 && wideSwipe.screen.height === 1840);
+  check('adb 收到横屏滑动端点', wideSwipeEnv.runAdb.last('input swipe')?.line.includes('input swipe 100 900 2400 900 300') === true);
 
   const brokenEnv = makeEnv({ seed: todayState() });
   const broken = await brokenEnv.tools.deviceSwipe({ x1: 1, y1: 1, x2: 'x', y2: 2 });

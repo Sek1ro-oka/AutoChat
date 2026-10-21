@@ -407,6 +407,33 @@ export function pickDevice(devices) {
   return { ok: false, reason: 'no_device', serials, states: list.map((item) => item.state) };
 }
 
+// ── 截图尺寸（真正的显示 / 输入坐标空间） ───────────────────────────────────
+/**
+ * 从 PNG 头读宽高：PNG 签名 8 字节 + IHDR 长度(4) + 'IHDR'(4)，随后宽(4)、高(4) 都是
+ * 大端无符号整数，即偏移 16..24。
+ *
+ * 为什么要以截图而不是 `wm size` 为准：`wm size` 报的是**物理面板**（联想小新 Pad Pro
+ * 竖持时 1840x2944），而横屏应用的实际显示与输入坐标空间是旋转后的 2944x1840 ——
+ * `dumpsys window displays` 的 `cur=` / `app=` 与 `screencap` 出来的 PNG 都是后者。
+ * 拿物理尺寸去夹取，会把 x∈[1840,2944) 的合法坐标夹到 1840：看着「夹进屏幕了」，
+ * 实际点在了左边一列。截图是模型真正看到的那张图，它的宽高天然就是输入坐标空间。
+ *
+ * 非 PNG（签名 / IHDR 不符）、长度不足 24 字节、宽高为 0 → `null`：
+ * 残缺的头不能拿去夹坐标，由调用方按截图失败处理。
+ */
+export function parsePngSize(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 24) return null;
+  const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  for (let i = 0; i < signature.length; i += 1) {
+    if (buffer[i] !== signature[i]) return null;
+  }
+  if (buffer.toString('latin1', 12, 16) !== 'IHDR') return null;
+  const width = buffer.readUInt32BE(16);
+  const height = buffer.readUInt32BE(20);
+  if (width < 1 || height < 1) return null;
+  return { width, height };
+}
+
 // ── 坐标 ────────────────────────────────────────────────────────────────────
 /** 正整数（屏幕宽高）：非法值返回 null —— 没有屏幕尺寸就没有「夹到屏幕内」这件事。 */
 function toScreenSize(value) {

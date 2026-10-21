@@ -2,7 +2,7 @@
 //
 // 覆盖（对应任务要求的「≥90 条断言」）：
 // 配置钳制 / adb devices 解析（多设备、unauthorized、offline、噪声行） / 设备选择 /
-// 坐标夹取 / 包名校验 / risky 分类 / **黑名单（内核不可移除、并入、优先级）** /
+// 坐标夹取 / 截图宽高解析（PNG IHDR） / 包名校验 / risky 分类 / **黑名单（内核不可移除、并入、优先级）** /
 // **dumpsys window 前台包名解析** / 预算边界（第 60 步放行、第 61 步拦、30 分钟、
 // 跨日重置、暂停、冷却） / 状态序列化 / adb 错误文案 / 提示词块。
 //
@@ -31,6 +31,7 @@ import {
   parseDevices,
   parseDeviceState,
   parseForeground,
+  parsePngSize,
   pauseDevice,
   pickDevice,
   recordStep,
@@ -290,6 +291,34 @@ function expectApps(list) {
   equal('滑动正常值不变', clampSwipe(100, 700, 100, 100, 1280, 800), { x1: 100, y1: 700, x2: 100, y2: 100 });
   check('滑动含 NaN → null', clampSwipe(1, 2, 3, Number.NaN, 1280, 800) === null);
   check('滑动含空 → null', clampSwipe(1, 2, undefined, 4, 1280, 800) === null);
+}
+
+// ── 5.5 parsePngSize（截图宽高 = 真实输入坐标空间） ─────────────────────────
+{
+  /** 造一个最小但合法的 PNG（只到 IHDR 就够 parsePngSize 读宽高）。 */
+  function makePng(width, height, { chunk = 'IHDR', signature = true } = {}) {
+    const buffer = Buffer.alloc(33);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(buffer, 0);
+    if (!signature) buffer[1] = 0x00;
+    buffer.writeUInt32BE(13, 8);
+    buffer.write(chunk, 12, 'latin1');
+    buffer.writeUInt32BE(width, 16);
+    buffer.writeUInt32BE(height, 20);
+    buffer.writeUInt8(8, 24);
+    buffer.writeUInt8(6, 25);
+    return buffer;
+  }
+
+  equal('PNG 宽高解析', parsePngSize(makePng(2560, 1600)), { width: 2560, height: 1600 });
+  equal('真机横屏截图尺寸原样读出', parsePngSize(makePng(2944, 1840)), { width: 2944, height: 1840 });
+  equal('竖持尺寸也能读', parsePngSize(makePng(1840, 2944)), { width: 1840, height: 2944 });
+  check('宽为 0 → null', parsePngSize(makePng(0, 1840)) === null);
+  check('高为 0 → null', parsePngSize(makePng(2944, 0)) === null);
+  check('非 PNG（签名不对）→ null', parsePngSize(Buffer.from('not a png at all, really not')) === null);
+  check('IHDR 不在偏移 12 → null', parsePngSize(makePng(2944, 1840, { chunk: 'IDAT' })) === null);
+  check('长度不足 24 字节 → null', parsePngSize(Buffer.alloc(10)) === null);
+  check('正好 23 字节 → null', parsePngSize(Buffer.alloc(23)) === null);
+  check('非 Buffer → null', parsePngSize('x') === null && parsePngSize(null) === null && parsePngSize(undefined) === null);
 }
 
 // ── 6. validateAppPackage ──────────────────────────────────────────────────

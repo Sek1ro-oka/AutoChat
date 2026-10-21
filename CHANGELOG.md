@@ -25,6 +25,7 @@
 - adb 路径默认值不再写死本机绝对路径，改成 `%LOCALAPPDATA%\Android\platform-tools\adb.exe`，执行前由导出的纯函数 `expandEnvPath` 展开（只认 `%NAME%`，取不到值原样留着）：同一台机器展开后行为不变，仓库里不再出现某个人的用户目录绝对路径，换账号 clone 也不用改代码。`config.example.json` 与冒烟脚本同步（脚本先展开再 `existsSync`）。
 - 本轮不含自动唤醒：模型会用工具，但「自己跑去玩」的定时器与玩后写日记留到下一步。
 - 状态在 `state/device-state.json`，动作日志 `state/device-actions.jsonl`，截图 `state/device/`。
+- 修复（真机验收 `TB375FC` / Android 16）：坐标空间改用**最近一次截图的宽高**，不再拿 `wm size` 当唯一依据。竖持时 `wm size` 报物理面板 `1840x2944`，而横屏应用的实际显示与输入空间是旋转后的 `2944x1840`（`dumpsys window displays` 的 `cur=` / `app=` 与 `screencap` 的 PNG 一致），旧实现把 x∈[1840,2944) 的合法坐标夹到 `1840`，点错位置。新增纯函数 `parsePngSize(buffer)`（`src/device-core.js`，读 PNG IHDR 偏移 16/20 的大端宽高，非 PNG/长度不足/尺寸为 0 返回 `null`）；`src/device-tools.js` 在内存里记住最近一次截图（带 serial，换设备自动作废），`device_tap` / `device_swipe` 夹取与 `device_status` 的 `screen` 优先用它，没截过图才回退 `wm size`；回执里的 `screen` 即真实使用的宽高，`clamped` 语义不变（越界夹到边界、不报错）。`docs/guides/DEVICE.md` 的已知限制补了「旋转屏幕后先知截图再点击」。
 
 ### 小黑盒：看帖、搜索与自主评论（2026-10-21，T-022）
 
