@@ -60,6 +60,14 @@ import * as socialAuto from '../src/social-auto.js';
 // 时钟由 now 注入）。bridge.js 顶层 import 会被下面按行剥掉，这里补上同名绑定：
 // loadConfig 期间就调 normalizeCrossConfig，少了这一行 VM 里立刻 ReferenceError。
 import * as crossCore from '../src/cross-core.js';
+// 生图（T-017）：image-core 是纯逻辑（配置归一 / 提示词清洗与审计 / 尺寸 / 额度 /
+// 上游响应解析 / 用量序列化 / 来源白名单），image-gen 是 IO 薄层（取图 / 落盘 / 读回 /
+// 索引）。bridge.js 顶层把这两个模块的导出都 import 成了同名绑定，下面按行剥掉 import
+// 之后必须在 context 里补回来：loadConfig 期间就调 normalizeImageConfig，生图端点又会用
+// 其余函数，少任何一行 VM 里都是 ReferenceError。
+// 导出名已核对：与上面所有 spread 模块均不重名（唯一的 nowIso 冲突是既有问题）。
+import * as imageCore from '../src/image-core.js';
+import * as imageGen from '../src/image-gen.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -203,6 +211,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...stall, ...consoleAuth, ...qzone, ...presetPrompt,
     ...socialAuto,
     ...crossCore,
+    ...imageCore, ...imageGen,
     ...affectCore, ...affectVent, ...affectText,
     ...profileCore,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的

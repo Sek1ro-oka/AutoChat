@@ -172,6 +172,31 @@ import {
 // 单行 import：scripts/audit-bridge-harness.mjs 按行剥顶层 import，单行最不容易出岔子
 // （同名绑定由 harness 的 `...affectText` 注入 VM）。
 import { AFFECT_TEXT_MAX_CHARS, cleanVentText, buildVentPrompt, pickFallbackText } from './affect-text.js';
+// 生图 / 发图（T-017）：提示词清洗与审计、尺寸钳制、滑动窗口额度、来源白名单全是纯函数。
+// 桥接这边只做「鉴权 → 闸门顺序 → 调模块 → 记账 + 落盘」，**不写任何额度或长度字面量**：
+// 调参只改 image-core.js 的 IMAGE_DEFAULTS（或 config.json 的 socialV2.images）。
+// 这个模块不读时钟、不碰文件，所以 scripts/audit-bridge-harness.mjs 能把它 spread 进 VM。
+import {
+  IMAGE_SOURCE_HOSTS,
+  normalizeImageConfig,
+  cleanImagePrompt,
+  checkImagePrompt,
+  normalizeSize,
+  imageQuota,
+  recordImageUsage,
+  serializeImageUsage,
+  parseImageUsage,
+  isAllowedImageSource
+} from './image-core.js';
+// 落盘与索引维护全在 image-gen.js：uuid 命名、mime 白名单、超过 200 条删最旧文件
+// （删失败忽略）都是它的事，桥接不重复实现一遍。
+import {
+  fetchGeneratedImage,
+  saveGeneratedImage,
+  readStoredImage,
+  readIndex,
+  saveIndexEntry
+} from './image-gen.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -213,6 +238,30 @@ const AFFECT_VENT_SESSION_FILE = path.join(STATE_DIR, 'affect-vent-session.json'
 // 手删它等于把三个窗口清零 —— 这是有意的（出问题时给运维一个不用改代码的复位手段）。
 // 注意 dev-doc 写的是 DATA_DIR，但桥接里只有 STATE_DIR（qzone/affect 也都落在这里）。
 const PROFILE_STATE_FILE = path.join(STATE_DIR, 'profile-changes.json');
+
+// ── 生图 / 发图（T-017）：三份落盘位置 + 两个体积上限 ─────────────────────────
+// 图片本体（state/images/）、索引（哪张图在哪个文件）、额度账本（谁在什么时候画了 /
+// 存了 / 换了）刻意分成三份：它们的生命周期不同 —— 账本是「24 小时窗口」的事实来源，
+// 索引是「这张图还能不能取回」的事实来源，删掉任何一份都该立刻生效（运维的复位手段）。
+// 注意 dev-doc 写的是 DATA_DIR，但桥接里只有 STATE_DIR（profile / cross / sticker 也都落这里）。
+const IMAGE_DIR = path.join(STATE_DIR, 'images');
+// 索引上限比额度窗口（24h 20 张）宽得多：额度按账本算，索引只决定「旧图还能不能取回」。
+// 超过就删最旧的**文件**（saveIndexEntry 负责，删失败忽略）。
+const IMAGE_INDEX_MAX = 200;
+const IMAGE_INDEX_FILE = path.join(STATE_DIR, 'image-index.json');
+// 额度账本形状：{ version: 1, entries: [{ kind, ts, imageId? }] }，三种 kind 共用一份。
+// 和 profile-changes.json 一样是「可丢」文件：不存在或损坏都从空账本重启，绝不让端点 500。
+const IMAGE_USAGE_FILE = path.join(STATE_DIR, 'image-usage.json');
+// 单张图的上限：发图（原样尺寸）与换头像（QQ 头像接口更小）分开算。
+// 8MB 与 MAX_MEDIA_BYTES 同量级 —— 再大就不是「画一张」，而是把桥接当图床用。
+const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const IMAGE_AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+// 图片 id 只接受 randomUUID 的形状（image-gen 就用它命名文件）。不像 uuid 的一律 400，
+// 连文件系统都不碰 —— 这是 /api/images/generated/:id 唯一防路径穿越的地方，不要放宽。
+const IMAGE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// 取图端点前缀。它同时出现在三处判定里（路由匹配、slice 出 id、agent 白名单用的
+// `/api/images/` 前缀），所以只在这里写一次字面量。
+const IMAGE_GET_PREFIX = '/api/images/generated/';
 
 /**
  * 模式拼写的**唯一**归一入口（输入边界）。
@@ -1076,6 +1125,14 @@ function loadConfig() {
   // 端点/控制台/记录钩子读到的永远是归一后的 cfg，不用各自补默认值。
   cfg.socialV2.cross = normalizeCrossConfig(cfg.socialV2?.cross);
 
+  // socialV2.images：生图 / 发图 / 存表情 / 换头像（T-017）。
+  // 和 profile / cross 一样，这里是**唯一**的归一入口：缺字段补出厂默认（enabled: true）、
+  // 越界钳制，normalizeImageConfig 永不抛。额度（24h 20 张 + 45 秒一张、5 个表情、
+  // 24h 1 次头像）住在 image-core.js 的 IMAGE_DEFAULTS 里，这里不重复写数字。
+  // 缺省段 = 出厂默认（能画）—— 没写这一段也照常可用，不用先改 config.json。
+  // 刻意**不**进控制台开关列表：这是 AI 的本能动作，不是操作者的面板功能（dev-doc §六）。
+  cfg.socialV2.images = normalizeImageConfig(cfg.socialV2?.images);
+
   // socialV2.voice：语音发送（把准备好的音频文件当 QQ 语音发出去）。
   // dir 为相对仓库根目录的语音库路径；AI 的 qq_send_voice 默认只能从这个目录取文件，
   // 绝对路径需要显式开 allowAbsolutePath（默认关，避免 prompt injection 读到任意本地文件）。
@@ -1748,6 +1805,58 @@ function writeProfileState(state) {
     log(`[profile] 状态落盘失败（本轮继续）：${error?.message ?? error}`);
     return false;
   }
+}
+
+// ── 生图 / 发图（T-017）：状态文件读写 ───────────────────────────────────────
+// 判定逻辑（提示词清洗与审计 / 尺寸 / 额度 / 来源白名单）全在 src/image-core.js，
+// 落盘与索引在 src/image-gen.js。这里只负责 state/image-usage.json 的读与写，以及
+// 把索引读写转给 image-gen —— 和 profile / affect 一样**不做进程内缓存**：文件很小，
+// 而且手删 image-usage.json 就该立刻把三个窗口清零。
+
+/**
+ * 读额度账本（纯读，不落盘）。
+ *
+ * 没有文件 / JSON 坏了 / 形状不对 → parseImageUsage 的出厂空账本（entries: []）。
+ * 它接受对象、数组和字符串，且永不抛，所以这里连 try 都省了；读接口也绝不制造副作用
+ * （否则一次 GET /api/socialV2/prompt 就会往 state/ 里落一个空账本）。
+ */
+function readImageUsage() {
+  return parseImageUsage(readJsonSafe(IMAGE_USAGE_FILE, null));
+}
+
+/**
+ * 落盘额度账本。
+ *
+ * 先 serialize 再 parse 走一遍形状校验（recordImageUsage 的返回值本来就归一过，
+ * 这里再兜一层是为了挡住「手改账本 / 半截对象」这类输入）。
+ *
+ * 落盘失败**只记日志并返回 false**：图已经画出来、表情已经进了账号、头像已经换了，
+ * 不能因为写盘失败就给模型回 500 —— 那会让它以为没成功，然后立刻再试一次白吃一次额度。
+ */
+function writeImageUsage(usage) {
+  try {
+    atomicWriteJson(IMAGE_USAGE_FILE, parseImageUsage(serializeImageUsage(usage)));
+    return true;
+  } catch (error) {
+    log(`[images] 额度账本落盘失败（本轮继续）：${error?.message ?? error}`);
+    return false;
+  }
+}
+
+/**
+ * 读图片索引（最新在前）。
+ *
+ * 索引的**写**（含超过 IMAGE_INDEX_MAX 条时删最旧文件）在 image-gen 的 saveIndexEntry
+ * 里，这里只读。GET /api/images/generated/:id 只认这份索引：绝不拿 id 拼路径去读文件，
+ * 那样一旦 id 校验漏一个字符就是任意文件读取（dev-doc §四 明确要求）。
+ */
+async function readImageIndex() {
+  return readIndex(IMAGE_INDEX_FILE);
+}
+
+/** 记一条索引（同 id 替换；超过 IMAGE_INDEX_MAX 条删最旧文件，删文件失败忽略）。 */
+async function writeImageIndex(entry) {
+  return saveIndexEntry(IMAGE_INDEX_FILE, entry, IMAGE_INDEX_MAX);
 }
 
 /**
@@ -2616,6 +2725,57 @@ async function main() {
     stickerEntries = updated.entries;
     saveStickerStoreSafe();
     return { entry: updated.entry, messageId: data?.message_id ?? null };
+  }
+
+  /**
+   * 发一张本地图片到会话（POST /api/send/image 的发送腿）。
+   *
+   * 与 sendStickerV2 共用 sendChain 和 assertSendAllowed，理由完全一样：
+   * - sendChain：文字 / 表情 / 图片的先后顺序必须和模型调用顺序一致，并发调用不能插队；
+   * - assertSendAllowed：校验放在**入队之后**（sleep 完那一刻），不是入队前 ——
+   *   这 800–2000ms 里会话可能被切走、模式可能被换掉，只有队列里那一刻的判定才作数。
+   * 图片字节在这里就转成 base64 交给网关（file: 'base64://…'）：绝不把一个本地路径
+   * 交给 OneBot 去读，那样等于给远程网关一个读本机任意文件的通道。
+   */
+  async function sendImageV2(key, buffer, options = {}) {
+    const assertSendAllowed = typeof options.assertSendAllowed === 'function' ? options.assertSendAllowed : captureSendGuard(key);
+    const [kind, id] = String(key).split(':');
+    const segments = [{ type: 'image', data: { file: 'base64://' + buffer.toString('base64') } }];
+    const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
+    const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
+    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+    let sendResolve;
+    let sendReject;
+    const sendResult = new Promise((resolve, reject) => {
+      sendResolve = resolve;
+      sendReject = reject;
+    });
+    sendChain = sendChain.then(async () => {
+      try {
+        // 真人发图前会有短暂停顿（选图 / 相册翻一下），别让图片紧贴着上一条文字弹出。
+        await sleep(randInt(800, 2000));
+        assertSendAllowed();
+        const res = await fetch(`${httpUrl}/${action}`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
+          },
+          body: JSON.stringify(params),
+          signal: AbortSignal.timeout(15000)
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
+          const hint = res.status === 426 ? '（HTTP 426：snowluma.httpUrl 可能指向了 WebSocket 端口，请检查 config.json 的 snowluma.httpUrl 是否为 OneBot HTTP API 地址）' : '';
+          throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}${hint}`);
+        }
+        sendResolve(body.data);
+      } catch (error) {
+        sendReject(error);
+      }
+    });
+    const data = await sendResult;
+    return { messageId: data?.message_id ?? null };
   }
 
   // 更新本地 AI 认知（含义/标签/用法）。
@@ -5946,6 +6106,491 @@ async function main() {
           return;
         }
 
+        // ── 生图 / 发图 / 存表情 / 换头像（T-017）──────────────────────────────
+        // 纯函数与 IO 都不在这里：提示词清洗/审计、尺寸、额度、来源白名单在
+        // src/image-core.js；取图、落盘、索引在 src/image-gen.js。这一段只做
+        // 「鉴权 → 闸门顺序 → 记账 → 说人话的错误」。
+        //
+        // 五个端点都**不**进 adminOnlyV2Paths：画图、发图、存表情、换头像是 AI 的
+        // 本能动作，不是控制台的管理操作。真正的闸门是 enabled + 提示词审计 +
+        // 滑动窗口额度 + 会话令牌 + 群白名单 + 发送守卫，和上面三个 profile 端点
+        // 同一套口径。
+        //
+        // 额度账本（state/image-usage.json）是唯一事实来源，而且只在**动作真正成功
+        // 之后**才记账：提前记账会让一次上游失败白吃一张图的额度，模型会以为是自己
+        // 的提示词有问题，然后换个写法再试 —— 那是最坏的一种浪费。
+
+        /** 归一后的生图配置段；cfg 里没有这一段时现归一一份（loadConfig 正常都会补上）。 */
+        function imageConfig() {
+          return cfg.socialV2?.images ?? normalizeImageConfig(undefined);
+        }
+
+        /**
+         * 某类额度的当前视图（prompt 快照与三个额度端点共用）。
+         *
+         * usage 允许传入：prompt 快照一次要算三种 kind，传同一份账本能少读两次文件；
+         * 端点的额度判定则必须自己现读 —— 那里「读账本」的时机是闸门顺序的一部分。
+         */
+        function readImageUsageFor(kind, now = Date.now(), usage = readImageUsage()) {
+          return imageQuota(usage, imageConfig(), kind, now);
+        }
+
+        /**
+         * 429 响应体里的结构化字段。
+         *
+         * 人话文案（error）是给模型读的；这几个字段是给 MCP 的 describeImageFailure
+         * 与将来可能出现的控制台用的 —— 它要能区分「等 45 秒」和「今天没了」。
+         */
+        function imageQuotaView(quota) {
+          return {
+            retryAfterMs: Number(quota?.retryAfterMs) || 0,
+            windowCount: Number(quota?.windowCount) || 0,
+            remaining: Number(quota?.remaining) || 0,
+            windowHours: Number(quota?.windowHours) || 0,
+            windowCap: Number(quota?.windowCap) || 0,
+            minGapMs: Number(quota?.minGapMs) || 0
+          };
+        }
+
+        /**
+         * 额度不够时的文案。三种 kind 的「还要等多久」说法不同，但都必须把**具体
+         * 时长**说出来：只回一句「太频繁了」，模型下一步就会重试；说清「再等 45 秒」
+         * 它才会去等。时长全部由 quota 的字段算（窗口与最小间隔都可配），不写死数字。
+         */
+        function imageQuotaErrorText(kind, quota) {
+          const wait = profileWaitText(quota?.retryAfterMs) || '一会儿';
+          const retrySec = Math.max(1, Math.ceil((Number(quota?.retryAfterMs) || 0) / 1000));
+          if (kind === 'generate') {
+            if (quota?.reason === 'too_frequent') {
+              // 45 秒是**上游**的硬限制（pollinations 一张/45s），本地 minGapMs 只是
+              // 跟着它。用配置值而不是写死 45：改配置后文案要跟着变，否则模型会照着
+              // 一个和真实限制对不上的数字去等。
+              const gapMs = Math.max(0, Number(quota.minGapMs) || 0);
+              const gapText = gapMs % 1000 === 0 ? String(gapMs / 1000) : (gapMs / 1000).toFixed(1);
+              return `出图太频繁了，${retrySec} 秒后才能再画（上游限制 ${gapText} 秒一张）`;
+            }
+            if (quota?.reason === 'window_cap') {
+              return `${quota.windowHours} 小时内画了 ${quota.windowCap} 张，额度用完了，约 ${wait}后再来`;
+            }
+            return `现在画不了：${quota?.reason || '未知原因'}`;
+          }
+          if (kind === 'sticker') {
+            if (quota?.reason === 'too_frequent') return `收藏表情太频繁了，${retrySec} 秒后才能再收`;
+            if (quota?.reason === 'window_cap') return `${quota.windowHours} 小时内收藏表情额度用完了（${quota.windowCap} 个），约 ${wait}后才能再收`;
+            return `现在存不了表情：${quota?.reason || '未知原因'}`;
+          }
+          // avatar：一句话里要同时交代「24 小时几次」和「两次之间隔多久」，
+          // 否则模型只会看到「太频繁」，然后过 5 分钟又试一次。
+          const gapHours = Math.max(0, Number(quota?.minGapMs) || 0) / 3600000;
+          const gapText = Number.isInteger(gapHours) ? String(gapHours) : gapHours.toFixed(1);
+          if (quota?.reason === 'too_frequent') {
+            return `换头像太频繁了：${quota.windowHours} 小时最多换 ${quota.windowCap} 次、两次之间至少隔 ${gapText} 小时，约 ${wait}后再换`;
+          }
+          if (quota?.reason === 'window_cap') return `${quota.windowHours} 小时最多换 ${quota.windowCap} 次，约 ${wait}后再换`;
+          return `现在换不了头像：${quota?.reason || '未知原因'}`;
+        }
+
+        /**
+         * 额度闸门的统一回应：403（功能关了）或 429（间隔/窗口额度）。
+         * 总是已经回过响应 —— 调用方直接 `return` 即可，这是刻意的（少一条分支）。
+         */
+        function imageQuotaRejected(kind, quota) {
+          if (quota?.reason === 'disabled') {
+            sendJson({ ok: false, reason: 'disabled', error: '生图功能已关闭（socialV2.images.enabled = false）' }, 403);
+            return;
+          }
+          sendJson({ ...imageQuotaView(quota), ok: false, reason: quota?.reason || 'quota_blocked', error: imageQuotaErrorText(kind, quota) }, 429);
+        }
+
+        /** 上游失败的人员可读说明（fetch_failed / upstream_error / bad_content 三档）。 */
+        function imageUpstreamFailText(reason) {
+          if (reason === 'fetch_failed') return '连不上上游出图服务（网络/DNS），这不是提示词的问题';
+          if (reason === 'bad_content') return '上游返回的不是一张图，稍后再试';
+          return '上游出图服务临时报错，这不是提示词的问题';
+        }
+
+        /** 提示词没过闸门时的说明：要能让模型知道**该改什么**，而不是只听到「不行」。 */
+        function imagePromptErrorText(verdict) {
+          const first = Array.isArray(verdict?.hits) ? verdict.hits[0] : null;
+          const hit = typeof first === 'string' ? first : String(first?.term ?? first?.match ?? first?.message ?? '');
+          const shorten = (value) => (value.length > 40 ? `${value.slice(0, 40)}…` : value);
+          if (verdict?.reason === 'too_short') return '提示词太短了：说清想画什么（至少 3 个字），别只发一个词';
+          if (verdict?.reason === 'too_long') return `提示词太长了：最多 ${imageConfig().promptMaxChars} 个字，删掉不重要的细节再试`;
+          if (verdict?.reason === 'audit') return `提示词没通过内容审计${hit ? `（命中：${shorten(hit)}）` : ''}，换个说法再试`;
+          if (verdict?.reason === 'banned_term') return `提示词里有不允许画的词${hit ? `：${shorten(hit)}` : ''}，换个说法再试`;
+          if (verdict?.reason === 'real_person') return '不画真人照片：风格、插画、场景都行，真人不行';
+          return '提示词没通过检查，换个说法再试';
+        }
+
+        /**
+         * 图片来源类端点的鉴权，与 GET /api/avatar 同一套口径。
+         *
+         * 返回 true = 已经回过错误响应，调用方直接 return。
+         * 三种调用方：
+         *   ① MCP 带 x-agent-token + 会话 key → 令牌必须属于这个 key，且当前模式允许它；
+         *   ② MCP 只带 x-agent-token（画图/存表情/换头像这类不针对某个会话的动作）
+         *      → 只要求它是个仍然有效的会话令牌；
+         *   ③ 控制台（不带 x-agent-token）→ 走到这里说明已过全局令牌关卡，再确认一次
+         *      tokenMatches，免得将来那个关卡放宽时这里裸奔。
+         */
+        function imageAuthFailed(req, key) {
+          const agentToken = String(req.headers['x-agent-token'] ?? '').trim();
+          if (agentToken) {
+            if (key && !agentTokenOk(key, agentToken)) {
+              sendJson({ ok: false, reason: 'bad_token', error: 'agent token 无效' }, 403);
+              return true;
+            }
+            if (key && !v2SessionAllowed(key)) {
+              sendJson({ ok: false, reason: 'session_not_allowed', error: '目标不在当前模式允许范围内' }, 403);
+              return true;
+            }
+            if (!key && !isLiveAgentToken(agentToken)) {
+              sendJson({ ok: false, reason: 'bad_token', error: '会话令牌无效' }, 403);
+              return true;
+            }
+            return false;
+          }
+          if (!tokenMatches) {
+            sendJson({ ok: false, reason: 'unauthorized', error: '未授权：请提供控制台令牌或会话令牌' }, 401);
+            return true;
+          }
+          return false;
+        }
+
+        /** 五个图片端点的请求体解析；解析失败时自己回过响应并返回 undefined。 */
+        async function readImageBody(req) {
+          try {
+            return await readBody();
+          } catch (error) {
+            sendJson({ ok: false, reason: 'bad_body', error: `请求体无法解析：${error?.message ?? error}` }, error?.statusCode ?? 400);
+            return undefined;
+          }
+        }
+
+        // ① 画一张图。闸门顺序（动这里之前先读 dev-doc §五）：
+        //    鉴权 → 总开关 → 提示词 → 尺寸 → 生成额度 → 上游 → 落盘 → 索引 → 记账。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/images/generate') {
+          const body = await readImageBody(req);
+          if (!body) return;
+          if (imageAuthFailed(req, '')) return;
+          const imageCfg = imageConfig();
+          // 总开关关掉时**先**说清楚，别让模型在提示词上白折腾一轮：它拿到 bad_prompt
+          // 会去改词，而真实原因是功能根本没开。
+          if (imageCfg.enabled === false) {
+            sendJson({ ok: false, reason: 'disabled', error: '生图功能已关闭（socialV2.images.enabled = false）' }, 403);
+            return;
+          }
+          const cleaned = cleanImagePrompt(body.prompt, imageCfg.promptMaxChars);
+          const verdict = checkImagePrompt(cleaned, imageCfg);
+          if (!verdict.ok) {
+            // hits 原样回给调用方（MCP 会拼进给模型的提示）；reason 保持 'bad_prompt'
+            // 这一层口径，具体是哪一条用 `code` 带上 —— 外部只需要认一层 reason。
+            sendJson({ ok: false, reason: 'bad_prompt', code: verdict.reason, error: imagePromptErrorText(verdict), hits: verdict.hits }, 400);
+            return;
+          }
+          const size = normalizeSize(body.width, body.height, imageCfg);
+          const now = Date.now();
+          const quota = readImageUsageFor('generate', now);
+          if (!quota.ok) {
+            imageQuotaRejected('generate', quota);
+            return;
+          }
+          const seed = Number.isFinite(Number(body.seed)) ? Math.trunc(Number(body.seed)) : undefined;
+          let generated;
+          try {
+            generated = await fetchGeneratedImage({ prompt: cleaned, width: size.width, height: size.height, seed, safe: imageCfg.safe });
+          } catch (error) {
+            log(`[images] 生图异常：${error?.message ?? error}`);
+            sendJson({ ok: false, reason: 'upstream_error', error: '上游出图服务暂时不可用，这不是提示词的问题' }, 502);
+            return;
+          }
+          if (!generated.ok) {
+            if (generated.reason === 'rate_limited') {
+              // 上游 402：本地额度放行了、上游还在冷却。必须是 429 而不是 502 ——
+              // 这是「等一会儿就好」，不是「坏了」，重试策略完全不同。
+              const retryAfterMs = Math.max(1000, Number(generated.retryAfterMs) || 45000);
+              sendJson({ ok: false, reason: 'rate_limited', retryAfterMs, error: `上游还在冷却，约 ${Math.ceil(retryAfterMs / 1000)} 秒后再试` }, 429);
+              return;
+            }
+            log(`[images] 生图失败：${generated.reason}${generated.status ? ` (HTTP ${generated.status})` : ''}`);
+            sendJson({ ok: false, reason: generated.reason || 'upstream_error', error: imageUpstreamFailText(generated.reason) }, 502);
+            return;
+          }
+          // 落盘 → 索引 → 记账。顺序固定：先有文件才谈得上索引，先有 id 才谈得上记账。
+          // 任何一段抛错都不回滚前一段：一张没人引用的 jpg 不值一次回滚的复杂度。
+          try {
+            const meta = { width: size.width, height: size.height, source: imageCfg.provider };
+            const entry = await saveGeneratedImage({ dir: IMAGE_DIR, buffer: generated.buffer, mime: generated.mime, prompt: cleaned, meta });
+            // 宽高只能放 meta：image-gen 的索引条目白名单只认顶层
+            // {id,file,ts,bytes,mime,prompt,meta}，顶层 width/height 会被丢掉。
+            await writeImageIndex({ id: entry.id, file: entry.file, ts: entry.ts, bytes: entry.bytes, mime: entry.mime, prompt: entry.prompt, meta });
+            writeImageUsage(recordImageUsage(readImageUsage(), 'generate', now, { imageId: entry.id }));
+            log(`[images] 已生成 ${entry.id} ${size.width}x${size.height} ${entry.bytes}B prompt=${cleaned}`);
+            sendJson({ ok: true, image: { id: entry.id, width: size.width, height: size.height, mime: entry.mime, bytes: entry.bytes, ts: entry.ts, prompt: entry.prompt, source: imageCfg.provider } });
+          } catch (error) {
+            log(`[images] 落盘失败：${error?.message ?? error}`);
+            sendJson({ ok: false, reason: 'internal', error: '图片已生成但落盘失败，详情见桥接日志' }, 500);
+          }
+          return;
+        }
+
+        // ② 取回生成好的图。只按索引查，id 不参与路径拼接（image-gen 的
+        //    readStoredImage 自己把 id 钳成 uuid 并只在 IMAGE_DIR 里试扩展名）。
+        //    回 JSON + base64，和 /api/avatar 同一风格 —— 前端与 MCP 只要 `data`
+        //    与 `mimeType` 就能拼成 data URL。
+        if (req.method === 'GET' && url.pathname.startsWith(IMAGE_GET_PREFIX)) {
+          let id;
+          try {
+            id = decodeURIComponent(url.pathname.slice(IMAGE_GET_PREFIX.length));
+          } catch {
+            sendJson({ ok: false, reason: 'bad_image', error: '图片 id 无法解析' }, 400);
+            return;
+          }
+          if (!IMAGE_ID_RE.test(id)) {
+            sendJson({ ok: false, reason: 'bad_image', error: '图片 id 不是合法的 uuid' }, 400);
+            return;
+          }
+          if (imageAuthFailed(req, String(url.searchParams.get('key') ?? '').trim())) return;
+          try {
+            const index = await readImageIndex();
+            const entry = index.find((item) => item?.id === id);
+            if (!entry) {
+              sendJson({ ok: false, reason: 'not_found', error: '找不到这张图（可能已被索引清理）' }, 404);
+              return;
+            }
+            const stored = await readStoredImage({ dir: IMAGE_DIR, id });
+            if (!stored) {
+              sendJson({ ok: false, reason: 'not_found', error: '索引里有这张图，但文件已经不在了' }, 404);
+              return;
+            }
+            const meta = entry.meta ?? {};
+            sendJson({
+              ok: true,
+              image: { ...entry, width: Number(meta.width) || null, height: Number(meta.height) || null },
+              mimeType: stored.mime,
+              bytes: stored.buffer.length,
+              data: stored.buffer.toString('base64')
+            });
+          } catch (error) {
+            log(`[images] 读图失败：${error?.message ?? error}`);
+            sendJson({ ok: false, reason: 'internal', error: '读图失败，详情见桥接日志' }, 500);
+          }
+          return;
+        }
+
+        // ③ 把本地一张图发到会话。这是**发送**端点，所以和 /api/send/* 同一套闸门：
+        //    会话 key 形状 → 令牌 → 静默模式 → 发送守卫 → 图存在且不超限 → 发送频率
+        //    → 串进 sendChain 真发。
+        if (req.method === 'POST' && url.pathname === '/api/send/image') {
+          const body = await readImageBody(req);
+          if (!body) return;
+          const key = String(body.key ?? '').trim();
+          // 先验 key 形状再验令牌：key 是后面所有闸门的入参，形状不对时连
+          // agentTokenOk(key, …) 都没有意义。
+          if (!/^(group|private):\d{1,20}$/.test(key)) {
+            sendJson({ ok: false, reason: 'bad_key', error: 'key 必须形如 group:群号 或 private:QQ号' }, 400);
+            return;
+          }
+          const imageId = String(body.imageId ?? '').trim();
+          if (!IMAGE_ID_RE.test(imageId)) {
+            sendJson({ ok: false, reason: 'bad_image', error: 'imageId 不是合法的 uuid' }, 400);
+            return;
+          }
+          if (imageAuthFailed(req, key)) return;
+          // 静默模式：除 owner 私聊外不发任何东西 —— 图也是「东西」。
+          if (shouldBlockSilentReply(key)) {
+            sendJson({ ok: false, reason: 'silent', error: '静默模式已开启，当前不允许发送' }, 403);
+            return;
+          }
+          // 守卫要**在**读图之前建好：它记下的是此刻的会话/模式/白名单，读图期间
+          // 模式被切走的话，下面 sendImageV2 里的 assertSendAllowed() 会抛，图不发。
+          const assertSendAllowed = captureSendGuard(key);
+          try {
+            assertSendAllowed();
+          } catch {
+            sendJson({ ok: false, reason: 'session_not_allowed', error: '目标不在当前模式允许范围内' }, 403);
+            return;
+          }
+          const stored = await readStoredImage({ dir: IMAGE_DIR, id: imageId });
+          if (!stored) {
+            sendJson({ ok: false, reason: 'not_found', error: '找不到这张图（可能已被索引清理）' }, 404);
+            return;
+          }
+          if (stored.buffer.length > IMAGE_MAX_BYTES) {
+            sendJson({ ok: false, reason: 'too_large', error: `图片太大（${(stored.buffer.length / 1048576).toFixed(1)}MB），上限 ${IMAGE_MAX_BYTES / 1048576}MB` }, 400);
+            return;
+          }
+          const st = getSocialV2State(key);
+          const now = Date.now();
+          const sendCfg = cfg.socialV2?.send ?? {};
+          try {
+            const maxPerMinute = Number(sendCfg.maxSendPerMinute) || 0;
+            const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
+            const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
+            const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
+            if ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour)) {
+              sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
+              return;
+            }
+            // 与 /api/send/group 一样先占一个发送名额；失败再回滚，否则一次失败的
+            // 发图会白占一分钟的配额。
+            st.sendTimes.push(now);
+            if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
+            const sent = await sendImageV2(key, stored.buffer, { assertSendAllowed });
+            // 图在 recentMessages 里只能留一句描述：`[图片]` + isSelf 让下一轮
+            // prompt 里的「自己说过的话」看起来像真人（真人不会把图存成 base64）。
+            st.lastAiReplyAt = now;
+            st.lastActionAt = now;
+            if (st.wakeConfig) st.wakeConfig.noActionCount = 0;
+            recordSentMessagesV2(key, ['[图片]']);
+            saveSocialV2State();
+            log(`[images] 已发送 ${imageId} → ${key} (message_id=${sent.messageId ?? '-'})`);
+            appendActivity(`${key} AI 发了一张图`);
+            scheduleReplyCheckV2(key);
+            sendJson({ ok: true, key, messageId: sent.messageId, bytes: stored.buffer.length, mimeType: stored.mime });
+          } catch (error) {
+            const at = st.sendTimes.indexOf(now);
+            if (at >= 0) st.sendTimes.splice(at, 1);
+            saveSocialV2State();
+            log(`[images] 发图失败 ${key}：${error?.message ?? error}`);
+            sendJson({ ok: false, reason: 'send_failed', error: `发图失败：${error?.message ?? error}` }, 502);
+          }
+          return;
+        }
+
+        // ④ 把本地一张图存成 QQ 收藏表情。额度在**收藏之前**判：add_custom_face 是
+        //    不可撤销的写操作，等发现额度用完就已经收进去了。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/images/sticker') {
+          const body = await readImageBody(req);
+          if (!body) return;
+          if (imageAuthFailed(req, '')) return;
+          const imageCfg = imageConfig();
+          if (imageCfg.enabled === false) {
+            sendJson({ ok: false, reason: 'disabled', error: '生图功能已关闭（socialV2.images.enabled = false）' }, 403);
+            return;
+          }
+          const imageId = String(body.imageId ?? '').trim();
+          if (!IMAGE_ID_RE.test(imageId)) {
+            sendJson({ ok: false, reason: 'bad_image', error: 'imageId 不是合法的 uuid' }, 400);
+            return;
+          }
+          const now = Date.now();
+          const quota = readImageUsageFor('sticker', now);
+          if (!quota.ok) {
+            imageQuotaRejected('sticker', quota);
+            return;
+          }
+          const stored = await readStoredImage({ dir: IMAGE_DIR, id: imageId });
+          if (!stored) {
+            sendJson({ ok: false, reason: 'not_found', error: '找不到这张图（可能已被索引清理）' }, 404);
+            return;
+          }
+          if (stored.buffer.length > IMAGE_MAX_BYTES) {
+            sendJson({ ok: false, reason: 'too_large', error: `图片太大（${(stored.buffer.length / 1048576).toFixed(1)}MB），上限 ${IMAGE_MAX_BYTES / 1048576}MB` }, 400);
+            return;
+          }
+          try {
+            const added = await profileOneBot('add_custom_face', { file: 'base64://' + stored.buffer.toString('base64') });
+            const emojiId = String(added?.emoji_id ?? '');
+            if (!emojiId) throw new Error('add_custom_face 未返回 emoji_id');
+            // 备注上限跟 MCP 那边一致（12 字）：它是给人看的一句注解，不是描述字段。
+            const desc = String(body.desc ?? '').trim().slice(0, 12);
+            if (desc) {
+              // 备注只是锦上添花：写失败不影响「收藏成功」这个事实，也不该让这次
+              // 额度白花（表情已经进了账号，额度就必须算掉）。
+              try {
+                await profileOneBot('modify_custom_face', { emoji_id: emojiId, desc });
+              } catch (error) {
+                log(`[images] 表情备注失败 ${emojiId}：${error?.message ?? error}`);
+              }
+            }
+            writeImageUsage(recordImageUsage(readImageUsage(), 'sticker', now, { imageId }));
+            log(`[images] 已收藏表情 ${imageId} → emoji_id=${emojiId}${desc ? ` desc=${desc}` : ''}`);
+            sendJson({ ok: true, emojiId, ...(desc ? { desc } : {}) });
+          } catch (error) {
+            log(`[images] 收藏表情失败：${error?.message ?? error}`);
+            sendJson({ ok: false, reason: 'upstream_error', error: `收藏表情失败：${error?.message ?? error}` }, 502);
+          }
+          return;
+        }
+
+        // ⑤ 换头像。两种来源：本地生图（imageId）或白名单域名（url）。
+        //    换完**没有读回**：OneBot 的 set_qq_avatar 只回 retcode，QQ 侧生效还有
+        //    延迟，这里不假装验证过 —— 所以响应里没有 verified 字段。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/profile/avatar') {
+          const body = await readImageBody(req);
+          if (!body) return;
+          if (imageAuthFailed(req, '')) return;
+          const imageCfg = imageConfig();
+          if (imageCfg.enabled === false) {
+            sendJson({ ok: false, reason: 'disabled', error: '生图功能已关闭（socialV2.images.enabled = false）' }, 403);
+            return;
+          }
+          const imageId = String(body.imageId ?? '').trim();
+          const rawUrl = String(body.url ?? '').trim();
+          if (!imageId && !rawUrl) {
+            sendJson({ ok: false, reason: 'bad_image', error: '要么给 imageId（本地生成过的图），要么给 url（白名单域名）' }, 400);
+            return;
+          }
+          if (imageId && !IMAGE_ID_RE.test(imageId)) {
+            sendJson({ ok: false, reason: 'bad_image', error: 'imageId 不是合法的 uuid' }, 400);
+            return;
+          }
+          // url 只认白名单域名 + https（image-core 的 isAllowedImageSource）：这个
+          // 字段最终会变成一次出站请求，放开等于开了个 SSRF 口子。
+          if (!imageId && !isAllowedImageSource(rawUrl)) {
+            sendJson({ ok: false, reason: 'bad_url', error: `url 不在允许的来源里（只认 https + ${IMAGE_SOURCE_HOSTS.join(' / ')}）` }, 400);
+            return;
+          }
+          const now = Date.now();
+          const quota = readImageUsageFor('avatar', now);
+          if (!quota.ok) {
+            imageQuotaRejected('avatar', quota);
+            return;
+          }
+          let buffer = null;
+          let mime = '';
+          try {
+            if (imageId) {
+              const stored = await readStoredImage({ dir: IMAGE_DIR, id: imageId });
+              if (!stored) {
+                sendJson({ ok: false, reason: 'not_found', error: '找不到这张图（可能已被索引清理）' }, 404);
+                return;
+              }
+              buffer = stored.buffer;
+              mime = stored.mime;
+            } else {
+              // safeFetchBuffer 自己会校验确实是图片、限字节数、防 SSRF。
+              const fetched = await safeFetchBuffer(rawUrl, IMAGE_AVATAR_MAX_BYTES);
+              buffer = fetched.buffer;
+              mime = mimeFromBuffer(buffer);
+            }
+          } catch (error) {
+            log(`[images] 头像取图失败：${error?.message ?? error}`);
+            sendJson({ ok: false, reason: 'fetch_failed', error: `头像取图失败：${error?.message ?? error}` }, 502);
+            return;
+          }
+          if (!buffer?.length) {
+            sendJson({ ok: false, reason: 'bad_image', error: '这张图是空的' }, 400);
+            return;
+          }
+          if (buffer.length > IMAGE_AVATAR_MAX_BYTES) {
+            sendJson({ ok: false, reason: 'too_large', error: `头像太大（${(buffer.length / 1048576).toFixed(1)}MB），上限 ${IMAGE_AVATAR_MAX_BYTES / 1048576}MB` }, 400);
+            return;
+          }
+          try {
+            await profileOneBot('set_qq_avatar', { file: 'base64://' + buffer.toString('base64') });
+            writeImageUsage(recordImageUsage(readImageUsage(), 'avatar', now, imageId ? { imageId } : {}));
+            // 头像变化**不**通知 owner（与 T-014 改资料同一口径：这是 AI 自己的事）。
+            log(`[images] 头像已更新 ${imageId ? `image=${imageId}` : `url=${rawUrl}`} ${buffer.length}B`);
+            sendJson({ ok: true, bytes: buffer.length, mimeType: mime || null });
+          } catch (error) {
+            log(`[images] 换头像失败：${error?.message ?? error}`);
+            sendJson({ ok: false, reason: 'upstream_error', error: `换头像失败：${error?.message ?? error}` }, 502);
+          }
+          return;
+        }
+
         // ── 跨会话互通（T-016）────────────────────────────────────────────────
         // 控制台的「分组」面板与 AI 的只读视图共用这个 GET。只返回元数据：
         // 哪些会话在组里、每组几条、最后一条什么时候 —— **绝不**返回消息正文。
@@ -7446,7 +8091,13 @@ async function main() {
             getProfile: 'qq_get_profile',
             setNickname: 'qq_set_nickname',
             setSignature: 'qq_set_signature',
-            setGroupCard: 'qq_set_group_card'
+            setGroupCard: 'qq_set_group_card',
+            // 生图 / 发图（T-017）：总开关 socialV2.images.enabled，四个工具同进同出
+            // （不登记 TOOL_CONFIG_FLAGS：那会在控制台多出四个开关，不在本步骤范围）。
+            drawImage: 'qq_draw_image',
+            sendImage: 'qq_send_image',
+            saveSticker: 'qq_save_sticker',
+            setAvatar: 'qq_set_avatar'
           };
           const tools = cfg.socialV2?.tools ?? {};
           const stickerToolFlags = new Set(['listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker']);
@@ -7454,9 +8105,14 @@ async function main() {
           // 模型看不到就不会去试，省得它对着 403 反复调。
           const profileToolFlags = new Set(['getProfile', 'setNickname', 'setSignature', 'setGroupCard']);
           const profileEnabled = cfg.socialV2?.profile?.enabled !== false;
+          // 生图 / 发图（T-017）：总开关关掉时四个工具一起从清单里消失 —— 与 profile 同一套
+          // 「模型看不到就不会去试」的思路。注意判据是 `!== false`（缺省即开），
+          // 和 normalizeImageConfig 的默认一致，没写这一段也照常可用。
+          const imageToolFlags = new Set(['drawImage', 'sendImage', 'saveSticker', 'setAvatar']);
+          const imagesEnabled = cfg.socialV2?.images?.enabled !== false;
           const enabledTools = [];
           for (const [flag, name] of Object.entries(toolMap)) {
-            if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled()) && !(profileToolFlags.has(flag) && !profileEnabled)) enabledTools.push(name);
+            if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled()) && !(profileToolFlags.has(flag) && !profileEnabled) && !(imageToolFlags.has(flag) && !imagesEnabled)) enabledTools.push(name);
           }
           sendJson({
             ok: true,
@@ -7497,6 +8153,27 @@ async function main() {
                 },
                 tools: ['qq_get_profile', 'qq_set_nickname', 'qq_set_signature', 'qq_set_group_card'],
                 hint: `改自己的资料：qq_set_nickname / qq_set_signature / qq_set_group_card，看自己：qq_get_profile。${hours} 小时内最多 ${cap} 次、两次之间至少 60 秒；自己想改就改，不用问谁。`
+              };
+            })(),
+            // 生图 / 发图（T-017）：四个工具 + 三项剩余额度（现算，不缓存）。
+            // 为什么现算：模型刚画完一张就会立刻再问「还能画几张」，缓存会让它看到过期值，
+            // 然后照着过期的数去试 —— 吃一个 429 再回来问，反而多一轮。
+            // 额度读的是 state/image-usage.json 的滑动窗口（image-core 的纯函数判定）。
+            images: (() => {
+              if (!imagesEnabled) return { enabled: false };
+              const now = Date.now();
+              const usage = readImageUsage();
+              const left = (kind) => {
+                const quota = readImageUsageFor(kind, now, usage);
+                return quota.ok ? quota.remaining : 0;
+              };
+              return {
+                enabled: true,
+                tools: ['qq_draw_image', 'qq_send_image', 'qq_save_sticker', 'qq_set_avatar'],
+                quota: { drawLeft: left('generate'), stickerLeft: left('sticker'), avatarLeft: left('avatar') },
+                // 一句话说清「这是本能的动作」+ 一条硬底线。不写具体额度数字：
+                // 数字由上面的 quota 给，文案里再写一遍就会和配置分叉（改窗口后对不上）。
+                hint: '想画点什么直接画；画完可以发、可以存表情、也可以换头像。别拿它画真人照片。'
               };
             })(),
             // 跨会话互通（T-016）：只给「同组还有谁、各有几条、最后一条何时」的元数据。

@@ -138,6 +138,20 @@ const tests = [
   // 控制台「跨渠道互通」面板（T-016 第五步）：导航与 section 注册、
   // 滑动窗口、编号输入与保存请求、离开视图不轮询。只读 HTML。
   'test-console-cross.mjs',
+  // 生图的纯函数（T-017 第一步）：配置缺省与钳制、提示词清洗与审计（长度/链接/联系方式/
+  // 黑名单/真人照意图）、尺寸归一、pollinations URL 编码、上游响应解析、三类额度的
+  // 滑动窗口与最小间隔、用量序列化、图片来源白名单。纯函数，零 IO。
+  'test-image-core.mjs',
+  // 生图的 IO 薄层（T-017 第二步）：注入假 fetch 的四种上游响应、落盘 id/扩展名、
+  // 读回命中与坏 id 防护、索引裁剪与删文件。用 os.tmpdir()，不碰仓库状态。
+  'test-image-gen.mjs',
+  // 生图接线（T-017 第三步）：五个端点（生成 / 取图 / 发图 / 存表情 / 换头像）的
+  // 闸门顺序、429 三类文案、base64 JSON 形状、发送走 sendChain 与 assertSendAllowed、
+  // images 提示词块。import bridge 会真起服务，只读源码。
+  'test-image-endpoints.mjs',
+  // 生图的 MCP 工具（T-017 第四步）：四个工具名与描述红线、取图走 base64 JSON、
+  // url 白名单、启用判据与不登记 TOOL_CONFIG_FLAGS、429/403 映射。只读源码。
+  'test-image-tools.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

@@ -1745,6 +1745,325 @@ if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.setStickerR
   );
 }
 
+// ── 生图 / 发图 / 存表情 / 换头像（T-017）─────────────────────────────────
+//
+// 四个工具都**不登记** TOOL_CONFIG_FLAGS：登记就得新增 socialV2.tools.* 配置键与控制台
+// 开关，那不在本步骤范围（同一段理由见 qq_affect_report 与自我资料工具）。总开关只有一个：
+// socialV2.images.enabled —— 缺省即启用，与桥接侧 normalizeImageConfig 的默认一致。
+//
+// 为什么在回调里判开关、而不是像表情工具那样把整块 `if` 掉：
+// 桥接侧的提示词块（/api/socialV2/prompt 的 images 段）会按开关把四个工具从 enabledTools
+// 里摘掉，那是"告诉模型没有这个能力"的正路；这里再兜一层，是为了让**已经看见工具**的模型
+// 拿到一句明确的「没开、不要重试」，而不是去撞 /api/socialV2/images/generate 的 403 之后
+// 换个 prompt 硬试（那样既白烧额度，也会让模型怀疑是自己描述写得不对）。
+const imagesEnabled = () => cfg?.socialV2?.images?.enabled !== false;
+const IMAGES_DISABLED_TEXT = '当前没有开启生图功能，不要重试。';
+
+// 毫秒 → 「N 秒 / N 分钟 / N 小时」。45 秒这种短等待必须按秒说：formatProfileWait 的最小
+// 粒度是分钟，会把「还要等 45 秒」说成「不到 1 分钟」，模型读完会立刻再试一次。
+function formatImageWait(ms) {
+  const total = Number(ms);
+  if (!Number.isFinite(total) || total <= 0) return '';
+  const seconds = Math.round(total / 1000);
+  if (seconds <= 90) return `${Math.max(1, seconds)} 秒`;
+  return formatProfileWait(total);
+}
+
+// 桥接的错误 → 「为什么不行 + 下一步怎么办」。
+// 按状态码分派（403 / 429 / 502 是契约里明确的三类），再按 reason 细化；没收录的 reason
+// 原样带出去，不在这里编造因果 —— 模型要能靠它判断该等、该改内容、还是该闭嘴。
+function describeImageFailure(action, error) {
+  const status = Number(error?.status);
+  const body = error && typeof error.body === 'object' && error.body ? error.body : {};
+  const reason = String(body.reason ?? error?.reason ?? '').trim();
+  const message = String(error?.message ?? error ?? '').trim();
+  const retry = Number(body.retryAfterMs ?? error?.retryAfterMs);
+  const wait = Number.isFinite(retry) && retry > 0 ? formatImageWait(retry) : '';
+  if (status === 403) {
+    if (reason === 'disabled') return `${action}失败：当前没有开启生图功能（socialV2.images.enabled=false），重试也不会成`;
+    if (reason === 'session_not_allowed') return `${action}失败：当前模式不允许操作这个会话（reason=session_not_allowed），别换参数硬试`;
+    if (reason === 'bad_token') return `${action}失败：会话令牌无效或没带，把唤醒提示里的【会话令牌】一起传过来再试一次`;
+    return `${action}失败：桥接拒绝了这次请求${reason ? `（reason=${reason}）` : ''}${message ? `：${message}` : ''}`;
+  }
+  if (status === 429) {
+    if (reason === 'too_frequent') return `${action}失败：两次之间隔得太近${wait ? `，要等 ${wait}` : ''}，现在别再试`;
+    if (reason === 'window_cap') return `${action}失败：24 小时额度用完了${wait ? `，要等 ${wait} 才能再试` : ''}，别反复试`;
+    if (reason === 'rate_limited') return `${action}失败：上游 45 秒只出一张${wait ? `，还要等 ${wait}` : ''}，别重试`;
+    return `${action}失败：${message || '被限流了'}${wait ? `，要等 ${wait}` : ''}`;
+  }
+  if (status === 502) return `${action}失败：上游出图失败，稍后再试（不是你的参数问题，别改 prompt 硬试）`;
+  if (status === 400) return `${action}失败：${message || '参数不合格'}${reason ? `（reason=${reason}）` : ''}，按提示改参数，别原样重发`;
+  if (message) return `${action}失败：${message}${reason ? `（reason=${reason}）` : ''}`;
+  return `${action}失败：${reason ? `reason=${reason}` : '桥接没有返回原因'}`;
+}
+
+// 头像 URL 白名单：只认这两个域名（与桥接侧 IMAGE_SOURCE_HOSTS 一致），且必须 https。
+// 前缀里带结尾的 `/`，所以 `https://q1.qlogo.cn.evil.com/...` 这类后缀伪装进不来。
+const AVATAR_URL_PREFIXES = ['https://q1.qlogo.cn/', 'https://image.pollinations.ai/'];
+function isAllowedAvatarUrl(raw) {
+  const url = String(raw ?? '').trim();
+  const lowered = url.toLowerCase();
+  if (!AVATAR_URL_PREFIXES.some((prefix) => lowered.startsWith(prefix))) return false;
+  try {
+    return new URL(url).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+server.tool(
+  'qq_draw_image',
+  '画一张图给你自己看、也能发给别人看。画的是你自己的图，不是别人的照片；不要用它伪造真人照片；不要为了刷图反复调用（每 45 秒才能出一张，24 小时 20 张）。prompt 写想画什么，中文或英文都行，3~300 字；不要描述真人照片。画好会把图片内容直接返回给你，并给你 imageId：要发到当前会话就 send=true（同时带上当前会话 key），也可以事后再用 qq_send_image；要存成收藏表情用 save_sticker=true 或 qq_save_sticker；想换头像用 qq_set_avatar。被拒时按 reason 与 retryAfterMs 处理，别换个 prompt 硬试。',
+  {
+    prompt: z.string().describe('想画什么，中文或英文都行，3~300 字；不要描述真人照片'),
+    width: z.number().int().optional().describe('可选：宽度像素（方图可只给一边；上限 768，面积上限 768×768）'),
+    height: z.number().int().optional().describe('可选：高度像素（不给就按方图）'),
+    seed: z.number().int().optional().describe('可选：随机种子；同一个 prompt 换个 seed 会出一张不同的图'),
+    send: z.boolean().optional().describe('可选，默认 false；true 时把这张图直接发到当前会话（需要同时带上 key）'),
+    save_sticker: z.boolean().optional().describe('可选，默认 false；true 时把这张图存成你的 QQ 收藏表情'),
+    token: z.string().optional().describe('二代会话令牌（reserved2 模式下唤醒提示里给了；带上桥接才会做会话归属校验）'),
+    key: z.string().optional().describe('当前会话 key（如 group:123456）；send=true 时用它决定发到哪个会话')
+  },
+  async ({ prompt, width, height, seed, send, save_sticker, token, key }) => {
+    if (!imagesEnabled()) {
+      return { content: [{ type: 'text', text: IMAGES_DISABLED_TEXT }], isError: true };
+    }
+    // 长度先在这里挡一道：桥接也会挡，但先挡能省一次 400 往返，而且模型拿到的是一句
+    // 「改成 3~300 字」，不是一段 JSON。
+    const wantedPrompt = String(prompt ?? '').trim();
+    const chars = Array.from(wantedPrompt).length;
+    if (chars < 3) {
+      return { content: [{ type: 'text', text: `描述太短了（${chars} 字）：说清想画什么，至少 3 个字。` }], isError: true };
+    }
+    if (chars > 300) {
+      return { content: [{ type: 'text', text: `描述太长了（${chars} 字）：最多 300 字，删掉不重要的细节再试。` }], isError: true };
+    }
+    // width/height/seed 只在真给了正整数时才进 body：JSON.stringify 会丢掉 undefined，
+    // 但 NaN/0 会原样发过去，桥接就得为「没给」多写一条分支。
+    const payload = { prompt: wantedPrompt };
+    for (const [name, value] of [['width', width], ['height', height], ['seed', seed]]) {
+      const n = Number(value);
+      if (Number.isFinite(n) && n > 0) payload[name] = Math.trunc(n);
+    }
+    const startedAt = Date.now();
+    let generated;
+    try {
+      generated = await agentApi('/api/socialV2/images/generate', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+        headers: token ? { 'x-agent-token': token } : {},
+        timeoutMs: 180000
+      });
+    } catch (error) {
+      return { content: [{ type: 'text', text: describeImageFailure('画图', error) }], isError: true };
+    }
+    const image = generated?.image && typeof generated.image === 'object' ? generated.image : {};
+    const imageId = String(image.id ?? '').trim();
+    if (!imageId) {
+      // 桥接回了 ok 却没给 id：没有 id 就发不了、也存不了，只能算这次没画成。
+      return { content: [{ type: 'text', text: '画图失败：桥接回了成功但没给 imageId，这次拿不到图。别重试，先当它没画成。' }], isError: true };
+    }
+    const elapsedMs = Date.now() - startedAt;
+    // 取图是**第二个**请求：/api/images/generated/<id> 回的是 JSON
+    // （{ok,image:{…},mimeType,data:<base64>}），不是裸字节 —— 与 /api/avatar 同一风格，
+    // 所以走 agentApi（它只吃 JSON）。但 x-agent-token 必须自己补上：agentHeaders 只加
+    // 控制台令牌与 x-agent-call，漏了它就等于以「管理端」身份取图（confused deputy，
+    // 见 agentHeaders 的注释）。token 没传时照旧走控制台令牌，端点契约允许。
+    let mimeType = String(image.mime ?? '').trim();
+    let base64 = '';
+    let fetchNote = '';
+    let bytes = Number(image.bytes);
+    try {
+      const fetched = await agentApi(`/api/images/generated/${encodeURIComponent(imageId)}`, {
+        headers: token ? { 'x-agent-token': token } : {},
+        timeoutMs: 60000
+      });
+      mimeType = String(fetched?.mimeType ?? fetched?.image?.mime ?? mimeType).trim() || mimeType;
+      base64 = String(fetched?.data ?? '').trim();
+      const fetchedBytes = Number(fetched?.image?.bytes);
+      if (Number.isFinite(fetchedBytes) && fetchedBytes > 0) bytes = fetchedBytes;
+    } catch (error) {
+      // 取图失败不影响 imageId：图已经落盘，之后还能用 qq_send_image 发、qq_save_sticker 存。
+      fetchNote = describeImageFailure('取图', error);
+    }
+    if (!Number.isFinite(bytes) || bytes <= 0) {
+      bytes = base64 ? Math.floor((base64.length * 3) / 4) : 0;
+    }
+    const shownWidth = Number(image.width);
+    const shownHeight = Number(image.height);
+    const sizeText = Number.isFinite(shownWidth) && Number.isFinite(shownHeight) && shownWidth > 0 && shownHeight > 0
+      ? `${shownWidth}×${shownHeight}`
+      : '尺寸未回传';
+    // 来源由桥接给（上游可能换），这里只负责原样带出来，不写死成 pollinations。
+    const sourceText = String(image.source ?? '').trim();
+    const lines = [
+      `画好了：imageId=${imageId}，${sizeText}，${bytes > 0 ? `${bytes} 字节` : '字节数未知'}，${mimeType || 'image/jpeg'}，用时 ${(elapsedMs / 1000).toFixed(1)} 秒${sourceText ? `，来源 ${sourceText}` : ''}。`,
+      '要发出去用 qq_send_image（带上这个 imageId）；要存成收藏表情用 qq_save_sticker；想换头像用 qq_set_avatar。'
+    ];
+    if (!base64) {
+      lines.push(fetchNote ? `${fetchNote}（图已经生成好了，imageId 仍然能发、能存，不用重画）` : '这张图没取回图片内容，但 imageId 仍然能发、能存，不用重画。');
+    }
+    if (send === true) {
+      const sessionKey = String(key ?? '').trim();
+      if (!sessionKey) {
+        lines.push('没带会话 key，图已生成但没发（下次把当前会话 key 一起传过来，或者用 qq_send_image 补发）。');
+      } else {
+        try {
+          const sent = await agentApi('/api/send/image', {
+            method: 'POST',
+            body: JSON.stringify({ key: sessionKey, imageId }),
+            headers: token ? { 'x-agent-token': token } : {},
+            timeoutMs: 120000
+          });
+          const messageId = sent?.message_id ?? sent?.messageId ?? sent?.data?.message_id ?? '未回传';
+          lines.push(`已经发到当前会话了（message_id=${messageId}）。`);
+        } catch (error) {
+          // 附加动作失败不改变「图已经画出来了」这个事实，只在文本里补一句原因。
+          lines.push(`${describeImageFailure('发图', error)}（图本身没问题，只是没发出去）`);
+        }
+      }
+    }
+    if (save_sticker === true) {
+      try {
+        const saved = await agentApi('/api/socialV2/images/sticker', {
+          method: 'POST',
+          body: JSON.stringify({ imageId }),
+          headers: token ? { 'x-agent-token': token } : {},
+          timeoutMs: 120000
+        });
+        const emojiId = saved?.emoji_id ?? saved?.emojiId ?? saved?.data?.emoji_id ?? '未回传';
+        lines.push(`已经存成收藏表情了（emoji_id=${emojiId}），以后可以用 qq_send_sticker 发它。`);
+      } catch (error) {
+        lines.push(`${describeImageFailure('存表情', error)}（图本身没问题，只是没存成）`);
+      }
+    }
+    const content = [{ type: 'text', text: lines.join('\n') }];
+    if (base64) content.push({ type: 'image', mimeType: mimeType || 'image/jpeg', data: base64 });
+    return { content };
+  }
+);
+
+server.tool(
+  'qq_send_image',
+  '把一张已经生成好的图发到当前会话（一次一张，一个气泡一张图，不能在同一气泡里附带文字；想说话请先用 qq_send_message / qq_reply 单独发，再单独发这张图）。imageId 来自 qq_draw_image 的返回。发送受桥接的限频与白名单约束：被限流时按 retryAfterMs 等，别连续重试；图不在（id 过期/不存在）时不要换 id 硬猜。',
+  {
+    imageId: z.string().describe('图片 id（qq_draw_image 返回的 imageId）'),
+    token: z.string().optional().describe('二代会话令牌（reserved2 模式下唤醒提示里给了；带上桥接才会做会话归属校验）'),
+    key: z.string().optional().describe('当前会话 key（如 group:123456）；不带就发不出去')
+  },
+  async ({ imageId, token, key }) => {
+    if (!imagesEnabled()) {
+      return { content: [{ type: 'text', text: IMAGES_DISABLED_TEXT }], isError: true };
+    }
+    const id = String(imageId ?? '').trim();
+    if (!id) {
+      return { content: [{ type: 'text', text: '缺 imageId：把 qq_draw_image 返回的那个 imageId 传过来。' }], isError: true };
+    }
+    const sessionKey = String(key ?? '').trim();
+    if (!sessionKey) {
+      return { content: [{ type: 'text', text: '发图需要当前会话 key（如 group:123456），这次没带，图没发出去。' }], isError: true };
+    }
+    try {
+      const data = await agentApi('/api/send/image', {
+        method: 'POST',
+        body: JSON.stringify({ key: sessionKey, imageId: id }),
+        headers: token ? { 'x-agent-token': token } : {},
+        timeoutMs: 120000
+      });
+      const messageId = data?.message_id ?? data?.messageId ?? data?.data?.message_id ?? '未回传';
+      return { content: [{ type: 'text', text: `已发出（message_id=${messageId}）` }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: describeImageFailure('发图', error) }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_save_sticker',
+  '把一张已经生成好的图存进你的 QQ 收藏表情（自定义表情），以后能像别的表情一样用 qq_send_sticker 发出去。imageId 来自 qq_draw_image。desc 可选，≤12 字，写你想给它记的备注（自己看得懂就行，例如「歪头鲸鱼」）。有额度：24 小时最多 5 个，两次之间至少 5 秒；被拒时按返回的 retryAfterMs 等，不要为了攒表情反复存。',
+  {
+    imageId: z.string().describe('图片 id（qq_draw_image 返回的 imageId）'),
+    desc: z.string().optional().describe('可选备注，≤12 字，自己看得懂就行'),
+    token: z.string().optional().describe('二代会话令牌（reserved2 模式下唤醒提示里给了；带上桥接才会做会话归属校验）')
+  },
+  async ({ imageId, desc, token }) => {
+    if (!imagesEnabled()) {
+      return { content: [{ type: 'text', text: IMAGES_DISABLED_TEXT }], isError: true };
+    }
+    const id = String(imageId ?? '').trim();
+    if (!id) {
+      return { content: [{ type: 'text', text: '缺 imageId：把 qq_draw_image 返回的那个 imageId 传过来。' }], isError: true };
+    }
+    const remark = String(desc ?? '').trim();
+    if (remark && Array.from(remark).length > 12) {
+      return { content: [{ type: 'text', text: `备注最多 12 字（这次给了 ${Array.from(remark).length} 字），这次没存；改短一点再试，或者干脆不传 desc。` }], isError: true };
+    }
+    try {
+      const data = await agentApi('/api/socialV2/images/sticker', {
+        method: 'POST',
+        body: JSON.stringify(remark ? { imageId: id, desc: remark } : { imageId: id }),
+        headers: token ? { 'x-agent-token': token } : {},
+        timeoutMs: 120000
+      });
+      const emojiId = data?.emoji_id ?? data?.emojiId ?? data?.data?.emoji_id ?? '未回传';
+      return { content: [{ type: 'text', text: `已存成收藏表情（emoji_id=${emojiId}），以后可以用 qq_send_sticker 发它。` }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: describeImageFailure('存表情', error) }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_set_avatar',
+  '把你自己的 QQ 头像换成一张图。两种来源二选一：imageId（qq_draw_image 返回的图，或 qq_list_stickers 里的表情 id），或 url（只允许 https://q1.qlogo.cn/… 或 https://image.pollinations.ai/… 这两种地址，别的地址一律不行）。头像是你自己的，别人让你换也行；但它会被所有人看到，别放真人照片、广告、联系方式。硬闸门：24 小时最多 1 次、两次之间至少 6 小时；被拒时把服务端说的「还要等多久」原样转述给对方，别换参数硬试。换完没有读回校验，成功即生效。',
+  {
+    imageId: z.string().optional().describe('可选：要当头像的图片 id（qq_draw_image 返回的 imageId，或收藏表情的 id）'),
+    url: z.string().optional().describe('可选：图片地址，只允许 https://q1.qlogo.cn/… 或 https://image.pollinations.ai/…；和 imageId 二选一'),
+    token: z.string().optional().describe('二代会话令牌（reserved2 模式下唤醒提示里给了；带上桥接才会做会话归属校验）')
+  },
+  async ({ imageId, url, token }) => {
+    if (!imagesEnabled()) {
+      return { content: [{ type: 'text', text: IMAGES_DISABLED_TEXT }], isError: true };
+    }
+    const id = String(imageId ?? '').trim();
+    const rawUrl = String(url ?? '').trim();
+    if (!id && !rawUrl) {
+      return { content: [{ type: 'text', text: '换头像要么给 imageId，要么给 url（二选一），这次两个都没给。' }], isError: true };
+    }
+    if (id && rawUrl) {
+      return { content: [{ type: 'text', text: 'imageId 和 url 只给一个：想换刚画好的图就给 imageId，想用现成地址才给 url。' }], isError: true };
+    }
+    const payload = {};
+    if (id) {
+      payload.imageId = id;
+    } else {
+      // URL 先在本地挡一道：桥接也会校验（bad_url），但先挡能让模型立刻知道「这个域名不行」，
+      // 而不是以为「地址可能写错了」换个路径继续试。
+      if (!isAllowedAvatarUrl(rawUrl)) {
+        return { content: [{ type: 'text', text: 'url 只允许 https://q1.qlogo.cn/… 或 https://image.pollinations.ai/… 这两种地址；这个不行，换个来源或改用 imageId。' }], isError: true };
+      }
+      payload.url = rawUrl;
+    }
+    try {
+      await agentApi('/api/socialV2/profile/avatar', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+        headers: token ? { 'x-agent-token': token } : {},
+        timeoutMs: 120000
+      });
+      return { content: [{ type: 'text', text: '头像已更新。' }] };
+    } catch (error) {
+      // 429 的文案由桥接写好了（含还要等多久），**原样**转述：这里自己再拼一遍
+      // 只会和桥接的口径分叉（窗口时长改配置时尤其明显）。
+      const message = String(error?.message ?? error ?? '').trim();
+      if (Number(error?.status) === 429 && message && !/^桥接 API HTTP \d+$/.test(message)) {
+        return { content: [{ type: 'text', text: `头像没换成：${message}` }], isError: true };
+      }
+      return { content: [{ type: 'text', text: describeImageFailure('换头像', error) }], isError: true };
+    }
+  }
+);
+
 // ── 合并转发消息查看工具（二代仿真模式） ────────────────────────────────────
 if (cfg.socialV2?.tools?.getForwardMsg !== false) {
   server.tool(

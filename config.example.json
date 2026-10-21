@@ -385,6 +385,29 @@
       "enabled": true,
       "bufferPerConversation": 500,
       "groups": {}
+    },
+    "images": {
+      "enabled": true,
+      "provider": "pollinations",
+      "maxWidth": 768,
+      "maxHeight": 768,
+      "promptMaxChars": 300,
+      "safe": true,
+      "generate": {
+        "windowHours": 24,
+        "windowCap": 20,
+        "minGapMs": 45000
+      },
+      "sticker": {
+        "windowHours": 24,
+        "windowCap": 5,
+        "minGapMs": 5000
+      },
+      "avatar": {
+        "windowHours": 24,
+        "windowCap": 1,
+        "minGapMs": 21600000
+      }
     }
   },
   "webSearch": {
