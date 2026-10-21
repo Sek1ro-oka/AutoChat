@@ -25,6 +25,7 @@ import {
   deviceBudget,
   deviceDayKey,
   devicePromptBlock,
+  expandEnvPath,
   isBlockedApp,
   normalizeDeviceConfig,
   parseDevices,
@@ -80,8 +81,15 @@ const TODAY_KEY = deviceDayKey(TODAY);
 
 // ── 1. 默认值与边界 ─────────────────────────────────────────────────────────
 check('默认开启', DEVICE_DEFAULTS.enabled === true);
-check('默认 adb 是本机绝对路径', DEVICE_DEFAULTS.adbPath.endsWith('platform-tools\\adb.exe'), DEVICE_DEFAULTS.adbPath);
-check('默认 adb 路径带用户名目录', DEVICE_DEFAULTS.adbPath.includes('AppData\\Local\\Android'), DEVICE_DEFAULTS.adbPath);
+check('默认 adb 在 platform-tools 下', DEVICE_DEFAULTS.adbPath.endsWith('platform-tools\\adb.exe'), DEVICE_DEFAULTS.adbPath);
+check('默认 adb 不写死本机用户名', !/Users\\/i.test(DEVICE_DEFAULTS.adbPath) && DEVICE_DEFAULTS.adbPath.startsWith('%LOCALAPPDATA%'), DEVICE_DEFAULTS.adbPath);
+// `%NAME%` 展开：默认路径靠它落地，展开错了就是「这台机器上 adb 神秘失踪」。
+check('展开 %LOCALAPPDATA%', expandEnvPath('%LOCALAPPDATA%\\Android\\adb.exe', { LOCALAPPDATA: 'C:\\Users\\x\\AppData\\Local' }) === 'C:\\Users\\x\\AppData\\Local\\Android\\adb.exe');
+check('展开默认 adb 路径', expandEnvPath(DEVICE_DEFAULTS.adbPath, { LOCALAPPDATA: 'C:\\L' }) === 'C:\\L\\Android\\platform-tools\\adb.exe');
+check('未知变量原样留着', expandEnvPath('%NOPE%\\adb.exe', {}) === '%NOPE%\\adb.exe');
+check('空值变量原样留着', expandEnvPath('%EMPTY%\\adb.exe', { EMPTY: '' }) === '%EMPTY%\\adb.exe');
+check('展开不碰 $VAR 与 ~', expandEnvPath('$HOME\\~\\adb.exe', { HOME: 'C:\\H' }) === '$HOME\\~\\adb.exe');
+check('展开对非字符串直通', expandEnvPath(undefined) === undefined && expandEnvPath('') === '');
 check('默认每日 30 分钟', DEVICE_DEFAULTS.maxMinutesPerDay === 30);
 check('默认每日 60 步', DEVICE_DEFAULTS.maxStepsPerDay === 60);
 check('默认步间隔 1000ms', DEVICE_DEFAULTS.minGapMs === 1000);

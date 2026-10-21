@@ -209,8 +209,8 @@ check('样例配置有顶层 device 段', Object.prototype.hasOwnProperty.call(e
 check('device 段紧跟 heybox 之后', exampleKeys.indexOf('device') === exampleKeys.indexOf('heybox') + 1, exampleKeys.join(','));
 const deviceCfg = exampleJson.device ?? {};
 check('device.enabled 为 true', deviceCfg.enabled === true);
-check('device.adbPath 是占位符（样例不能写死某台机器的路径）', deviceCfg.adbPath === 'C:\\platform-tools\\adb.exe', deviceCfg.adbPath);
-check('device.adbPath 落成注释/文档里能认出来的样子', deviceCfg.adbPath.includes('platform-tools') && deviceCfg.adbPath.endsWith('adb.exe'));
+check('device.adbPath 是占位符（样例不能写死某台机器的路径）', deviceCfg.adbPath === '%LOCALAPPDATA%\\Android\\platform-tools\\adb.exe', deviceCfg.adbPath);
+check('device.adbPath 落成注释/文档里能认出来的样子', deviceCfg.adbPath.includes('platform-tools') && deviceCfg.adbPath.endsWith('adb.exe') && !/Users\\/i.test(deviceCfg.adbPath));
 check('device.maxMinutesPerDay = 30', deviceCfg.maxMinutesPerDay === 30);
 check('device.maxStepsPerDay = 60', deviceCfg.maxStepsPerDay === 60);
 check('device.minGapMs = 1000', deviceCfg.minGapMs === 1000);
@@ -245,7 +245,9 @@ check(`${smokeRel} 存在`, fs.existsSync(path.join(ROOT, smokeRel)));
 const smoke = fs.existsSync(path.join(ROOT, smokeRel)) ? read(smokeRel) : '';
 check('冒烟脚本 import 真实 device-tools', smoke.includes("from '../src/device-tools.js'") && smoke.includes('createDeviceTools'));
 check('冒烟脚本 import normalizeDeviceConfig', smoke.includes('normalizeDeviceConfig'));
-check('冒烟脚本先查 adb 是否存在', lineOf(smoke, 'fs.existsSync(cfg.adbPath)') > 0);
+check('冒烟脚本先展开 %NAME% 再查 adb 是否存在',
+  lineOf(smoke, 'expandEnvPath(cfg.adbPath)') > 0
+  && lineOf(smoke, 'fs.existsSync(adbPath)') > lineOf(smoke, 'expandEnvPath(cfg.adbPath)'));
 const order = ['deviceStatus', 'deviceListApps', 'deviceScreenshot', 'deviceTap', 'deviceSwipe', 'deviceKey', 'deviceOpenApp'];
 const orderLines = order.map((name) => lineOf(smoke, `tools.${name}(`));
 check('冒烟顺序 status → list_apps → screenshot → tap → swipe → key → open_app', orderLines.every((line, i) => line > 0 && (i === 0 || line > orderLines[i - 1])), orderLines.join(','));

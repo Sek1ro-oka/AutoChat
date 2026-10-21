@@ -64,13 +64,15 @@ const BLOCKED_APP_LABELS = Object.freeze({
  *   出厂留空的原因是「用户装了哪些 galgame / 视频 App 我们不知道」，写死一份名单只会误伤；
  *   真正需要收窄时在 config.json 的 `device.apps` 里列出来即可。
  * - `blockedApps` 默认就是内核那五项，且**归一化时永远并回内核**（用户删不掉）。
- * - `adbPath` 写死本机装好的绝对路径：platform-tools 不一定在 PATH 里，靠 PATH 找 adb 会在
- *   服务进程（不同的 PATH）里神秘失败。用户仍可用 `device.adbPath` 覆盖。
+ * - `adbPath` 用 `%LOCALAPPDATA%` 占位而不是写死某个人的用户名目录：platform-tools 不一定在
+ *   PATH 里（靠 PATH 找 adb 会在服务进程的 PATH 里神秘失败），但把 `C:\Users\<某人>\...` 写进
+ *   源码又会把本机路径带进仓库、换个账号 clone 下来还得改代码。`%LOCALAPPDATA%` 两全：同一台机
+ *   器展开后与原路径一致，执行前由 `expandEnvPath` 展开。用户仍可用 `device.adbPath` 覆盖。
  * - `pauseAfterRunMs` 是「一轮玩完后的冷却」（1 小时）：由桥接在收尾时用 `pauseDevice` 落盘。
  */
 export const DEVICE_DEFAULTS = Object.freeze({
   enabled: true,
-  adbPath: 'C:\\Users\\MR\\AppData\\Local\\Android\\platform-tools\\adb.exe',
+  adbPath: '%LOCALAPPDATA%\\Android\\platform-tools\\adb.exe',
   maxMinutesPerDay: 30,
   maxStepsPerDay: 60,
   minGapMs: 1000,
@@ -231,6 +233,25 @@ function toAdbPath(value) {
   if (typeof value !== 'string') return DEVICE_DEFAULTS.adbPath;
   const trimmed = value.trim();
   return trimmed === '' ? DEVICE_DEFAULTS.adbPath : trimmed;
+}
+
+/**
+ * 展开路径里的 `%NAME%`（Windows 风格的环境变量占位）。
+ *
+ * 存在的理由：默认 adb 路径是 `%LOCALAPPDATA%\Android\platform-tools\adb.exe`，
+ * 不写死某个人的 `C:\Users\<名字>\...`。`execFile` 和 `fs.existsSync` 都不认 `%NAME%`，
+ * 所以**必须在真正用到路径之前**展开，否则 spawn 会拿字面量去开文件、报一个看不懂的 ENOENT。
+ *
+ * 只认 `%NAME%` 这一种写法：`$NAME` / `${NAME}` / `~` 一律**不碰**（那几个在纯 Windows
+ * 路径里本来就少见，猜错反而会把正常路径改坏）。取不到值的变量原样留着，让上层的
+ * 「找不到 adb」报错把真实路径打出来，比悄悄替换成空串好排查。
+ */
+export function expandEnvPath(value, env = process.env) {
+  if (typeof value !== 'string' || value === '') return value;
+  return value.replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (whole, name) => {
+    const hit = env && Object.prototype.hasOwnProperty.call(env, name) ? env[name] : undefined;
+    return typeof hit === 'string' && hit !== '' ? hit : whole;
+  });
 }
 
 /**
@@ -857,7 +878,7 @@ export function devicePromptBlock(cfg, state, now) {
  * - 不吞输出：stderr 原样带给上层，日志与排查都靠它。
  */
 export function defaultRunAdb(args, options = {}) {
-  const adbPath = toAdbPath(options.adbPath);
+  const adbPath = expandEnvPath(toAdbPath(options.adbPath));
   const timeoutRaw = Number(options.timeoutMs);
   const timeoutMs = Number.isFinite(timeoutRaw) && timeoutRaw > 0
     ? Math.trunc(timeoutRaw)

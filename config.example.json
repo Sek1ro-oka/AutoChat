@@ -71,7 +71,7 @@
   },
   "device": {
     "enabled": true,
-    "adbPath": "C:\\platform-tools\\adb.exe",
+    "adbPath": "%LOCALAPPDATA%\\Android\\platform-tools\\adb.exe",
     "maxMinutesPerDay": 30,
     "maxStepsPerDay": 60,
     "minGapMs": 1000,

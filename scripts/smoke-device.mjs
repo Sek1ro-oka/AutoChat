@@ -22,7 +22,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { normalizeDeviceConfig } from '../src/device-core.js';
+import { expandEnvPath, normalizeDeviceConfig } from '../src/device-core.js';
 import { DEFAULT_STATE_DIR, createDeviceTools, defaultReadConfig } from '../src/device-tools.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -73,16 +73,18 @@ async function main() {
   const cfg = normalizeDeviceConfig((defaultReadConfig() ?? {}).device);
 
   say('平板真机冒烟（T-023）');
-  say(`adb：${cfg.adbPath}`);
+  // 默认 adbPath 是 `%LOCALAPPDATA%\...` 占位，existsSync / spawn 都不认它，先展开。
+  const adbPath = expandEnvPath(cfg.adbPath);
+  say(`adb：${adbPath}`);
   say(`状态目录：${stateDir}`);
   say('');
 
   // adb 不存在时先说清楚「该改哪里」——不然 status 只会回一句「adb 出错了」，
   // 而真正的原因是配置里那条路径在这台机器上不存在。
-  if (!fs.existsSync(cfg.adbPath)) {
-    say(`❌ 找不到 adb：${cfg.adbPath}`);
+  if (!fs.existsSync(adbPath)) {
+    say(`❌ 找不到 adb：${adbPath}`);
     say('   把 config.json 的 device.adbPath 改成**你自己** platform-tools 里 adb(.exe) 的绝对路径；');
-    say('   Windows 上形如 `C:\\\\Android\\\\platform-tools\\\\adb.exe`（config.example.json 里是占位值）。');
+    say('   默认值是 `%LOCALAPPDATA%\\Android\\platform-tools\\adb.exe`（可用 %NAME% 占位）。');
     process.exitCode = 1;
     return;
   }

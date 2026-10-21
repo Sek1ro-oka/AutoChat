@@ -21,7 +21,8 @@
 - `device_type` 只支持 ASCII（adb `input text` 的限制）：中文直接返回 `ascii_only` 并提示改用点击；空格转 `%s`，其它特殊字符编码以避免设备端 shell 解释。
 - 桥接：顶层 `device` 配置归一（与 MCP 侧同一个 `normalizeDeviceConfig`）、prompt `device` 块（额度现算 + 八个工具名 + 黑名单），`enabled:false` 时整块短路成 `{enabled:false}`、八个工具从清单消失。
 - 新增 `scripts/smoke-device.mjs`（`npm run smoke:device`）：真机顺序跑 `status → list_apps → screenshot → tap → swipe → key(back) → open_app`，前一步失败即停并给中文原因（`adb` 不存在 / 无设备 / 未授权 / 前台是黑名单应用），失败以 1 退出；`--state-dir` 可换独立账本，不占正式额度。
-- 文档对齐：`work/agent-tasks/T-023/dev-doc.md` 按**实际实现**重写（旧稿里的 `mcp-device-safe.js`、`device_state`、`scalePoint`、剪贴板 IME、boredom 定时器都是没实现的设想，已逐条标出），`ISSUE.md` 状态改为「已实现，真机待验收」，`config.example.json` 的 `device.adbPath` 换成占位符并补 `blockedApps` 示例。
+- 文档对齐：`work/agent-tasks/T-023/dev-doc.md` 按**实际实现**重写（旧稿里的 `mcp-device-safe.js`、`device_state`、`scalePoint`、剪贴板 IME、boredom 定时器都是没实现的设想，已逐条标出），`ISSUE.md` 状态改为「已实现，真机待验收」。
+- adb 路径默认值不再写死本机绝对路径，改成 `%LOCALAPPDATA%\Android\platform-tools\adb.exe`，执行前由导出的纯函数 `expandEnvPath` 展开（只认 `%NAME%`，取不到值原样留着）：同一台机器展开后行为不变，仓库里不再出现某个人的 `C:\Users\<名字>\...`，换账号 clone 也不用改代码。`config.example.json` 与冒烟脚本同步（脚本先展开再 `existsSync`）。
 - 本轮不含自动唤醒：模型会用工具，但「自己跑去玩」的定时器与玩后写日记留到下一步。
 - 状态在 `state/device-state.json`，动作日志 `state/device-actions.jsonl`，截图 `state/device/`。
 
