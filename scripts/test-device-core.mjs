@@ -571,6 +571,11 @@ const WINDOW_MODE_DUMP = [
     && isInGestureZone({ x: 1, y: 1800 }, null) === false
     && isInGestureZone({ x: 'a', y: 1800 }, SCREEN_2944) === false);
 
+  // 手势区是「屏幕」的概念，与窗口是否全屏无关：全屏应用的底边同样落在这条带里
+  // （窗口闸门对全屏也判手势区，2026-10-21 验收后修正）。
+  check('全屏应用底边也落在手势区', isInGestureZone({ x: fullscreen.right - 1, y: fullscreen.bottom - 1 }, SCREEN_2944) === true);
+  check('全屏应用中部不在手势区', isInGestureZone({ x: 1472, y: 920 }, SCREEN_2944) === false);
+
   // ── isPointInWindow（左/上闭、右/下开） ──
   check('窗口内 → true', isPointInWindow({ x: 1500, y: 900 }, floating) === true);
   check('左上角边界算窗口内', isPointInWindow({ x: 737, y: 0 }, floating) === true);

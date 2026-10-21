@@ -10,11 +10,11 @@
 - 起因：真机验收时让 bot 操作 ZUI PC 模式下的小黑盒**浮窗**（`dumpsys window windows` 里 `frame=[737,0]-[2208,1840]`，1471x1840，而截图是整屏 2944x1840）：两次点在窗口外落到桌面层毫无反应，一次点在底部 1604–1840 触发手势导航把 App 切走；B 站那类**全屏**应用一切正常。坐标换算本身没错，错在工具不知道「目标只是个窗口」。
 - 新增纯函数（`src/device-core.js`）：`parseWindowFrame(dumpsysWindowsText, packageName)`（按 `Window #N Window{…}` 切段、只认段头里包名**精确**匹配的段，取 `Frames:` 后三行内的 `frame=[l,t][r,b]`，老 ROM 退回 `mFrame=`；同包多窗口取最后一个；空窗口 / 反向矩形 / 乱码一律 `null`、永不抛）、`isFullscreenWindow`（与屏幕等大，右/下留 1px 余量）、`isInGestureZone`（底部 `min(80, round(屏幕高×6%))`，1840 高上就是 80px）、`isPointInWindow`（左/上闭、右/下开），以及话术 `outsideWindowText` / `gestureZoneText` / `windowPromptHint`。
 - `device_status` 增 `foregroundWindow`：`{left, top, right, bottom, width, height, fullscreen}`（读不到窗口时为 `null`），模型据此知道「能点在哪一块」。
-- `device_tap` / `device_swipe` 增窗口闸门：端点落在窗口外 → `outside_window`（文案带窗口矩形与用户给的坐标），落在底部手势区 → `gesture_zone`（文案给安全 y）；两者都**不调 adb、不记步**，只写动作日志。**全屏应用（矩形覆盖整屏）直接放行，行为与之前完全一致**；读不到窗口矩形 / 前台包名时 fail-open（与黑名单闸门同一取舍）。
+- `device_tap` / `device_swipe` 增窗口闸门：端点落在窗口外 → `outside_window`（文案带窗口矩形与用户给的坐标），落在底部手势区 → `gesture_zone`（文案给安全 y）；两者都**不调 adb、不记步**，只写动作日志。**`outside_window` 只对窗口模式生效**（全屏没有「窗口外」），**`gesture_zone` 对所有应用都判** —— 验收后修正：真机上就是点在一个应用的底边把另一个应用切走的，所以全屏应用底边同样拒（代价是底部 80px 内的按钮点不到，往上挪一点即可）；读不到窗口矩形 / 前台包名 / 屏幕尺寸时 fail-open（与黑名单闸门同一取舍）。
 - 前台窗口矩形按「设备 + 包名」缓存 **2 秒**（不用每步都跑 `dumpsys window windows`），切 App 立刻作废；每次刷新顺手把快照写进 `state/device-window.json`（工具层写、桥接只读）。
 - prompt 的 `device` 块（`src/bridge.js`，只动 hint 那一处）：窗口模式下补一句「这个应用现在是窗口模式（浮窗），窗口在 (737,0)-(2208,1840)（1471x1840）之间，只在窗口里面点/滑……」；全屏 / 读不到 / 旧快照一个字都不加（`devicePromptBlock` 的第四个参数可选，老调用方式行为不变）。
-- 工具描述同步：`device_tap` / `device_swipe` 写明会返回 `outside_window` / `gesture_zone`，全屏应用不受影响。
-- 回归：`test-device-core.mjs` 313 → **377** 条（`parseWindowFrame` 正反例、全屏 1px 容差、手势区边界、`isPointInWindow`、提示词块窗口那句）；`test-device-tools.mjs` 306 → **361** 条（窗口外被拒且不调 adb、手势区被拒、窗口内正常下发、全屏应用含 swipe 不受影响、fail-open、2 秒缓存与切包作废、`foregroundWindow` 与快照文件）；`test-device-wiring.mjs` **153** 条（更新 prompt 调用那一条 + 窗口快照路径/只读断言）。`docs/guides/DEVICE.md` 的排障表与已知限制补了「PC 模式浮窗只在窗口内点、底部手势区会被拒」。
+- 工具描述同步：`device_tap` / `device_swipe` 写明会返回 `outside_window` / `gesture_zone`（窗口外只对窗口模式、手势区对所有应用都算）。
+- 回归：`test-device-core.mjs` 313 → **379** 条（`parseWindowFrame` 正反例、全屏 1px 容差、手势区边界（含「全屏底边也在手势区」）、`isPointInWindow`、提示词块窗口那句）；`test-device-tools.mjs` 306 → **369** 条（窗口外被拒且不调 adb、手势区被拒、窗口内正常下发、**全屏应用：中部放行 / 底边与滑到底边 → `gesture_zone`（含 swipe）且不调 adb 不记步**、fail-open、2 秒缓存与切包作废、`foregroundWindow` 与快照文件）；`test-device-wiring.mjs` **153** 条（更新 prompt 调用那一条 + 窗口快照路径/只读断言）。`docs/guides/DEVICE.md` 的排障表与已知限制补了「PC 模式浮窗只在窗口内点、底部手势区会被拒（全屏也一样）」。
 
 ### 被 @ / 引用时不再等满静默窗口，整体节奏调快（2026-10-21）
 

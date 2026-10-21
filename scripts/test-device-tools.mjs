@@ -938,7 +938,8 @@ const YESTERDAY_FULL = { day: '2026-03-14', usedMs: 30 * MIN, steps: 60, lastTs:
 // ── 15. 窗口感知（T-026）：PC 模式浮窗只许在窗口里点 ────────────────────────
 // 真机取证（TB375FC / Android 16）：小黑盒在 ZUI PC 模式下是 [737,0]-[2208,1840] 的浮窗，
 // 截图却是整屏 2944x1840。模型照截图给的坐标有两类会出事：窗口外（落到桌面、没反应）与
-// 底部手势区（把 App 切走）。全屏应用（B 站那类）必须一点都不受影响。
+// 底部手势区（把 App 切走）。全屏应用没有「窗口外」，但**底部手势区同样挡**（2026-10-21 验收后修正：
+// 真机上就是点在一个应用底边把另一个应用切走的）。
 {
   const PKG = 'com.max.xiaoheihe';
   const FOCUS = (pkg) => `mCurrentFocus=Window{1a2 u0 ${pkg}/${pkg}.MainActivity}\n`;
@@ -1008,18 +1009,31 @@ const YESTERDAY_FULL = { day: '2026-03-14', usedMs: 30 * MIN, steps: 60, lastTs:
   check('窗口内点击照常记一步', inEnv.readState()?.steps === 1);
   check('回执 screen 仍是截图坐标空间（整屏）', inTap.screen.width === 2944 && inTap.screen.height === 1840);
 
-  // ④ 全屏应用：行为完全不变（底边、贴边、滑到底部都放行）
+  // ④ 全屏应用：没有「窗口外」这回事，但底部手势区同样挡（2026-10-21 验收后修正）
   const fullEnv = makeEnv({ seed: todayState(), routes: windowRoutes({ focus: FOCUS('com.example.bili'), win: FULLSCREEN }) });
+  const fullMidTap = await fullEnv.tools.deviceTap({ x: 1472, y: 920 });
+  check('全屏应用：中部正常放行', fullMidTap.ok === true, fullMidTap);
+  check('全屏应用：adb 真的收到了这一下', fullEnv.runAdb.last('input tap')?.line.includes('input tap 1472 920') === true);
+  check('全屏应用：中部点击照常记一步', fullEnv.readState()?.steps === 1);
+  const tapsBeforeBottom = fullEnv.runAdb.count('input tap');
+  fullEnv.advance(1500);
   const bottomTap = await fullEnv.tools.deviceTap({ x: 1179, y: 1796 });
-  check('全屏应用：底部手势区的点照常放行', bottomTap.ok === true, bottomTap);
-  check('全屏应用：adb 真的收到了这一下', fullEnv.runAdb.last('input tap')?.line.includes('input tap 1179 1796') === true);
+  check('全屏应用：底部手势区的点被拒（gesture_zone）', bottomTap.ok === false && bottomTap.reason === 'gesture_zone', bottomTap);
+  check('全屏应用：手势区被拒不调 input tap', fullEnv.runAdb.count('input tap') === tapsBeforeBottom, fullEnv.runAdb.count('input tap'));
+  check('全屏应用：手势区被拒不记步', fullEnv.readState()?.steps === 1);
+  check('全屏应用：手势区文案说会把应用切走', String(bottomTap.message).includes('切走'));
+  check('全屏应用：回执的窗口标 fullscreen:true', bottomTap.window?.fullscreen === true, bottomTap.window);
   fullEnv.advance(1500);
-  const cornerTap = await fullEnv.tools.deviceTap({ x: 2943, y: 1839 });
-  check('全屏应用：右下角贴边的点也放行', cornerTap.ok === true, cornerTap);
+  const cornerTap = await fullEnv.tools.deviceTap({ x: 2943, y: 900 });
+  check('全屏应用：右下贴边（不在手势区）仍放行', cornerTap.ok === true, cornerTap);
   fullEnv.advance(1500);
-  const fullSwipe = await fullEnv.tools.deviceSwipe({ x1: 1472, y1: 1700, x2: 1472, y2: 1830 });
-  check('全屏应用：滑到底部手势区也放行', fullSwipe.ok === true, fullSwipe);
-  check('全屏应用：滑动没有被任何窗口闸门改写坐标', fullSwipe.clamped === false && fullSwipe.y2 === 1830);
+  const fullSwipeBottom = await fullEnv.tools.deviceSwipe({ x1: 1472, y1: 1700, x2: 1472, y2: 1830 });
+  check('全屏应用：滑到手势区也被拒', fullSwipeBottom.ok === false && fullSwipeBottom.reason === 'gesture_zone', fullSwipeBottom);
+  check('全屏应用：手势区滑动被拒不调 input swipe', fullEnv.runAdb.count('input swipe') === 0);
+  fullEnv.advance(1500);
+  const fullSwipe = await fullEnv.tools.deviceSwipe({ x1: 1472, y1: 1400, x2: 1472, y2: 900 });
+  check('全屏应用：不在手势区的滑动正常放行', fullSwipe.ok === true, fullSwipe);
+  check('全屏应用：不在手势区时滑动坐标没有被改写', fullSwipe.clamped === false && fullSwipe.y2 === 900);
 
   // ⑤ 滑动：两个端点都要在窗口里
   const swipeOutEnv = makeEnv({ seed: todayState(), routes: windowRoutes({ focus: FOCUS(PKG), win: FLOATING }) });

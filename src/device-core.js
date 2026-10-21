@@ -711,8 +711,8 @@ export function parseWindowFrame(dumpsysWindowsText, packageName) {
  *
  * 右/下留 1px 余量（`>= width - 1`）：`dumpsys` 的 frame 右/下是开区间，个别 ROM 报
  * `[0,0][2943,1839]` 也还是全屏。屏幕尺寸读不到（`screen` 为 null）时返回 `false` ——
- * 判不了就按「窗口」处理，后面还有「窗口外的点」这道安全网（全屏应用的矩形本来就覆盖全屏，
- * 不会被误拒）。
+ * 判不了就按「窗口」处理：多判一道「窗口外」也不会误伤（全屏应用的矩形本来就覆盖全屏、
+ * 不会有窗口外的点），而「底部手势区」那条本来就依赖屏幕高度，屏幕读不到时自然会跳过。
  */
 export function isFullscreenWindow(frame, screen) {
   if (!isPlainObject(frame)) return false;

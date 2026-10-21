@@ -409,8 +409,9 @@ export function createDeviceTools({
    * 读前台窗口 + 判全屏 + 更新提示词快照。
    *
    * 返回 `{ frame, fullscreen }`；不知道前台是谁 / dumpsys 里没有这个包的窗口 / 读不到 → `null`。
-   * `screen` 允许为 `null`（读不到屏幕尺寸）：这时 `isFullscreenWindow` 给 `false`，
-   * 但「窗口外的点」依旧能判（全屏应用的矩形本来就覆盖全屏，不会被误拒）。
+   * `screen` 允许为 `null`（读不到屏幕尺寸）：这时 `isFullscreenWindow` 给 `false`，于是按
+   * 「窗口模式」多判一道「窗口外」—— 全屏应用的矩形本来就覆盖整屏，不会有窗口外的点，不会误拒；
+   * 而「底部手势区」依赖屏幕高度，屏幕读不到时窗口闸门会自己跳过那一步（见 windowBlock）。
    */
   async function describeWindow(cfg, serial, pkg, screen, at) {
     if (typeof pkg !== 'string' || pkg === '') return null;
@@ -619,7 +620,7 @@ export function createDeviceTools({
   }
 
   /**
-   * 窗口闸门（T-026）：PC 模式浮窗的应用，只许在**窗口矩形内**动手。
+   * 窗口闸门（T-026）：PC 模式浮窗的应用，只许在**窗口矩形内**动手；底部手势区一律挡。
    *
    * 真机验收（TB375FC）：小黑盒在 ZUI PC 模式下是 `[737,0]-[2208,1840]` 的浮窗，而截图是整屏
    * 2944x1840 —— 模型照截图给的坐标有两类会出事：
@@ -628,8 +629,12 @@ export function createDeviceTools({
    * 所以这里挡两种情况，理由分开给：`outside_window`（坐标要落在窗口里）与
    * `gesture_zone`（往上挪一点）。被拒的一下**没有真的动设备，不记步**，只留痕。
    *
-   * **全屏应用（B 站那类）行为完全不变**：窗口矩形覆盖整屏时直接放行，一个点都不额外拦
-   * —— 手势区对全屏应用同样是合法的可点区域（点底部的按钮是正常操作）。
+   * **两条判定的适用范围不同**（2026-10-21 验收后修正）：
+   * - `outside_window` 只对**窗口模式**有意义 —— 全屏应用的矩形覆盖整屏，不存在「窗口外」；
+   * - `gesture_zone` 对**所有应用**都判，全屏也一样：屏幕最底下那一条是系统手势导航区，
+   *   全屏应用点底边同样会把 App 切走（真机验收时就是点在一个应用底边把另一个应用切走的）。
+   *   代价是「全屏应用底部 80px 内的按钮点不到」，模型会被提示把 y 往上挪一点 —— 比
+   *   「点一下就把 App 切走、整轮白玩」划算。
    *
    * fail-open：不知道前台是谁 / `dumpsys` 里没有这个包的窗口 / 读不到 → 放行。与黑名单闸门
    * 同一取舍：看不见的东西不能当成罪证，否则换一台 ROM 就一步都走不动。
@@ -638,7 +643,7 @@ export function createDeviceTools({
    */
   async function windowBlock(cfg, serial, pkg, screen, points, at, actionType) {
     const info = await describeWindow(cfg, serial, pkg, screen, at);
-    if (!info || info.fullscreen) return null;
+    if (!info) return null;
     const rect = {
       left: info.frame.left,
       top: info.frame.top,
@@ -646,20 +651,23 @@ export function createDeviceTools({
       bottom: info.frame.bottom,
       width: info.frame.width,
       height: info.frame.height,
-      fullscreen: false,
+      fullscreen: info.fullscreen,
     };
-    const outside = points.find((point) => !isPointInWindow(point, info.frame));
-    if (outside) {
-      appendLog({ ts: at, action: actionType, blocked: 'outside_window', ...rect });
-      return {
-        ok: false,
-        reason: 'outside_window',
-        message: outsideWindowText(info.frame, outside),
-        window: rect,
-        blocked: true,
-      };
+    // 窗口外：只有窗口模式才判（全屏应用没有「窗口外」这回事）。
+    if (!info.fullscreen) {
+      const outside = points.find((point) => !isPointInWindow(point, info.frame));
+      if (outside) {
+        appendLog({ ts: at, action: actionType, blocked: 'outside_window', ...rect });
+        return {
+          ok: false,
+          reason: 'outside_window',
+          message: outsideWindowText(info.frame, outside),
+          window: rect,
+          blocked: true,
+        };
+      }
     }
-    // 手势区只在「有屏幕尺寸」时判：没有屏幕高度就算不出这一条在哪。
+    // 手势区：全屏 / 窗口模式都判；没有屏幕尺寸就算不出这一条在哪，跳过（fail-open）。
     if (screen) {
       const gesture = points.find((point) => isInGestureZone(point, screen));
       if (gesture) {
@@ -899,7 +907,8 @@ export function createDeviceTools({
     const fg = await foregroundBlock(cfg, found.serial, at, 'tap');
     if (fg.blocked) return fg.blocked;
 
-    // 窗口闸门（T-026）：PC 模式浮窗只许在窗口里点，底部手势区一律拒；全屏应用直接放行。
+    // 窗口闸门（T-026）：PC 模式浮窗只许在窗口里点；底部手势区对**所有**应用都拒
+    // （全屏应用点底边也会被切走）。
     const windowFail = await windowBlock(cfg, found.serial, fg.pkg, size, [{ x, y }], at, 'tap');
     if (windowFail) return windowFail;
 
@@ -950,8 +959,8 @@ export function createDeviceTools({
     const fg = await foregroundBlock(cfg, found.serial, at, 'swipe');
     if (fg.blocked) return fg.blocked;
 
-    // 窗口闸门（T-026）：滑动的**两个端点**都要在窗口里 —— 起点在窗口外会落到桌面，
-    // 终点/起点压到底部手势区会把应用切走（真机上都发生过）。
+    // 窗口闸门（T-026）：滑动的**两个端点**都要在窗口里（窗口模式）—— 起点在窗口外会落到桌面；
+    // 任一端点压到底部手势区会把应用切走（真机上都发生过，全屏应用也一样）。
     const windowFail = await windowBlock(
       cfg,
       found.serial,
@@ -1259,7 +1268,7 @@ export function registerDeviceTools(server, opts = {}) {
 
   server.tool(
     'device_tap',
-    `在平板屏幕上点一下，坐标是截图里的像素坐标（越界会自动夹到屏幕内）。点之前先 device_screenshot 看准位置；点完再截一张确认效果。窗口模式（PC 模式浮窗）的应用只允许点在窗口矩形内：点窗口外会返回 outside_window（落到桌面、没反应），点到屏幕最底部的手势区会返回 gesture_zone（会把应用切走）；全屏应用不受这两条限制。${BOUNDARY}`,
+    `在平板屏幕上点一下，坐标是截图里的像素坐标（越界会自动夹到屏幕内）。点之前先 device_screenshot 看准位置；点完再截一张确认效果。窗口模式（PC 模式浮窗）的应用只允许点在窗口矩形内，点窗口外会返回 outside_window（落到桌面、没反应）。屏幕最底部的手势区对任何应用都算禁区，会返回 gesture_zone（会把应用切走），把 y 往上挪一点再点。${BOUNDARY}`,
     {
       x: z.coerce.number().describe('横坐标（像素，按截图宽度）'),
       y: z.coerce.number().describe('纵坐标（像素，按截图高度）'),
@@ -1269,7 +1278,7 @@ export function registerDeviceTools(server, opts = {}) {
 
   server.tool(
     'device_swipe',
-    `在平板上滑一下：从 (x1,y1) 滑到 (x2,y2)，durationMs 100–2000 毫秒（默认 300）。用来滚动列表、翻页、拖动滑块。窗口模式的应用要求两个端点都在窗口矩形内（窗口外 → outside_window，底部手势区 → gesture_zone）；全屏应用不受这两条限制。${BOUNDARY}`,
+    `在平板上滑一下：从 (x1,y1) 滑到 (x2,y2)，durationMs 100–2000 毫秒（默认 300）。用来滚动列表、翻页、拖动滑块。窗口模式的应用要求两个端点都在窗口矩形内（窗口外 → outside_window）；两个端点落在屏幕最底部的手势区会返回 gesture_zone（对任何应用都一样，会把应用切走）。${BOUNDARY}`,
     {
       x1: z.coerce.number().describe('起点横坐标'),
       y1: z.coerce.number().describe('起点纵坐标'),
