@@ -435,6 +435,33 @@ await test('R16 appendSocialV2Message 保留 kind/emojiId/summary/subType', asyn
   } finally { await h.close(); }
 });
 
+// ── R17. 被 @ 的消息到达后，wait 不等满 quietMs ────────────────────────────
+// 事故（2026-10-21）：群里 @ 了机器人，它却两分多钟没动静 —— 因为它正挂在
+// qq_wait_for_messages(quietMs=150000) 里等静默，@ 只被算成「又来了一条消息」，静默窗口重新计时。
+// 现在被点名（@我 / 引用我）的消息会把静默窗口收紧到 selfMentionQuietMs（默认 12 秒）。
+await test('R17 被点名的消息把静默窗口收紧到 selfMentionQuietMs', async () => {
+  const h = await bridgeHarness({
+    config: { socialV2: { wait: { minMs: 200, maxMs: 30000, defaultQuietMs: 60000, minQuietAfterNewMs: 0, selfMentionQuietMs: 300 } } }
+  });
+  try {
+    h.setMode('reserved2');
+    const token = h.getSocialV2State('group:456').agentToken;
+    await withServer(h, async (port) => {
+      const startedAt = Date.now();
+      const pending = call(port, '/api/socialV2/wait', {
+        method: 'POST', token, body: { key: 'group:456', purpose: 'messages', timeoutMs: 20000, quietMs: 60000 }
+      });
+      await sleep(120);
+      // 末两个参数：forwardIds=[]、atSelf=true（群友 @ 我）
+      h.appendSocialV2Message('group:456', '群友A', '@南溟 在吗', '@南溟 在吗', false, false, 'msg-9001', [], '999', [], true);
+      const res = await pending;
+      const elapsed = Date.now() - startedAt;
+      assert.equal(res.status, 200, JSON.stringify(res.body));
+      assert.ok(elapsed < 5000, `被点名后应尽快返回（实测 ${elapsed}ms；传入 quietMs 60 秒、上限 30 秒）`);
+    });
+  } finally { await h.close(); }
+});
+
 if (failures) {
   console.error(`\n${failures} 项失败`);
   process.exitCode = 1;

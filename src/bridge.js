@@ -10077,6 +10077,13 @@ async function main() {
           let arrived = false;
           let lastNewAt = 0;
           let aborted = false;
+          // 「被点名」= @我 或 引用我。这类消息到达时不再等满 quietMs（默认 150 秒），
+          // 收到后最多等 selfMentionQuietMs（默认 12 秒，且不低于 minQuietAfterNewMs）就返回，
+          // 避免群里 @ 完两分钟没动静被当成机器人没反应。
+          const atSelfQuietCfg = Number(cfg.socialV2?.wait?.selfMentionQuietMs);
+          const AT_SELF_QUIET_MS = Number.isFinite(atSelfQuietCfg) && atSelfQuietCfg >= 0 ? atSelfQuietCfg : 12000;
+          const scanAtSelf = (fromSeq) => (Array.isArray(st.unread) ? st.unread : [])
+            .some((m) => m && (m.atSelf === true || m.quoteTargetIsSelf === true) && Number(m.seq) > Number(fromSeq || 0));
           req.on('close', () => { aborted = true; });
           if (replyWait) {
             const incomingAt = () => {
@@ -10105,12 +10112,25 @@ async function main() {
             if (nowSeq - baseline >= minNew) {
               arrived = true;
               lastNewAt = Date.now();
+              // 被点名的消息（@我 / 引用我）：静默窗口收紧到 AT_SELF_QUIET_MS。
+              // @ 是「现在就要你答」的强信号，等满 150 秒静默会让人以为机器人没反应；
+              // 收紧后仍然保留 minQuietAfterNewMs 的下限，避免一句话没打完就抢答。
+              let selfMentionSeen = scanAtSelf(baseline);
+              let effQuiet = selfMentionSeen ? Math.max(minQuietAfterNewMs, Math.min(quietMs, AT_SELF_QUIET_MS)) : quietMs;
+              if (selfMentionSeen) {
+                log(`[reserved2] 被点名的消息已到，静默窗口收紧到 ${Math.round(effQuiet / 1000)}s（原 ${Math.round(quietMs / 1000)}s）`);
+              }
               // 已等到新消息：继续等到“最后一条新消息之后 quietMs 内不再有新消息”再返回。
               // 这里不再受原始 timeoutMs 限制，确保对方可能连续发消息时不会抢话。
-              while (Date.now() - lastNewAt < quietMs && Date.now() - start < timeoutMs + maxQuietMs + 5000 && !aborted) {
+              while (Date.now() - lastNewAt < effQuiet && Date.now() - start < timeoutMs + maxQuietMs + 5000 && !aborted) {
                 if ((st.lastUnreadSeq || 0) > nowSeq) {
                   nowSeq = st.lastUnreadSeq || 0;
                   lastNewAt = Date.now();
+                  if (!selfMentionSeen && scanAtSelf(baseline)) {
+                    selfMentionSeen = true;
+                    effQuiet = Math.max(minQuietAfterNewMs, Math.min(effQuiet, AT_SELF_QUIET_MS));
+                    log(`[reserved2] 等待期间被点名，静默窗口收紧到 ${Math.round(effQuiet / 1000)}s`);
+                  }
                 }
                 await sleep(200);
               }
@@ -14344,7 +14364,7 @@ async function main() {
   }
 
   // ── 二代仿真模式（reserved2）唤醒调度 ──────────────────────────────────
-  function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = []) {
+  function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = [], atSelf = false) {
     const st = getSocialV2State(key);
     const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
     const unreadLimit = Number(cfg.socialV2?.context?.unreadLimit) || 30;
@@ -14390,6 +14410,7 @@ async function main() {
       plain: truncateText(String(plainContent ?? textContent), 200),
       tail: truncateTextTail(String(plainContent ?? textContent), 200),
       quoteTargetIsSelf: !!quoteTargetIsSelf,
+      atSelf: !!atSelf,
       isOwner: !!isOwner,
       ownerLabel: isOwner ? `管理员（ownerQQ ${cfg.ownerQQ ?? ''}）` : '',
       isSelf: false,
@@ -15525,7 +15546,11 @@ async function main() {
     // 二代仿真模式（reserved2）：唤醒调度
     if (currentMode === 'reserved2') {
       const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
-      appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []));
+      // 被 @ 的消息要单独标出来：`/api/socialV2/wait` 见到它会把静默窗口收紧，
+      // 否则「@ 了但两分钟没动静」会被当成机器人没反应（2026-10-21 实测：@ 后仍等了 150 秒静默才回）。
+      const atSelfNow = Array.isArray(event.message)
+        && event.message.some((seg) => seg?.type === 'at' && String(seg.data?.qq) === String(event.self_id ?? ''));
+      appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []), atSelfNow);
       // 二代同样收集群聊黑话学习素材（AI 自主提交之外，桥接仍自动提取高频陌生词）
       if (kind === 'group') feedSlangWindow(key, sender, plainContent);
       if (socialV2.paused) {

@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+### 被 @ / 引用时不再等满静默窗口（2026-10-21）
+
+- `qq_wait_for_messages`（`/api/socialV2/wait`）在等待期间若收到**@我或引用我**的消息，静默窗口收紧到
+  `socialV2.wait.selfMentionQuietMs`（默认 12000ms，且不低于 `minQuietAfterNewMs`），不再等满调用方传的
+  150 秒静默。
+- 原因：群里 @ 完要等两分多钟才有回应，体感就是「机器人没反应」（实测 21:35:13 被 @、21:37:28 才发出回复）。
+- 消息落库新增 `atSelf` 标记（`appendSocialV2Message` 第 11 个参数），引用我的消息沿用既有的
+  `quoteTargetIsSelf`；两者都算「被点名」。
+- 回归：`test-audit-regressions.mjs` 新增 R17（把 `selfMentionQuietMs` 设成 300ms，断言被 @ 后 5 秒内返回）。
+
 ### 小黑盒：验证码自动暂停与评论 id 回读（2026-10-21，T-022 收尾）
 
 - 验证码风控从「撞到就不重试」升级为**自动暂停**：新配置 `heybox.captchaPauseMs`（默认 30 分钟，钳制 5 分钟–2 小时）——命中验证码时把 `pausedUntil` 写进 `state/heybox-usage.json`，到期自动恢复，返回文案带「还剩 27 分钟」这种具体等待时间。
