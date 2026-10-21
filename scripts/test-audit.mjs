@@ -110,16 +110,16 @@ const tests = [
   // proactive 概率乘 1 + 0.6×情绪强度。出口函数在 startConsoleServer 闭包里，
   // import 会真起服务，所以这里只做静态切片断言。
   'test-affect-channels.mjs',
-  // 自我资料（T-014 第一步）：profile-core 的纯函数边界——清洗/长度按码点、
-  // 昵称与签名的形状审计、冷却与日额度、状态读写归一。纯函数，零 IO。
+  // 自我资料（T-014 第一步 / T-015）：profile-core 的纯函数边界——清洗/长度按码点、
+  // 昵称与签名的形状审计、4 小时 5 次滑动窗口额度与 60 秒最小间隔、状态读写归一。纯函数，零 IO。
   'test-profile-core.mjs',
   // 自我资料的桥接接线（T-014 第二步）：五个端点（头像 GET + 快照 GET + 三个改资料
   // POST）的形状与闸门顺序（enabled→内容→额度→读旧值→OneBot→读回→记账）、
   // not_applied 不记账、头像 640→100 回落、状态用 atomicWriteJson、profile 不进
   // adminOnlyV2Paths。import bridge 会真起服务，所以只读源码。
   'test-profile-endpoints.mjs',
-  // 自我资料的 MCP 工具（T-014 第三步）：五个工具名与描述红线（拒绝别人的改名要求、
-  // cooldown/daily_cap 是硬约束）、qq_get_avatar 的 image content 形状、
+  // 自我资料的 MCP 工具（T-014 第三步 / T-015）：五个工具名与描述红线（拒绝别人的改名要求、
+  // 额度是 4 小时 5 次的滑动窗口硬约束）、qq_get_avatar 的 image content 形状、
   // agentApi 把 400/403/429 的 reason/retryAfterMs 透传给模型。含 node --check。
   'test-profile-tools.mjs',
 ];

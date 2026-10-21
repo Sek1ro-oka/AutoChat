@@ -127,7 +127,7 @@ import {
 // 情绪出口的纯规划层：只算「该不该说、走哪个渠道、说多长」，不发送、不写盘。
 // planVent 被 /api/socialV2/affect 用来给面板生成「现在会发生什么」的逐行中文解释。
 import { VENT_CHANNELS, checkVentText, planVent } from './affect-vent.js';
-// 自我资料（T-014）：清洗 / 长度 / 形状审计 / 冷却与日额度 / 状态归一，全部在纯模块里。
+// 自我资料（T-014）：清洗 / 长度 / 形状审计 / 滑动窗口额度 / 状态归一，全部在纯模块里。
 // 桥接这边只做「读旧值 → 调 OneBot → 读回 → 记账」，**不写任何长度或配额字面量**：
 // 调参只改 profile-core.js 的 PROFILE_DEFAULTS（或 config.json 的 socialV2.profile）。
 import {
@@ -183,8 +183,8 @@ const AFFECT_STATE_FILE = path.join(STATE_DIR, 'affect.json');
 // 因为「旧会话当初用的是什么权限」无法证明 —— 而这个会话的产出会发到公开空间。
 const AFFECT_VENT_SESSION_FILE = path.join(STATE_DIR, 'affect-vent-session.json');
 // 自我资料的改动账本（T-014）：每项资料的「上次改动时间 + 上次值」与最近 100 条变更。
-// 冷却与日额度**全部**由这份文件推导（quotaFor 是纯函数），所以它同时是「配额来源」；
-// 手删它等于把三个冷却清零 —— 这是有意的（出问题时给运维一个不用改代码的复位手段）。
+// 滑动窗口的次数与最小间隔**全部**由这份文件推导（quotaFor 是纯函数），所以它同时是「配额来源」；
+// 手删它等于把三个窗口清零 —— 这是有意的（出问题时给运维一个不用改代码的复位手段）。
 // 注意 dev-doc 写的是 DATA_DIR，但桥接里只有 STATE_DIR（qzone/affect 也都落在这里）。
 const PROFILE_STATE_FILE = path.join(STATE_DIR, 'profile-changes.json');
 
@@ -1668,9 +1668,9 @@ function writeAffectState(state) {
 }
 
 // ── 自我资料（T-014）：状态文件读写 ──────────────────────────────────────────
-// 判定逻辑（清洗 / 长度 / 形状审计 / 冷却与日额度 / 状态归一）全在 src/profile-core.js，
+// 判定逻辑（清洗 / 长度 / 形状审计 / 滑动窗口额度 / 状态归一）全在 src/profile-core.js，
 // 那里零 I/O 零依赖。这里只负责 state/profile-changes.json 的读与写，和 affect / qzone
-// 一样**不做进程内缓存**：文件很小，且手动删掉它就该立刻把三项冷却与日额度清零。
+// 一样**不做进程内缓存**：文件很小，且手动删掉它就该立刻把三项窗口清零。
 
 /**
  * 读资料改动账本（纯读，不落盘）。
@@ -1697,7 +1697,7 @@ function readProfileState(now = Date.now()) {
  *
  * 先 serializeProfileState 再 parseProfileState 走一遍形状校验，保证写出去的一定是对象；
  * 落盘失败**只记日志并返回 false**：这次改动在 QQ 侧是真的成功了，不能因为写盘失败就
- * 给模型回 500（那会让它以为没改成，然后换个参数硬试一次，白吃一次冷却）。
+ * 给模型回 500（那会让它以为没改成，然后换个参数硬试一次，白吃一次额度）。
  *
  * 「先写 *.tmp 再 rename」由 atomicWriteJson 负责（它自带 mkdir / 0600 / EPERM 退避重试），
  * 和 affect、qzone 的落盘路径完全一致 —— 不要再手写一份固定名 `.tmp`：
@@ -5390,12 +5390,34 @@ async function main() {
         }
 
         /**
+         * 额度不足时的 429 人话（T-015 换成滑动窗口口径）。
+         *
+         * `too_frequent` 说「秒」：minGapMs 默认 60 秒，等的是秒级的事，若用几分钟四舍五入
+         * 会变成「约 1 分钟」，模型会误判成还能再试。上限跟着 minGapMs 走（配置改了文案也变），
+         * 不写死「60 秒」。
+         * `window_cap` 说「约 X 后」，X 交给 profileWaitText（全项目统一的分钟/小时换算）。
+         */
+        function profileQuotaErrorText(label, quota) {
+          if (quota?.reason === 'too_frequent') {
+            const seconds = Math.max(1, Math.ceil((Number(quota.retryAfterMs) || 0) / 1000));
+            const gapMs = Math.max(0, Number(quota.minGapMs) || 0);
+            const gapText = gapMs % 1000 === 0 ? String(gapMs / 1000) : (gapMs / 1000).toFixed(1);
+            return `改【${label}】太频繁了，${seconds} 秒后才能再改（两次之间至少 ${gapText} 秒）`;
+          }
+          if (quota?.reason === 'window_cap') {
+            return `${quota.windowHours} 小时内改【${label}】的次数已经用完（${quota.windowCap} 次），约 ${profileWaitText(quota.retryAfterMs)}后才能再改`;
+          }
+          if (quota?.reason === 'disabled') return '改资料功能已关闭（socialV2.profile.enabled = false）';
+          return `改【${label}】现在不可用（${quota?.reason || 'unknown'}）`;
+        }
+
+        /**
          * 调 OneBot 并校验信封（status / retcode）。
          *
          * 为什么不能直接用 oneBotActionNested 的返回值：它只负责发请求 + 解 JSON，**不看 retcode**。
          * 于是「action 名写错（1404）」「参数不合法（1400）」「服务端拒绝（100）」在它那里也是
          * "成功返回" —— 而改资料恰恰最依赖这几个码：不校验就会把「根本没改」当成「改好了」记账，
-         * 白吃一次冷却，模型还会以为已经改成。
+         * 白吃一次额度，模型还会以为已经改成。
          */
         async function profileOneBot(action, params) {
           const { res, body } = await oneBotActionNested(cfg, action, params, 20000);
@@ -5452,7 +5474,7 @@ async function main() {
          *
          * 两端都过同一套清洗（回车/控制符/连续空白折叠）再比：QQ 侧常把连续空格折掉、
          * 或把全角空格换成半角，直接 `===` 会产生假阴性 —— 于是「明明改成了却不记账」，
-         * 冷却没吃到、模型也拿不到 nextAllowedAt，只能稀里糊涂再改一次。
+         * 最小间隔没吃到，模型只能稀里糊涂再改一次。
          */
         function sameProfileValue(actual, expected) {
           if (typeof actual !== 'string') return false;
@@ -5553,19 +5575,21 @@ async function main() {
           const now = Date.now();
           const state = readProfileState(now);
 
-          // ④ 额度（冷却 + 当日上限）：纯函数判定，状态来自上面刚读的账本。
+          // ④ 额度（滑动窗口）：minGapMs 最小间隔 + windowHours/windowCap 次数上限。
+          //    纯函数判定，状态来自上面刚读的账本；响应字段直接取 quota，不在这里重算。
           const quota = quotaFor(state, profileCfg, kind, kind === 'groupCard' ? groupId : undefined, now);
           if (!quota.ok) {
             sendJson({
               ok: false,
               reason: quota.reason,
               retryAfterMs: quota.retryAfterMs,
-              todayCount: quota.todayCount,
+              windowCount: quota.windowCount,
               remaining: quota.remaining,
               lastTs: quota.lastTs,
-              error: quota.reason === 'daily_cap'
-                ? `今天改【${label}】的额度已经用完（${quota.todayCount} 次），明天零点后才恢复`
-                : `改【${label}】还在冷却中，约 ${profileWaitText(quota.retryAfterMs)} 后才能再改`
+              windowHours: quota.windowHours,
+              windowCap: quota.windowCap,
+              minGapMs: quota.minGapMs,
+              error: profileQuotaErrorText(label, quota)
             }, 429);
             return;
           }
@@ -5679,7 +5703,6 @@ async function main() {
           const persisted = writeProfileState(nextState);
           const scope = kind === 'groupCard' ? `（群 ${groupId}）` : '';
           log(`[profile] ${label}${scope}「${oldValue || '空'}」→「${target || '空'}」（原因：${reasonText || '未说明'}）${verified ? '' : '［读回未确认］'}${persisted ? '' : '［落盘失败］'}`);
-          const intervalMs = Number(profileCfg[kind]?.intervalMs) || 0;
           sendJson({
             ok: true,
             kind,
@@ -5687,7 +5710,9 @@ async function main() {
             oldValue,
             newValue: target,
             verified,
-            nextAllowedAt: intervalMs > 0 ? ts + intervalMs : 0,
+            // 额度用滑动窗口表示：成功这一刻没有「还要等多久」，0 就是「现在不欠等待」。
+            // 想知道下一次什么时候能改，让模型去读 GET /api/socialV2/profile 的 quotas。
+            nextAllowedAt: quota.ok ? 0 : now + quota.retryAfterMs,
             ...(degraded ? { degraded: true } : {}),
             ...(persisted ? {} : { persisted: false })
           });
@@ -5806,10 +5831,14 @@ async function main() {
             const info = await readProfileInfo(selfId);
             const groupId = groupIdFromKey(key);
             const view = (quota) => ({
+              // 滑动窗口口径（T-015）：窗口内已用次数 / 剩余 / 最早解禁时刻都从 quotaFor 来。
+              windowCount: quota.windowCount,
               remaining: quota.remaining,
               retryAfterMs: quota.retryAfterMs,
               lastTs: quota.lastTs,
-              todayCount: quota.todayCount,
+              windowHours: quota.windowHours,
+              windowCap: quota.windowCap,
+              minGapMs: quota.minGapMs,
               nextAllowedAt: quota.ok ? 0 : now + quota.retryAfterMs
             });
             sendJson({
@@ -5845,7 +5874,7 @@ async function main() {
 
         // 三个改资料端点：共用 handleProfileUpdate（闸门顺序见它上方的注释）。
         // 刻意**不**登记进 adminOnlyV2Paths —— 改的是 AI 自己的资料，不是控制台管理操作；
-        // 真正的闸门是 enabled + 内容审计 + 冷却/日额度 + 会话令牌 + 群白名单。
+        // 真正的闸门是 enabled + 内容审计 + 滑动窗口额度 + 会话令牌 + 群白名单。
         if (req.method === 'POST' && url.pathname === '/api/socialV2/profile/nickname') {
           await runProfileUpdate(req, res, 'nickname');
           return;

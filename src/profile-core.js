@@ -6,7 +6,7 @@
 //
 // 三条硬约束（与 affect-core.js 同源）：
 //   1. **纯函数**：不碰磁盘、不读系统时钟 —— `now` 一律由调用方注入（毫秒），
-//      单测才能把「等 24 小时」压成一次函数调用；本文件只 import 一个纯函数模块。
+//      单测才能把「等 4 小时」压成一次函数调用；本文件只 import 一个纯函数模块。
 //   2. **不改入参**：归一化与记账都返回新对象，桥接写成 `state = recordChange(state, …)`。
 //   3. **判定集中在这里**：bridge 只做「读配置 → 调这里 → 调 OneBot → 写盘」，不自己写 if。
 //
@@ -15,22 +15,29 @@
 import { auditContent } from './qzone-post.js';
 
 const HOUR_MS = 60 * 60 * 1000;
-const DAY_MS = 24 * HOUR_MS;
 
 /** 三种可改的资料。顺序固定：配置归一、额度判定与状态文件都按它来。 */
 export const PROFILE_KINDS = Object.freeze(['nickname', 'signature', 'groupCard']);
 
 /**
+ * 出厂额度（T-015 拍板）：**滑动窗口 4 小时 5 次** + **两次之间至少 60 秒**。
+ *
+ * 三种资料共用同一组窗口参数：昵称 / 签名各自独立计数，群名片按群独立计数。
+ * 60 秒是「别连着改」的防抖动下限；4 小时 5 次是「别改太勤」的上限 ——
+ * 资料字段最容易被别人注意到，改勤了既像被盗号也容易撞风控。
+ */
+const WINDOW_DEFAULTS = Object.freeze({ windowHours: 4, windowCap: 5, minGapMs: 60 * 1000 });
+
+/**
  * 出厂配置（dev-doc §2 逐字段）。
  *
- * `enabled: true` 是用户明确要的（改自己的资料不该默认被关死）；昵称一天只给 1 次、
- * 24 小时冷却 —— 这是最容易被别人注意到的字段，改勤了既像被盗号也容易撞风控。
+ * `enabled: true` 是用户明确要的（改自己的资料不该默认被关死）。
  */
 export const PROFILE_DEFAULTS = Object.freeze({
   enabled: true,
-  nickname: Object.freeze({ minChars: 2, maxChars: 12, intervalMs: 24 * HOUR_MS, dailyCap: 1 }),
-  signature: Object.freeze({ minChars: 0, maxChars: 60, intervalMs: 6 * HOUR_MS, dailyCap: 3 }),
-  groupCard: Object.freeze({ minChars: 0, maxChars: 20, intervalMs: HOUR_MS, dailyCap: 6 })
+  nickname: Object.freeze({ minChars: 2, maxChars: 12, ...WINDOW_DEFAULTS }),
+  signature: Object.freeze({ minChars: 0, maxChars: 60, ...WINDOW_DEFAULTS }),
+  groupCard: Object.freeze({ minChars: 0, maxChars: 20, ...WINDOW_DEFAULTS })
 });
 
 /** 头像尺寸只认这两档：research §1 只验证过 640 / 100，别的值 qlogo 不一定认。 */
@@ -38,13 +45,15 @@ export const AVATAR_SIZES = Object.freeze([640, 100]);
 
 /**
  * 配置项的合法区间（任务书细则逐条）。越界一律钳回边界而不是回落默认：
- * 用户写 `dailyCap: 99` 的意思是「想多改」，钳到 20 比偷偷改回 6 更贴近他的意图。
+ * 用户写 `windowCap: 999` 的意思是「想多改」，钳到 50 比偷偷改回 5 更贴近他的意图。
  */
 export const PROFILE_LIMITS = Object.freeze({
   minChars: Object.freeze({ min: 0, max: 12 }),
   maxChars: Object.freeze({ min: 1, max: 60 }),
-  intervalMs: Object.freeze({ min: 60 * 1000, max: 7 * DAY_MS }),
-  dailyCap: Object.freeze({ min: 1, max: 20 })
+  windowHours: Object.freeze({ min: 1, max: 168 }),
+  windowCap: Object.freeze({ min: 1, max: 50 }),
+  // 0 是合法值（= 不设最小间隔）：白天自己连改两次不该被硬拦，写 0 就是明确要关掉它。
+  minGapMs: Object.freeze({ min: 0, max: 60 * 60 * 1000 })
 });
 
 // 群名片在 QQ 侧的硬上限是 20：配置把 maxChars 放到 60 也不能越过它
@@ -82,13 +91,6 @@ function clampInt(value, spec, fallback) {
   const numeric = toFiniteNumber(value);
   if (!Number.isFinite(numeric)) return fallback;
   return Math.min(spec.max, Math.max(spec.min, Math.trunc(numeric)));
-}
-
-/** 非整数钳制（目前只用于 intervalMs）：保留小数毫秒没有意义，但也不必强制取整。 */
-function clampNumber(value, spec, fallback) {
-  const numeric = toFiniteNumber(value);
-  if (!Number.isFinite(numeric)) return fallback;
-  return Math.min(spec.max, Math.max(spec.min, numeric));
 }
 
 function codePointLength(text) {
@@ -137,8 +139,11 @@ function normalizeKindConfig(raw, dflt) {
     // 配置写错一次就再也改不了资料。
     minChars: Math.min(minChars, maxChars),
     maxChars,
-    intervalMs: clampNumber(source.intervalMs, PROFILE_LIMITS.intervalMs, dflt.intervalMs),
-    dailyCap: clampInt(source.dailyCap, PROFILE_LIMITS.dailyCap, dflt.dailyCap)
+    // 窗口参数同样是「越界钳到边界、坏值回落默认」：`'x'` / null / {} 都当坏值。
+    // 注意 minGapMs 的 0 是**真值**（= 关掉最小间隔），clampInt 的「0 是合法数字」正好对味。
+    windowHours: clampInt(source.windowHours, PROFILE_LIMITS.windowHours, dflt.windowHours),
+    windowCap: clampInt(source.windowCap, PROFILE_LIMITS.windowCap, dflt.windowCap),
+    minGapMs: clampInt(source.minGapMs, PROFILE_LIMITS.minGapMs, dflt.minGapMs)
   });
 }
 
@@ -230,7 +235,7 @@ function gateText(raw, { kind, minChars, maxChars, allowEmpty }) {
  * 强行按整块配置归一，自定义的 maxChars 会被**静默**换成默认 60 —— 排查起来像见鬼。
  */
 function pickKindConfig(cfg, kind) {
-  const kindKeys = ['minChars', 'maxChars', 'intervalMs', 'dailyCap'];
+  const kindKeys = ['minChars', 'maxChars', 'windowHours', 'windowCap', 'minGapMs'];
   if (isPlainObject(cfg) && kindKeys.some((key) => Object.prototype.hasOwnProperty.call(cfg, key))) {
     return normalizeKindConfig(cfg, PROFILE_DEFAULTS[kind]);
   }
@@ -278,87 +283,120 @@ function groupKeyOf(groupId) {
   return numeric > 0 ? String(numeric) : '';
 }
 
-/** 本地日同一天（getFullYear/getMonth/getDate 就是「本机时区的日历天」）。 */
-function sameLocalDay(a, b) {
-  const left = new Date(a);
-  const right = new Date(b);
-  return left.getFullYear() === right.getFullYear()
-    && left.getMonth() === right.getMonth()
-    && left.getDate() === right.getDate();
-}
-
-/** 距下一个本地零点的毫秒数（落在 (0, 24h]）。 */
-function msUntilNextLocalMidnight(at) {
-  const date = new Date(at);
-  const next = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1);
-  return Math.max(1, next.getTime() - at);
-}
-
-function countChangesToday(changes, kind, groupKey, at) {
+/**
+ * 数一个滑动窗口里的成功改动次数，并带回窗口内**最早**那次的 ts。
+ *
+ * 窗口是 `(now - windowMs, now]`：右闭左开。左边界不含是刻意的 —— 正好 4 小时前那条
+ * 必须已经滑出窗口，否则「等满 4 小时」会把人卡在原地（差 1 毫秒也算没过）。
+ * 未来时间戳（时钟回拨造成）同样不算：它还没发生，不该挤占现在的额度。
+ */
+function windowStats(changes, kind, groupKey, at, windowMs) {
+  const since = at - windowMs;
   let count = 0;
+  let earliest = 0;
   for (const item of changes) {
     if (item.kind !== kind) continue;
     // 群名片按群分开数；groupKey 为空（调用方没给群号）时按全部群名片变更合并数 ——
     // 宁可少放行一次，也不能让「不带群号」变成绕过额度的后门。
     if (kind === 'groupCard' && groupKey !== '' && String(item.groupId) !== groupKey) continue;
-    if (!sameLocalDay(item.ts, at)) continue;
+    if (!(item.ts > since) || item.ts > at) continue;
     count += 1;
+    if (earliest === 0 || item.ts < earliest) earliest = item.ts;
   }
-  return count;
+  return { count, earliest };
 }
 
 /**
- * 现在能不能改（dev-doc §2 的频率部分）。纯计算，不写状态。
+ * 现在能不能改（dev-doc §3）。纯计算，不写状态。
  *
- * 顺序：enabled → 冷却 → 本地日上限。冷却先算是因为它能给出**更准的** `retryAfterMs`：
- * 日上限要等到零点，而冷却可能几分钟后就好了。`reason` 成功时是空串。
+ * 顺序：enabled → unknown_kind → too_frequent（距上次成功不足 minGapMs）→
+ * window_cap（窗口内已满 windowCap 次）→ ok。最小间隔先算是因为它能给出**更准的**
+ * `retryAfterMs`（几十秒后就能再试）；窗口满了要一直等到最早那次滑出窗口。
  *
  * `kind` 只有三种；传错（代码 bug，不是用户输入）时给 `unknown_kind` 而不是抛错，
  * 也绝不返回 ok:true —— 宁可拦住一次，也不能在参数错位时真去改资料。
+ *
+ * 返回值固定九个字段，桥接侧的 429 与 GET 快照直接拿它拼响应，不再各算一遍：
+ * `{ ok, reason, retryAfterMs, windowCount, remaining, lastTs, windowHours, windowCap, minGapMs }`。
  */
 export function quotaFor(state, cfg, kind, groupId, now) {
   const config = normalizeProfileConfig(cfg);
   const source = normalizeProfileState(state);
   const nowRaw = toFiniteNumber(now);
   const at = Number.isFinite(nowRaw) && nowRaw > 0 ? nowRaw : 0;
-  if (config.enabled === false) {
-    return { ok: false, reason: 'disabled', retryAfterMs: 0, todayCount: 0, remaining: 0, lastTs: 0 };
-  }
-  if (!PROFILE_KINDS.includes(kind)) {
-    return { ok: false, reason: 'unknown_kind', retryAfterMs: 0, todayCount: 0, remaining: 0, lastTs: 0 };
-  }
-  const params = config[kind];
+  const known = PROFILE_KINDS.includes(kind);
+  const params = known ? config[kind] : null;
+  const windowHours = params ? params.windowHours : 0;
+  const windowCap = params ? params.windowCap : 0;
+  const minGapMs = params ? params.minGapMs : 0;
+  // 被 disabled / 坏参数挡住时没有任何一次计数成立：九个字段照样给齐，
+  // 调用方（429 响应、快照视图）就不用为这两种分支写特例。
+  const blocked = (reason) => ({
+    ok: false,
+    reason,
+    retryAfterMs: 0,
+    windowCount: 0,
+    remaining: 0,
+    lastTs: 0,
+    windowHours,
+    windowCap,
+    minGapMs
+  });
+  if (config.enabled === false) return blocked('disabled');
+  if (!known) return blocked('unknown_kind');
+
+  const windowMs = windowHours * HOUR_MS;
   const groupKey = kind === 'groupCard' ? groupKeyOf(groupId) : '';
+  // 群号缺失（私聊 / 控制台直调）时不存在「上一次改的是哪个群」：lastTs 归零 ⇒
+  // 跳过最小间隔判定，计数按全部群名片合并（见 windowStats 里那条例外）。
   const last = kind === 'groupCard'
     ? (groupKey === '' ? null : source.last.groupCard[groupKey] ?? null)
     : source.last[kind];
   const lastTs = last ? last.ts : 0;
-  const todayCount = countChangesToday(source.changes, kind, groupKey, at);
-  const remaining = Math.max(0, params.dailyCap - todayCount);
+  const window = windowStats(source.changes, kind, groupKey, at, windowMs);
+  const windowCount = window.count;
+  const remaining = Math.max(0, windowCap - windowCount);
 
-  if (lastTs > 0 && at - lastTs < params.intervalMs) {
+  if (lastTs > 0 && at - lastTs < minGapMs) {
     return {
       ok: false,
-      reason: 'cooldown',
-      // 时钟回拨时 at - lastTs 是负数，等的时间会比 interval 更长 —— 这是故意的：
-      // 把系统时间往前拨一下不该等于解除冷静期。
-      retryAfterMs: Math.max(1, Math.ceil(params.intervalMs - (at - lastTs))),
-      todayCount,
+      reason: 'too_frequent',
+      // 时钟回拨时 at - lastTs 是负数，等的时间会比 minGapMs 更长 —— 这是故意的：
+      // 把系统时间往前拨一下不该等于解除最小间隔。
+      retryAfterMs: Math.max(1, Math.ceil(minGapMs - (at - lastTs))),
+      windowCount,
       remaining,
-      lastTs
+      lastTs,
+      windowHours,
+      windowCap,
+      minGapMs
     };
   }
-  if (todayCount >= params.dailyCap) {
+  if (windowCount >= windowCap) {
     return {
       ok: false,
-      reason: 'daily_cap',
-      retryAfterMs: at > 0 ? msUntilNextLocalMidnight(at) : 0,
-      todayCount,
+      reason: 'window_cap',
+      // 等窗口里最早那一次滑出左边界，就多出一次额度。
+      retryAfterMs: Math.max(1, Math.ceil(window.earliest + windowMs - at)),
+      windowCount,
       remaining: 0,
-      lastTs
+      lastTs,
+      windowHours,
+      windowCap,
+      minGapMs
     };
   }
-  return { ok: true, reason: '', retryAfterMs: 0, todayCount, remaining, lastTs };
+  return {
+    ok: true,
+    reason: '',
+    retryAfterMs: 0,
+    windowCount,
+    remaining,
+    lastTs,
+    windowHours,
+    windowCap,
+    minGapMs
+  };
 }
 
 // ── 状态：新建 / 修复 / 记账 / 序列化 ───────────────────────────────────────
@@ -384,7 +422,7 @@ function normalizeLastEntry(raw, ceiling) {
   const source = isPlainObject(raw) ? raw : {};
   const rawTs = toFiniteNumber(source.ts);
   let ts = Number.isFinite(rawTs) && rawTs > 0 ? rawTs : 0;
-  // 时钟回拨 / 手改文件造出的「未来时间」会把冷却顶到很久以后：钳到 now 仍然保持一段冷却，
+  // 时钟回拨 / 手改文件造出的「未来时间」会把最小间隔顶到很久以后：钳到 now 仍然保持一段间隔，
   // 只是不会因为一个 2099 年的时间戳让资料再也改不了。
   if (ceiling > 0 && ts > ceiling) ts = ceiling;
   return { ts, value: cleanProfileText(source.value, { maxChars: VALUE_MAX_CHARS }) };
@@ -446,7 +484,7 @@ export function normalizeProfileState(state, now) {
  * 某个分支忘了回写，也不会出现「内存里改了、盘上没改」的半截状态。
  *
  * `reason` 只留 40 字（它会进日志与面板）；群名片按群号分别记 `last.groupCard`，
- * 群号缺失（0）时只记进 changes、不写 last —— 没有群号就无从判断冷却该套给哪个群。
+ * 群号缺失（0）时只记进 changes、不写 last —— 没有群号就无从判断最小间隔该套给哪个群。
  */
 export function recordChange(state, change, cfg) {
   const config = normalizeProfileConfig(cfg);

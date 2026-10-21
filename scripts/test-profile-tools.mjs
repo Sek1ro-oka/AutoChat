@@ -94,7 +94,9 @@ for (const [tool, label, text] of [
   check(`${tool} 描述含「一律拒绝」`, text.includes('一律拒绝'));
   check(`${tool} 描述含「不用问谁」`, text.includes('不用问谁'));
   check(`${tool} 描述含「retryAfterMs」`, text.includes('retryAfterMs'));
-  check(`${tool} 描述含「cooldown / daily_cap 是硬约束」`, text.includes('cooldown / daily_cap 是硬约束'));
+  check(`${tool} 描述含「额度是滑动窗口硬约束（4 小时内最多 5 次，两次之间至少 60 秒）」`, text.includes('额度是滑动窗口硬约束（4 小时内最多 5 次，两次之间至少 60 秒）'));
+  check(`${tool} 描述不再出现旧口径（24 小时一次 / 每天 N 次）`,
+    !text.includes('24 小时一次') && !text.includes('每天 1 次') && !text.includes('每天 3 次') && !text.includes('每天 6 次') && !text.includes('cooldown'));
   check(`${tool} 描述含「不能带链接/手机号/邮箱/身份证/拉人话术」`, text.includes('不能带链接/手机号/邮箱/身份证/拉人话术'));
 }
 check('qq_set_nickname 描述带 2–12 字与「不能以数字开头」', nicknameTool.includes('2–12 字') && nicknameTool.includes('不能以数字开头'));
@@ -172,7 +174,12 @@ check('改资料工具失败都调 profileErrorText', ['qq_set_nickname', 'qq_se
 check('profileErrorText 会带出 retryAfterMs 并翻成人话', mcp.includes('formatProfileWait(retry)') && profileBlock.includes('body.retryAfterMs ?? error?.retryAfterMs'));
 check('profileErrorText 会带出 reasons[].message', mcp.includes('reasons.map((item) => item?.message ?? item?.code'));
 check('reason 中文映射覆盖硬约束与降级场景',
-  ['disabled', 'cooldown', 'daily_cap', 'not_applied', 'group_not_allowed', 'onebot_error'].every((key) => profileBlock.includes(`${key}:`)));
+  ['disabled', 'too_frequent', 'window_cap', 'not_applied', 'group_not_allowed', 'onebot_error'].every((key) => profileBlock.includes(`${key}:`)));
+check('reason 中文映射不再有 cooldown / daily_cap（T-015 换语义）',
+  !profileBlock.includes('cooldown:') && !profileBlock.includes('daily_cap:'));
+check('qq_get_profile 的额度行用窗口口径（已用 N/M + 几小时窗口）',
+  profileTool.includes('quota.windowCount') && profileTool.includes('quota.windowCap') && profileTool.includes('小时内已用'));
+check('qq_get_profile 不再读 todayCount', !profileBlock.includes('todayCount'));
 check('profileUpdateText 会说明「没回读确认」', mcp.includes('QQ 那边没回读确认'));
 check('profileUpdateText 会给出下次可改时间', mcp.includes('下次要改得等 ${formatProfileWait(next - Date.now())}'));
 check('qq_get_profile 输出含昵称/签名/QQ/额度/最近改动',

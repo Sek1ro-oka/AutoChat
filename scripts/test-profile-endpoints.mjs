@@ -191,12 +191,14 @@ check('非白名单群 403 group_not_allowed', handleBody.includes("reason: 'gro
 check('白名单判定在 checkGroupCard 之前',
   handleBody.indexOf('cfg.allow?.groups ?? []') < handleBody.indexOf('checkGroupCard(value, profileCfg.groupCard)'));
 
-// ④ 额度：quotaFor 不过 → 429，字段是 reason/retryAfterMs/todayCount/remaining。
+// ④ 额度：quotaFor 不过 → 429，字段是 reason/retryAfterMs/windowCount/remaining + 窗口参数。
 const quotaBlock = sendBlockBefore(handleBody, '}, 429)');
 check('额度不过时返回 429', quotaBlock.length > 0);
-for (const field of ['reason: quota.reason', 'retryAfterMs: quota.retryAfterMs', 'todayCount: quota.todayCount', 'remaining: quota.remaining']) {
+for (const field of ['reason: quota.reason', 'retryAfterMs: quota.retryAfterMs', 'windowCount: quota.windowCount', 'remaining: quota.remaining', 'windowHours: quota.windowHours', 'windowCap: quota.windowCap', 'minGapMs: quota.minGapMs']) {
   check(`429 响应含 ${field}`, quotaBlock.includes(field), quotaBlock.slice(0, 160));
 }
+check('429 不再回 todayCount（T-015 换成窗口字段）', !quotaBlock.includes('todayCount'));
+check('429 文案走 profileQuotaErrorText（不在这里手写 if）', quotaBlock.includes('error: profileQuotaErrorText(label, quota)'));
 check('quotaFor 带 groupId（群名片按群记账）', handleBody.includes("kind === 'groupCard' ? groupId : undefined"));
 
 // 429 文案的时长格式化：真机 smoke 抓到过「约 23 小时 60 分」——ceil 只能进到 59 分，
@@ -221,6 +223,30 @@ if (typeof profileWaitText === 'function') {
   check('任何取值都不含「60 分」', [1, 59999, 3599999, 86399993, 86400000].every((ms) => !profileWaitText(ms).includes('60 分')));
 } else {
   check('profileWaitText 能从 bridge 源码里取出并执行', false);
+}
+
+// 429 文案（T-015）：too_frequent 报「N 秒 + 最小间隔」，window_cap 报「窗口内次数 + 最早那条滑出的时长」。
+// profileQuotaErrorText 只依赖 profileWaitText 一个闭包变量，同样抠出来真跑。
+const quotaTextSrc = extractFunction(bridge, 'function profileQuotaErrorText(');
+let profileQuotaErrorText;
+try {
+  profileQuotaErrorText = new Function('profileWaitText', `${quotaTextSrc}\nreturn profileQuotaErrorText;`)(profileWaitText);
+} catch {
+  profileQuotaErrorText = undefined;
+}
+if (typeof profileQuotaErrorText === 'function') {
+  const tooFrequentText = profileQuotaErrorText('昵称', { reason: 'too_frequent', retryAfterMs: 42000, minGapMs: 60000 });
+  const cappedText = profileQuotaErrorText('昵称', { reason: 'window_cap', retryAfterMs: 3 * 3600000, windowHours: 4, windowCap: 5 });
+  check('too_frequent 文案：「42 秒后才能再改（两次之间至少 60 秒）」',
+    tooFrequentText === '改【昵称】太频繁了，42 秒后才能再改（两次之间至少 60 秒）', tooFrequentText);
+  check('window_cap 文案：「4 小时内…已经用完（5 次），约 3 小时后才能再改」',
+    cappedText === '4 小时内改【昵称】的次数已经用完（5 次），约 3 小时后才能再改', cappedText);
+  check('两种拒绝原因的等待时间都走已有人话格式化（分钟/小时）',
+    profileQuotaErrorText('签名', { reason: 'window_cap', retryAfterMs: 90000, windowHours: 4, windowCap: 5 }).includes('约 2 分钟')
+    && profileQuotaErrorText('签名', { reason: 'too_frequent', retryAfterMs: 59999, minGapMs: 60000 }).includes('60 秒'));
+  check('disabled 有中文同义提示', profileQuotaErrorText('昵称', { reason: 'disabled' }).includes('已关闭'));
+} else {
+  check('profileQuotaErrorText 能从 bridge 源码里取出并执行', false);
 }
 
 // ⑤ 读旧值：失败不阻断（degraded:true，oldValue 记空串）。
@@ -263,7 +289,7 @@ check('比较前两端都过 cleanProfileText（避免空白假阴性）',
 // ⑧ 成功：记账 + 落盘 + 日志 + nextAllowedAt。
 check('成功时调 recordChange 并写 groupId', handleBody.includes('groupId: kind === \'groupCard\' ? groupId : 0,'));
 check('成功响应含 kind/oldValue/newValue/verified/nextAllowedAt',
-  handleBody.includes('kind,') && handleBody.includes('verified,') && handleBody.includes('nextAllowedAt: intervalMs > 0 ? ts + intervalMs : 0'));
+  handleBody.includes('kind,') && handleBody.includes('verified,') && handleBody.includes('nextAllowedAt: quota.ok ? 0 : now + quota.retryAfterMs'));
 check("日志前缀是 '[profile] '", handleBody.includes("log(`[profile] ${label}"));
 check('落盘失败不把成功变成 500（只带 persisted:false）', handleBody.includes('...(persisted ? {} : { persisted: false })'));
 
@@ -300,7 +326,9 @@ const snapshotBody = sliceBetween(bridge, `if (req.method === 'GET' && url.pathn
 check('能切出资料快照 handler', snapshotBody.length > 500, `长度 ${snapshotBody.length}`);
 check('昵称/签名来自 get_stranger_info', snapshotBody.includes('readProfileInfo(selfId)') && bridge.includes("profileOneBot('get_stranger_info', { user_id: selfId, no_cache: true })"));
 check('三项额度各自调 quotaFor', ['nickname', 'signature', 'groupCard'].every((kind) => snapshotBody.includes(`quotaFor(state, profileCfg, '${kind}'`)));
-check('额度视图含 remaining/retryAfterMs/lastTs', snapshotBody.includes('remaining: quota.remaining') && snapshotBody.includes('retryAfterMs: quota.retryAfterMs') && snapshotBody.includes('lastTs: quota.lastTs'));
+check('额度视图含 windowCount/remaining/retryAfterMs/lastTs', snapshotBody.includes('windowCount: quota.windowCount') && snapshotBody.includes('remaining: quota.remaining') && snapshotBody.includes('retryAfterMs: quota.retryAfterMs') && snapshotBody.includes('lastTs: quota.lastTs'));
+check('额度视图带窗口参数（windowHours/windowCap/minGapMs）', snapshotBody.includes('windowHours: quota.windowHours') && snapshotBody.includes('windowCap: quota.windowCap') && snapshotBody.includes('minGapMs: quota.minGapMs'));
+check('额度视图不含 todayCount（T-015 换成滑动窗口）', !snapshotBody.includes('todayCount'));
 check('changes 只给最近 10 条', snapshotBody.includes('changes: state.changes.slice(0, 10)'));
 check('读不到资料卡时给 degraded:true（昵称/签名不会伪装成空）', snapshotBody.includes('...(info ? {} : { degraded: true })'));
 check('快照带 profile 上限（让模型知道字数上限）', snapshotBody.includes('nicknameMaxChars: profileCfg.nickname.maxChars'));

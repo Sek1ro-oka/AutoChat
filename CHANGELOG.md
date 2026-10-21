@@ -51,18 +51,19 @@
 - **看头像**：`qq_get_avatar` / `GET /api/avatar?uin=&size=`（640 或 100，默认 640；单张上限 2MB，
   640 拉不到自动回落 100），图片直接进视觉上下文。
 - **自查**：`qq_get_profile` / `GET /api/socialV2/profile` 返回自己的 QQ 号、昵称、签名、
-  三项改动的当日剩余额度与下次可改时间、最近 10 条改动记录。
+  三项改动在 4 小时窗口里已用几次、还剩几次与下次可改时间、最近 10 条改动记录。
 - **改资料**：`qq_set_nickname` / `qq_set_signature` / `qq_set_group_card`，
   对应 `POST /api/socialV2/profile/{nickname,signature,group-card}`。闸门在纯函数模块
   `src/profile-core.js`：长度按码点、禁换行、禁纯 emoji / 纯标点，正文复用 qzone 的审计规则
   （链接 / 手机号 / 邮箱 / 身份证 / 拉人话术），昵称额外拒绝数字开头、`@`、5 位以上连续数字。
-- **额度按自然日**：昵称 24 小时 1 次、签名 6 小时 3 次、群名片每群 1 小时 6 次；
-  拒绝时 `429` 带 `retryAfterMs` 与「约 X 小时 Y 分 后才能再改」。
+- **额度是滑动窗口**（2026-10-21 调整，原为「冷却 + 每日上限」）：昵称、签名各算各的，群名片按群算，
+  都是 **4 小时内最多 5 次**、两次之间至少 **60 秒**；拒绝时 `429` 带 `retryAfterMs`，
+  `too_frequent` 说「N 秒后」、`window_cap` 说「约 X 后才能再改」（等最早那次滑出窗口）。
 - **读回校验**：改完立刻读回，不一致时不记账、返回 `ok:false` + `pending:true`（模型会被告知「没回读确认」）。
 - **群名片清空是网关限制**：SnowLuma 的编码器在群名片为空串时会省略字段，服务端回 OIDB 1007，
   所以「清除」实际写的是一个半角空格（读回可能显示为空），状态文件与日志仍记空串。
-- 配置在 `config.json` 的 `socialV2.profile`（`enabled` 与三种资料各自的 `minIntervalMs` / `dailyCap` /
-  `maxChars`）；缺省段等于出厂默认。这四个工具没有登记 `TOOL_CONFIG_FLAGS`，总开关是 `socialV2.profile.enabled`。
+- 配置在 `config.json` 的 `socialV2.profile`（`enabled` 与三种资料各自的 `windowHours` / `windowCap` /
+  `minGapMs` / `maxChars`）；缺省段等于出厂默认。这四个工具没有登记 `TOOL_CONFIG_FLAGS`，总开关是 `socialV2.profile.enabled`。
 
 ### 新增
 

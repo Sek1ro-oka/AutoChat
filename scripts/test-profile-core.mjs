@@ -8,12 +8,12 @@
 //   ③ 昵称：合法 / 太短 / 太长 / 数字开头 / @ / 5 位数字 / 纯表情 / 链接 / 手机号
 //   ④ 签名：空串清除 / 60 码点边界 / 61 拒 / URL / 拉人话术 / 换行
 //   ⑤ 群名片：空串清除 / 20 边界 / 21 拒 / 拉人话术 / 硬上限
-//   ⑥ 额度：首次 / 冷却 retryAfterMs / 日上限 / 按群独立 / 跨本地日 / disabled
+//   ⑥ 额度：滑动窗口边界 / 最小间隔 / 次数上限 / 按群独立 / 窗口收缩 / 钳制 / disabled
 //   ⑦ recordChange：last / changes / 最近在前 / 100 条截断 / 不改入参 / reason 截断
 //   ⑧ 状态序列化：坏 JSON / 往返一致 / 缺字段 / version 固定 / 未来时间戳
 //   ⑨ avatarUrl：640/100 / 非法 size / 非法 uin
 //
-// 时间全部是假时钟：`new Date(y, m, d, ...)` 按本机时区造「本地日」，跨日用例因此
+// 时间全部是假时钟：`new Date(2026, 9, 20, 10)` 造一个固定时刻，窗口边界用例因此
 // 不依赖运行机器的时区；不读系统时钟、不碰 state/、不连网络。
 import {
   PROFILE_DEFAULTS,
@@ -59,18 +59,18 @@ const cfg = normalizeProfileConfig({});
 ok(
   cfg.enabled === true
   && cfg.nickname.minChars === 2 && cfg.nickname.maxChars === 12
-  && cfg.nickname.intervalMs === 24 * HOUR && cfg.nickname.dailyCap === 1
+  && cfg.nickname.windowHours === 4 && cfg.nickname.windowCap === 5 && cfg.nickname.minGapMs === 60000
   && cfg.signature.minChars === 0 && cfg.signature.maxChars === 60
-  && cfg.signature.intervalMs === 6 * HOUR && cfg.signature.dailyCap === 3
+  && cfg.signature.windowHours === 4 && cfg.signature.windowCap === 5 && cfg.signature.minGapMs === 60000
   && cfg.groupCard.minChars === 0 && cfg.groupCard.maxChars === 20
-  && cfg.groupCard.intervalMs === HOUR && cfg.groupCard.dailyCap === 6,
-  '空对象 → 三组出厂默认（enabled 开 / 2-12-24h-1 / 0-60-6h-3 / 0-20-1h-6）'
+  && cfg.groupCard.windowHours === 4 && cfg.groupCard.windowCap === 5 && cfg.groupCard.minGapMs === 60000,
+  '空对象 → 三组出厂默认（enabled 开 / 2-12 / 0-60 / 0-20；窗口统一 4 小时 5 次 / 60 秒）'
 );
 ok(
   normalizeProfileConfig().nickname.maxChars === 12
   && normalizeProfileConfig(null).enabled === true
   && normalizeProfileConfig('x').signature.maxChars === 60
-  && normalizeProfileConfig([]).groupCard.dailyCap === 6
+  && normalizeProfileConfig([]).groupCard.windowCap === 5
   && normalizeProfileConfig(42).nickname.minChars === 2,
   '缺省 / null / 字符串 / 数组 / 数字输入都不抛'
 );
@@ -86,14 +86,20 @@ ok(
   '越界钳位：minChars 99→12 / maxChars 0→1 / maxChars 61→60'
 );
 ok(
-  normalizeProfileConfig({ signature: { intervalMs: 1 } }).signature.intervalMs === MINUTE
-  && normalizeProfileConfig({ signature: { intervalMs: 999 * DAY } }).signature.intervalMs === 7 * DAY,
-  'intervalMs 钳到 60s–7d'
+  normalizeProfileConfig({ signature: { windowHours: 0 } }).signature.windowHours === 1
+  && normalizeProfileConfig({ signature: { windowHours: 999 } }).signature.windowHours === 168,
+  'windowHours 钳到 1–168 小时（写 0 → 1、写 999 → 168）'
 );
 ok(
-  normalizeProfileConfig({ groupCard: { dailyCap: 0 } }).groupCard.dailyCap === 1
-  && normalizeProfileConfig({ groupCard: { dailyCap: 99 } }).groupCard.dailyCap === 20,
-  'dailyCap 钳到 1–20'
+  normalizeProfileConfig({ groupCard: { windowCap: 0 } }).groupCard.windowCap === 1
+  && normalizeProfileConfig({ groupCard: { windowCap: 999 } }).groupCard.windowCap === 50,
+  'windowCap 钳到 1–50（写 0 → 1、写 999 → 50）'
+);
+ok(
+  normalizeProfileConfig({ nickname: { minGapMs: -5 } }).nickname.minGapMs === 0
+  && normalizeProfileConfig({ nickname: { minGapMs: 0 } }).nickname.minGapMs === 0
+  && normalizeProfileConfig({ nickname: { minGapMs: 9999999 } }).nickname.minGapMs === 3600000,
+  'minGapMs 钳到 0–3600000（0 是合法值 = 关掉最小间隔）'
 );
 ok(
   normalizeProfileConfig({ enabled: false }).enabled === false
@@ -102,15 +108,16 @@ ok(
   "enabled 只认显式 false（'false' / 0 仍算开）"
 );
 ok(
-  normalizeProfileConfig({ nickname: { maxChars: '10', dailyCap: '2' } }).nickname.maxChars === 10
-  && normalizeProfileConfig({ nickname: { dailyCap: '2' } }).nickname.dailyCap === 2,
+  normalizeProfileConfig({ nickname: { maxChars: '10', windowCap: '2' } }).nickname.maxChars === 10
+  && normalizeProfileConfig({ nickname: { windowCap: '2' } }).nickname.windowCap === 2
+  && normalizeProfileConfig({ nickname: { minGapMs: '90000' } }).nickname.minGapMs === 90000,
   '手写 config.json 的数字字符串被接受'
 );
 ok(
   (() => {
-    const raw = { enabled: 'no', nickname: { maxChars: 99 }, signature: { intervalMs: 1 } };
+    const raw = { enabled: 'no', nickname: { maxChars: 99 }, signature: { windowHours: 999 } };
     normalizeProfileConfig(raw);
-    return raw.enabled === 'no' && raw.nickname.maxChars === 99 && raw.signature.intervalMs === 1;
+    return raw.enabled === 'no' && raw.nickname.maxChars === 99 && raw.signature.windowHours === 999;
   })(),
   '不改入参（raw.nickname.maxChars 仍是 99）'
 );
@@ -269,116 +276,194 @@ ok(
   'checkGroupCard 不改配置对象'
 );
 
-// ── ⑥ 额度 ─────────────────────────────────────────────────────────────────
+// ── ⑥ 额度（滑动窗口） ─────────────────────────────────────────────────────
 console.log('\n⑥ quotaFor');
 
-// 本地 2026-10-20 10:00：用本地构造器，跨日用例不依赖运行机器时区。
+// 本地 2026-10-20 10:00：固定时刻，窗口边界用例不依赖运行机器时区。
 const NOW = new Date(2026, 9, 20, 10, 0, 0, 0).getTime();
 const fresh = createProfileState();
 const qFresh = quotaFor(fresh, cfg, 'nickname', 0, NOW);
 
 ok(
-  qFresh.ok === true && qFresh.todayCount === 0 && qFresh.remaining === 1
-  && qFresh.retryAfterMs === 0 && qFresh.lastTs === 0,
-  '首次可改：ok / 今天 0 次 / 剩 1 次'
+  qFresh.ok === true && qFresh.windowCount === 0 && qFresh.remaining === 5
+  && qFresh.retryAfterMs === 0 && qFresh.lastTs === 0
+  && qFresh.windowHours === 4 && qFresh.windowCap === 5 && qFresh.minGapMs === 60000,
+  '首次可改：ok / 窗口内 0 次 / 剩 5 次 / 回显窗口参数'
 );
 
-const cooled = recordChange(fresh, {
-  ts: NOW - HOUR, kind: 'nickname', oldValue: '旧', newValue: '新', reason: '想换'
-}, cfg);
-const qCool = quotaFor(cooled, cfg, 'nickname', 0, NOW);
+// 造状态的工具：changes 是「成功改动」的流水，last 决定最小间隔。
+const change = (ts, kind = 'nickname', groupId = 0, newValue = '新') => ({
+  ts, kind, groupId, oldValue: '旧', newValue, reason: ''
+});
+const stateOf = (changes = [], last = {}) => normalizeProfileState({ last, changes }, NOW);
+
+const qGap = quotaFor(stateOf([change(NOW - 55000)], {
+  nickname: { ts: NOW - 55000, value: '新' }
+}), cfg, 'nickname', 0, NOW);
 
 ok(
-  qCool.ok === false && qCool.reason === 'cooldown'
-  && qCool.retryAfterMs === 23 * HOUR && qCool.lastTs === NOW - HOUR,
-  '冷却中：retryAfterMs = 24h − 已过 1h'
+  qGap.ok === false && qGap.reason === 'too_frequent'
+  && qGap.retryAfterMs === 5000 && qGap.lastTs === NOW - 55000 && qGap.windowCount === 1,
+  '59 秒内第二次 → too_frequent，retryAfterMs = 60s − 55s = 5000'
 );
 
-const sigDone = recordChange(fresh, {
-  ts: NOW - 6 * HOUR, kind: 'signature', oldValue: '', newValue: '签名', reason: ''
-}, cfg);
-const qEdge = quotaFor(sigDone, cfg, 'signature', 0, NOW);
+const qGapEdge = quotaFor(stateOf([change(NOW - MINUTE)], {
+  nickname: { ts: NOW - MINUTE, value: '新' }
+}), cfg, 'nickname', 0, NOW);
 
 ok(
-  qEdge.ok === true && qEdge.todayCount === 1 && qEdge.remaining === 2,
-  '冷却恰好到期（Δt = interval）就放行'
+  qGapEdge.ok === true && qGapEdge.windowCount === 1 && qGapEdge.remaining === 4,
+  '正好满 60 秒就放行（Δt = minGapMs 不算「太频繁」）'
 );
 
-const sigFast = normalizeProfileConfig({ signature: { intervalMs: MINUTE, dailyCap: 3 } });
-const stateWithChanges = (list, lastTs) => normalizeProfileState({
-  last: { signature: { ts: lastTs, value: '旧' } },
-  changes: list
-}, NOW);
-const threeToday = stateWithChanges([
-  { ts: NOW - 2 * HOUR, kind: 'signature', groupId: 0, oldValue: '', newValue: '一', reason: '' },
-  { ts: NOW - 90 * MINUTE, kind: 'signature', groupId: 0, oldValue: '', newValue: '二', reason: '' },
-  { ts: NOW - 30 * MINUTE, kind: 'signature', groupId: 0, oldValue: '', newValue: '三', reason: '' }
-], NOW - 2 * HOUR);
-const qCap = quotaFor(threeToday, sigFast, 'signature', 0, NOW);
+const edgeChanges = [0, 1, 2, 3, 4].map((i) => change(NOW - 4 * HOUR, 'nickname', 0, `边${i}`));
+const qEdge = quotaFor(stateOf(edgeChanges, { nickname: { ts: NOW - 4 * HOUR, value: '边4' } }), cfg, 'nickname', 0, NOW);
 
 ok(
-  qCap.ok === false && qCap.reason === 'daily_cap' && qCap.todayCount === 3 && qCap.remaining === 0,
-  '日上限：3/3 → daily_cap'
+  qEdge.ok === true && qEdge.windowCount === 0 && qEdge.remaining === 5,
+  '窗口左开：正好 4 小时前那 5 条已滑出窗口，一次都不算'
 );
 
-const twoToday = stateWithChanges([
-  { ts: NOW - 2 * HOUR, kind: 'signature', groupId: 0, oldValue: '', newValue: '一', reason: '' },
-  { ts: NOW - 30 * MINUTE, kind: 'signature', groupId: 0, oldValue: '', newValue: '二', reason: '' }
-], NOW - 2 * HOUR);
-const qTwo = quotaFor(twoToday, sigFast, 'signature', 0, NOW);
-
-ok(qTwo.ok === true && qTwo.todayCount === 2 && qTwo.remaining === 1, '2/3 仍可改，remaining 1');
-
-const cardQuotaCfg = normalizeProfileConfig({ groupCard: { intervalMs: 60 * MINUTE, dailyCap: 6 } });
-const cardState = normalizeProfileState({
-  last: { groupCard: { '111': { ts: NOW - 30 * MINUTE, value: 'A' } } }
-}, NOW);
-const qCardA = quotaFor(cardState, cardQuotaCfg, 'groupCard', 111, NOW);
-const qCardB = quotaFor(cardState, cardQuotaCfg, 'groupCard', 222, NOW);
+const capChanges = [
+  change(NOW - 3 * HOUR),
+  change(NOW - 2 * HOUR),
+  change(NOW - 90 * MINUTE),
+  change(NOW - 30 * MINUTE),
+  change(NOW - 5 * MINUTE)
+];
+const capped = stateOf(capChanges, { nickname: { ts: NOW - 5 * MINUTE, value: '新' } });
+const qCap = quotaFor(capped, cfg, 'nickname', 0, NOW);
 
 ok(
-  qCardA.reason === 'cooldown' && qCardA.retryAfterMs === 30 * MINUTE && qCardB.ok === true,
-  '群名片按群计冷却：111 冷却中、222 可改'
+  qCap.ok === false && qCap.reason === 'window_cap'
+  && qCap.windowCount === 5 && qCap.remaining === 0 && qCap.retryAfterMs === HOUR,
+  '窗口内满 5 次：第 6 次 window_cap，最早那条 3 小时前 + 4h − now = 1 小时'
 );
 
-const cardCapped = normalizeProfileState({
-  last: { groupCard: { '111': { ts: NOW - 3 * HOUR, value: 'A' } } },
-  changes: [
-    { ts: NOW - 3 * HOUR, kind: 'groupCard', groupId: 111, oldValue: '', newValue: 'A', reason: '' },
-    { ts: NOW - 2 * HOUR, kind: 'groupCard', groupId: 111, oldValue: 'A', newValue: 'B', reason: '' }
-  ]
-}, NOW);
-const cardCapCfg = normalizeProfileConfig({ groupCard: { intervalMs: MINUTE, dailyCap: 2 } });
-
 ok(
-  quotaFor(cardCapped, cardCapCfg, 'groupCard', 111, NOW).reason === 'daily_cap'
-  && quotaFor(cardCapped, cardCapCfg, 'groupCard', 222, NOW).ok === true,
-  '群名片日上限也按群独立'
+  quotaFor(capped, cfg, 'signature', 0, NOW).ok === true
+  && quotaFor(capped, cfg, 'signature', 0, NOW).windowCount === 0,
+  '签名与昵称互不影响：昵称满了，签名仍有完整额度'
 );
 
-const yesterdayTs = new Date(2026, 9, 19, 23, 30, 0, 0).getTime();
-const oldSig = normalizeProfileState({
-  last: { signature: { ts: yesterdayTs, value: '旧' } },
-  changes: [{ ts: yesterdayTs, kind: 'signature', groupId: 0, oldValue: '', newValue: '旧', reason: '' }]
-}, NOW);
-const qNewDay = quotaFor(oldSig, cfg, 'signature', 0, NOW);
+const cardChanges = [
+  change(NOW - 3 * HOUR, 'groupCard', 111, 'A'),
+  change(NOW - 2 * HOUR, 'groupCard', 111, 'B'),
+  change(NOW - 90 * MINUTE, 'groupCard', 111, 'C'),
+  change(NOW - 30 * MINUTE, 'groupCard', 111, 'D'),
+  change(NOW - 5 * MINUTE, 'groupCard', 111, 'E'),
+  change(NOW - 20 * MINUTE, 'groupCard', 222, 'X')
+];
+const cardState = stateOf(cardChanges, {
+  groupCard: {
+    111: { ts: NOW - 5 * MINUTE, value: 'E' },
+    222: { ts: NOW - 20 * MINUTE, value: 'X' }
+  }
+});
+const qCardA = quotaFor(cardState, cfg, 'groupCard', 111, NOW);
+const qCardB = quotaFor(cardState, cfg, 'groupCard', 222, NOW);
 
 ok(
-  qNewDay.ok === true && qNewDay.todayCount === 0 && qNewDay.remaining === 3,
-  '跨本地日重置：昨天的记录不算今天'
+  qCardA.reason === 'window_cap' && qCardA.windowCount === 5
+  && qCardB.ok === true && qCardB.windowCount === 1 && qCardB.remaining === 4,
+  '群名片按群独立计数：111 满 5 次、222 只用了 1 次'
+);
+
+const cardGapState = stateOf([change(NOW - 30 * 1000, 'groupCard', 111, 'A')], {
+  groupCard: { 111: { ts: NOW - 30 * 1000, value: 'A' } }
+});
+
+ok(
+  quotaFor(cardGapState, cfg, 'groupCard', 111, NOW).reason === 'too_frequent'
+  && quotaFor(cardGapState, cfg, 'groupCard', 222, NOW).ok === true,
+  '群名片最小间隔也按群独立：111 刚改过、222 可改'
+);
+
+const qCardAll = quotaFor(cardState, cfg, 'groupCard', undefined, NOW);
+
+ok(
+  qCardAll.ok === false && qCardAll.reason === 'window_cap'
+  && qCardAll.windowCount === 6 && qCardAll.lastTs === 0,
+  '不带群号：lastTs 归零（跳过最小间隔判定），计数按全部群名片合并（5+1=6）'
+);
+ok(
+  quotaFor(fresh, cfg, 'groupCard', undefined, NOW).ok === true
+  && quotaFor(fresh, cfg, 'groupCard', undefined, NOW).lastTs === 0,
+  '不带群号且没改过：仍可改（不因为「缺群号」直接拒）'
+);
+
+const narrowCfg = normalizeProfileConfig({ signature: { windowHours: 1 } });
+const narrowState = stateOf([
+  change(NOW - 3 * HOUR, 'signature', 0, '旧1'),
+  change(NOW - 2 * HOUR, 'signature', 0, '旧2'),
+  change(NOW - 90 * MINUTE, 'signature', 0, '旧3'),
+  change(NOW - 10 * MINUTE, 'signature', 0, '新1'),
+  change(NOW - 5 * MINUTE, 'signature', 0, '新2')
+], { signature: { ts: NOW - 5 * MINUTE, value: '新2' } });
+const qNarrow = quotaFor(narrowState, narrowCfg, 'signature', 0, NOW);
+
+ok(
+  qNarrow.ok === true && qNarrow.windowCount === 2 && qNarrow.remaining === 3
+  && qNarrow.windowHours === 1,
+  'windowHours:1 缩小窗口：3 小时前那 3 条不算，窗口内只数到 2 条'
+);
+
+const cap1Cfg = normalizeProfileConfig({ nickname: { windowCap: 1 } });
+
+ok(
+  quotaFor(stateOf([change(NOW - HOUR)], { nickname: { ts: NOW - HOUR, value: '新' } }), cap1Cfg, 'nickname', 0, NOW).reason === 'window_cap',
+  'windowCap:1 → 改过一次就满（窗口内 1 ≥ 1）'
+);
+
+const noGapCfg = normalizeProfileConfig({ nickname: { minGapMs: 0 } });
+
+ok(
+  quotaFor(stateOf([change(NOW - 1000)], { nickname: { ts: NOW - 1000, value: '新' } }), noGapCfg, 'nickname', 0, NOW).ok === true,
+  'minGapMs:0 = 关掉最小间隔（1 秒前刚改过也能再改）'
+);
+
+// 时钟回拨：直接 normalizeProfileState（不给 now，避免把未来时间戳钳回现在），
+// 模拟「账本里有一条比当前时间还晚的记录」。
+const futureState = normalizeProfileState({
+  last: { nickname: { ts: NOW + 30000, value: '新' } },
+  changes: [change(NOW + 30000)]
+});
+const qRollback = quotaFor(futureState, cfg, 'nickname', 0, NOW);
+
+ok(
+  qRollback.reason === 'too_frequent' && qRollback.retryAfterMs === 90000
+  && qRollback.windowCount === 0,
+  '时钟回拨（上次记录在未来 30 秒）：等待变成 90 秒，未来的记录不占窗口次数'
+);
+
+const bothBad = stateOf([
+  change(NOW - 3 * HOUR), change(NOW - 2 * HOUR), change(NOW - HOUR),
+  change(NOW - 30 * MINUTE), change(NOW - 10 * 1000)
+], { nickname: { ts: NOW - 10 * 1000, value: '新' } });
+
+ok(
+  quotaFor(bothBad, cfg, 'nickname', 0, NOW).reason === 'too_frequent',
+  '判定顺序：最小间隔先于窗口上限（两条都成立时报 too_frequent）'
 );
 
 const qOff = quotaFor(fresh, normalizeProfileConfig({ enabled: false }), 'nickname', 0, NOW);
 
-ok(qOff.ok === false && qOff.reason === 'disabled' && qOff.retryAfterMs === 0, 'enabled:false → disabled');
-ok(quotaFor(fresh, cfg, 'avatar', 0, NOW).ok === false, '未知 kind 拒绝（不抛）');
-ok(qCap.retryAfterMs > 0 && qCap.retryAfterMs <= DAY, 'daily_cap 的 retryAfterMs 指向本地零点');
+ok(
+  qOff.ok === false && qOff.reason === 'disabled' && qOff.retryAfterMs === 0
+  && qOff.windowCount === 0 && qOff.windowCap === 5,
+  'enabled:false → disabled（九个字段照样给齐）'
+);
+ok(
+  quotaFor(fresh, cfg, 'avatar', 0, NOW).reason === 'unknown_kind'
+  && quotaFor(fresh, cfg, 'avatar', 0, NOW).windowCap === 0,
+  '未知 kind 拒绝（不抛），窗口参数归零'
+);
 ok(
   (() => {
-    const stateSnapshot = JSON.stringify(cardCapped);
-    const cfgSnapshot = JSON.stringify(cardCapCfg);
-    quotaFor(cardCapped, cardCapCfg, 'groupCard', 111, NOW);
-    return JSON.stringify(cardCapped) === stateSnapshot && JSON.stringify(cardCapCfg) === cfgSnapshot;
+    const stateSnapshot = JSON.stringify(capped);
+    const cfgSnapshot = JSON.stringify(cfg);
+    quotaFor(capped, cfg, 'nickname', 0, NOW);
+    return JSON.stringify(capped) === stateSnapshot && JSON.stringify(cfg) === cfgSnapshot;
   })(),
   'quotaFor 不改 state / config'
 );
