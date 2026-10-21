@@ -143,7 +143,9 @@ node scripts/smoke-device.mjs --state-dir state/device-smoke
 - **不做定时自动去玩**：这一版只提供「工具」，什么时候玩由模型当轮决定；定时器与玩后写日记留到下一步。
 - **多设备 / root / iOS / 鸿蒙 NEXT / 联机游戏挂机 / 云手机模拟器**都不在范围内。
 - 游戏用 Unity/UE 直渲染时，`screencap` 偶尔抓到黑屏或纯色——这是系统截屏的限制，不是本功能的 bug。
-- **从后台返回的 Ren'Py 类 galgame 会「假死」**：真机验收时遇到，切到别的应用再回来，画面停在旧帧、
-  点击只让按钮变高亮却不触发，`input tap` / 长按 / 连点 / `KEYCODE_DPAD_CENTER` 全部无效。
-  用 `am force-stop <包名>` 冷启动后点击立刻恢复正常。这不是本功能的 bug（`device_open_app` 只做
-  `am start`，会把已有实例拉到前台）；遇到点不动就先回桌面重开应用。
+- **Ren'Py 封装的 galgame 对 `input tap` 兼容不好**（真机验收实测《永恒世界》`com.caribdis.eternum`）：
+  `am force-stop` 冷启动后的**第一次**点击能生效（标题页 → 18+ 内容提示页，有截图证据），之后
+  再点同一位置就只切换按钮悬停高亮、不触发，`input tap` / 长按 / 连点 / `KEYCODE_DPAD_CENTER` 都一样；
+  切到别的应用再回来画面还会停在旧帧。这不是本功能的 bug（同一时刻 B 站上的点击/滑动完全正常），
+  而是这类 SDL2 + 触摸映射的移植游戏对合成触摸事件的处理问题。要玩这类游戏，建议让人先手动进到
+  正文，再由 AI 接手推进；或者单独为它做一套 `sendevent` 级触摸注入（本轮未做）。
