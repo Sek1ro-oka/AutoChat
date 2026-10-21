@@ -5,15 +5,17 @@
 
 ## [Unreleased]
 
-### 被 @ / 引用时不再等满静默窗口（2026-10-21）
+### 被 @ / 引用时不再等满静默窗口，整体节奏调快（2026-10-21）
 
 - `qq_wait_for_messages`（`/api/socialV2/wait`）在等待期间若收到**@我或引用我**的消息，静默窗口收紧到
-  `socialV2.wait.selfMentionQuietMs`（默认 12000ms，且不低于 `minQuietAfterNewMs`），不再等满调用方传的
-  150 秒静默。
+  `socialV2.wait.selfMentionQuietMs`（默认 **8000ms**，下限 2000ms），不再等满调用方传的 150 秒；
+  并且**不受** `minQuietAfterNewMs`（防抢话下限）约束——那个下限以前配的是 70 秒，会把收紧后的值又抬回去。
+- 整体节奏：`quietMs` 的硬上限从 120 秒收到 **60 秒**（`/api/socialV2/wait` 与 prompt 里的 `replyTiming` 两处一致）。
 - 原因：群里 @ 完要等两分多钟才有回应，体感就是「机器人没反应」（实测 21:35:13 被 @、21:37:28 才发出回复）。
 - 消息落库新增 `atSelf` 标记（`appendSocialV2Message` 第 11 个参数），引用我的消息沿用既有的
   `quoteTargetIsSelf`；两者都算「被点名」。
-- 回归：`test-audit-regressions.mjs` 新增 R17（把 `selfMentionQuietMs` 设成 300ms，断言被 @ 后 5 秒内返回）。
+- 回归：`test-audit-regressions.mjs` R17 故意把 `minQuietAfterNewMs` 设成 70 秒、`selfMentionQuietMs` 设成
+  300ms，断言被 @ 后 5 秒内返回（实现若又被下限抬回去，这条会卡满 70 秒而失败）。
 
 ### 小黑盒：验证码自动暂停与评论 id 回读（2026-10-21，T-022 收尾）
 

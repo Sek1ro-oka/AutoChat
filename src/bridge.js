@@ -10061,8 +10061,9 @@ async function main() {
           const rawQuietMs = body.quietMs != null ? Number(body.quietMs) : suggestedQuietMs;
           // 收到新消息后至少再等 minQuietAfterNewMs（默认 10 秒），防止抢话；
           // 即使 AI 传了 quietMs=0，也会被抬升到最小静默窗口。
-          // 同时给 quietMs 加上限，避免被模型/群友诱导导致 HTTP handler 长时间挂起。
-          const maxQuietMs = Math.max(minQuietAfterNewMs, Math.min(120000, Number(waitCfg.maxMs) || 600000));
+          // 同时给 quietMs 加上限（默认 60 秒；2026-10-21 从 120 秒收紧，配合「稍微快一点」的节奏要求），
+          // 避免被模型/群友诱导导致 HTTP handler 长时间挂起。
+          const maxQuietMs = Math.max(minQuietAfterNewMs, Math.min(60000, Number(waitCfg.maxMs) || 600000));
           const quietMs = Math.min(maxQuietMs, Math.max(minQuietAfterNewMs, Math.round(rawQuietMs) || 0));
           if (st.pendingWakeTimer) {
             clearTimeout(st.pendingWakeTimer);
@@ -10078,10 +10079,10 @@ async function main() {
           let lastNewAt = 0;
           let aborted = false;
           // 「被点名」= @我 或 引用我。这类消息到达时不再等满 quietMs（默认 150 秒），
-          // 收到后最多等 selfMentionQuietMs（默认 12 秒，且不低于 minQuietAfterNewMs）就返回，
-          // 避免群里 @ 完两分钟没动静被当成机器人没反应。
+          // 也不受 minQuietAfterNewMs 这个「防抢话」下限约束（那是个 70 秒起步的全局下限，
+          // 对「有人直接问你了」不适用），只等 selfMentionQuietMs（默认 8 秒）就返回。
           const atSelfQuietCfg = Number(cfg.socialV2?.wait?.selfMentionQuietMs);
-          const AT_SELF_QUIET_MS = Number.isFinite(atSelfQuietCfg) && atSelfQuietCfg >= 0 ? atSelfQuietCfg : 12000;
+          const AT_SELF_QUIET_MS = Math.max(2000, Number.isFinite(atSelfQuietCfg) && atSelfQuietCfg >= 0 ? atSelfQuietCfg : 8000);
           const scanAtSelf = (fromSeq) => (Array.isArray(st.unread) ? st.unread : [])
             .some((m) => m && (m.atSelf === true || m.quoteTargetIsSelf === true) && Number(m.seq) > Number(fromSeq || 0));
           req.on('close', () => { aborted = true; });
@@ -10116,7 +10117,7 @@ async function main() {
               // @ 是「现在就要你答」的强信号，等满 150 秒静默会让人以为机器人没反应；
               // 收紧后仍然保留 minQuietAfterNewMs 的下限，避免一句话没打完就抢答。
               let selfMentionSeen = scanAtSelf(baseline);
-              let effQuiet = selfMentionSeen ? Math.max(minQuietAfterNewMs, Math.min(quietMs, AT_SELF_QUIET_MS)) : quietMs;
+              let effQuiet = selfMentionSeen ? Math.min(quietMs, AT_SELF_QUIET_MS) : quietMs;
               if (selfMentionSeen) {
                 log(`[reserved2] 被点名的消息已到，静默窗口收紧到 ${Math.round(effQuiet / 1000)}s（原 ${Math.round(quietMs / 1000)}s）`);
               }
@@ -10128,7 +10129,7 @@ async function main() {
                   lastNewAt = Date.now();
                   if (!selfMentionSeen && scanAtSelf(baseline)) {
                     selfMentionSeen = true;
-                    effQuiet = Math.max(minQuietAfterNewMs, Math.min(effQuiet, AT_SELF_QUIET_MS));
+                    effQuiet = Math.min(effQuiet, AT_SELF_QUIET_MS);
                     log(`[reserved2] 等待期间被点名，静默窗口收紧到 ${Math.round(effQuiet / 1000)}s`);
                   }
                 }
@@ -14775,7 +14776,7 @@ async function main() {
   function replyTimingV2(st) {
     const minimum = Number(cfg.socialV2?.wait?.minQuietAfterNewMs);
     const minQuietMs = Number.isFinite(minimum) ? Math.max(0, minimum) : 10000;
-    const maxQuietMs = Math.max(minQuietMs, Math.min(120000, Number(cfg.socialV2?.wait?.maxMs) || 600000));
+    const maxQuietMs = Math.max(minQuietMs, Math.min(60000, Number(cfg.socialV2?.wait?.maxMs) || 600000));
     const quietMs = Math.min(maxQuietMs, Math.max(minQuietMs, Math.round(suggestQuietMsV2(st)) || 0));
     const value = Number(st.lastIncomingAt);
     const elapsedMs = Number.isFinite(value) && value > 0 ? Math.max(0, Date.now() - value) : 0;

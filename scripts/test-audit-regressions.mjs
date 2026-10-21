@@ -435,13 +435,15 @@ await test('R16 appendSocialV2Message 保留 kind/emojiId/summary/subType', asyn
   } finally { await h.close(); }
 });
 
-// ── R17. 被 @ 的消息到达后，wait 不等满 quietMs ────────────────────────────
+// ── R17. 被 @ 的消息到达后，wait 不等满 quietMs（也不被「防抢话」下限拖住） ──────────
 // 事故（2026-10-21）：群里 @ 了机器人，它却两分多钟没动静 —— 因为它正挂在
-// qq_wait_for_messages(quietMs=150000) 里等静默，@ 只被算成「又来了一条消息」，静默窗口重新计时。
-// 现在被点名（@我 / 引用我）的消息会把静默窗口收紧到 selfMentionQuietMs（默认 12 秒）。
-await test('R17 被点名的消息把静默窗口收紧到 selfMentionQuietMs', async () => {
+// qq_wait_for_messages(quietMs=150000) 里等静默，@ 只被算成「又来了一条消息」，静默窗口重新计时；
+// 而 minQuietAfterNewMs 当时被配成 70000，连收紧后的阈值都会被这个下限抬回 70 秒。
+// 现在被点名（@我 / 引用我）只等 selfMentionQuietMs（默认 8 秒），**不受 minQuietAfterNewMs 约束**。
+await test('R17 被点名的消息把静默窗口收紧到 selfMentionQuietMs，且不被下限抬回去', async () => {
   const h = await bridgeHarness({
-    config: { socialV2: { wait: { minMs: 200, maxMs: 30000, defaultQuietMs: 60000, minQuietAfterNewMs: 0, selfMentionQuietMs: 300 } } }
+    // 故意把「防抢话」下限设成 70 秒：如果实现又被它抬回去，这条就会卡满 70 秒而失败。
+    config: { socialV2: { wait: { minMs: 200, maxMs: 30000, defaultQuietMs: 60000, minQuietAfterNewMs: 70000, selfMentionQuietMs: 300 } } }
   });
   try {
     h.setMode('reserved2');
@@ -457,7 +459,7 @@ await test('R17 被点名的消息把静默窗口收紧到 selfMentionQuietMs', 
       const res = await pending;
       const elapsed = Date.now() - startedAt;
       assert.equal(res.status, 200, JSON.stringify(res.body));
-      assert.ok(elapsed < 5000, `被点名后应尽快返回（实测 ${elapsed}ms；传入 quietMs 60 秒、上限 30 秒）`);
+      assert.ok(elapsed < 5000, `被点名后应尽快返回（实测 ${elapsed}ms；下限 70 秒、selfMentionQuietMs 300ms）`);
     });
   } finally { await h.close(); }
 });
