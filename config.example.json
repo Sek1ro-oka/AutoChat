@@ -395,6 +395,7 @@
     },
     "images": {
       "enabled": true,
+      "generateEnabled": true,
       "provider": "pollinations",
       "maxWidth": 768,
       "maxHeight": 768,

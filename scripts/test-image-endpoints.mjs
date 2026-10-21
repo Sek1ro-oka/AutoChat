@@ -185,6 +185,11 @@ check(
 check('记账在写索引之后（先有 id 才记 imageId）', genPos['记账'] > genPos['写索引']);
 
 check('403 disabled 带 reason 与中文文案', genBlock.includes("reason: 'disabled', error: '生图功能已关闭（socialV2.images.enabled = false）' }, 403)"));
+// 只停生图（2026-10-21）：渠道质量不行时保留发图/存表情/换头像，所以生图这条腿
+// 必须有自己的一档拒绝，且排在提示词清洗之前（否则模型会先收到 bad_prompt 去改词）。
+check('只停生图的分档 403 generate_disabled', genBlock.includes("reason: 'generate_disabled'"));
+check('generate_disabled 在提示词清洗之前', genBlock.indexOf('imageCfg.generateEnabled === false') > genPos['总开关']
+  && genBlock.indexOf('imageCfg.generateEnabled === false') < genPos['提示词清洗']);
 check('400 bad_prompt 带 reason', genBlock.includes("reason: 'bad_prompt'"));
 check('400 bad_prompt 回 hits（MCP 会拼进给模型的提示）', genBlock.includes('hits: verdict.hits }, 400'));
 check('400 bad_prompt 另带 code 说明具体哪一条', genBlock.includes('code: verdict.reason'));
@@ -340,13 +345,15 @@ const payload = sliceBetween(bridge, 'images: (() => {', 'cross: (() => {');
 check('prompt 里有 images 块', payload.length > 200, payload.length);
 check('images 块在 profile 之后、cross 之前', lineOf(bridge, 'images: (() => {') > lineOf(bridge, 'profile: (() => {') && lineOf(bridge, 'images: (() => {') < lineOf(bridge, 'cross: (() => {'));
 check('enabled:false 时短路（关掉就别去读账本）', payload.includes('if (!imagesEnabled) return { enabled: false };'));
-check('tools 四个工具名齐全', payload.includes("tools: ['qq_draw_image', 'qq_send_image', 'qq_save_sticker', 'qq_set_avatar'],"));
+check('tools 按生图开关分两档（停生图时摘掉 qq_draw_image）', payload.includes("tools: (canDraw") && payload.includes("? ['qq_draw_image', 'qq_send_image', 'qq_save_sticker', 'qq_set_avatar']") && payload.includes(": ['qq_send_image', 'qq_save_sticker', 'qq_set_avatar']),"));
+check('payload 带 generateEnabled 字段', payload.includes('generateEnabled: canDraw,'));
 check('quota 三档剩余额度现算', payload.includes("quota: { drawLeft: left('generate'), stickerLeft: left('sticker'), avatarLeft: left('avatar') },"));
-check('hint 是一句话的用法 + 一条硬底线', payload.includes("hint: '想画点什么直接画；画完可以发、可以存表情、也可以换头像。别拿它画真人照片。'"));
+check('hint 按生图开关分两句（停了就明确说别调、用现成图片）', payload.includes("hint: canDraw") && payload.includes('生图渠道暂时停了'));
 check('剩余额度用 imageQuota 现算（不缓存）', payload.includes('readImageUsageFor(kind, now, usage)'));
 
 check('imageToolFlags 覆盖四个新工具', bridge.includes("const imageToolFlags = new Set(['drawImage', 'sendImage', 'saveSticker', 'setAvatar']);"));
-check('enabledTools 会因 images 关闭而摘掉四个工具', bridge.includes('!(imageToolFlags.has(flag) && !imagesEnabled)'));
+check('enabledTools 会因 images 关闭而摘掉四个工具', bridge.includes('!(imageToolFlags.has(flag) && (!imagesEnabled'));
+check('只停生图时 enabledTools 单独摘掉 drawImage', bridge.includes("(flag === 'drawImage' && !drawEnabled)"));
 check('toolMap 登记了四个 flag', bridge.includes("drawImage: 'qq_draw_image'") && bridge.includes("sendImage: 'qq_send_image'") && bridge.includes("saveSticker: 'qq_save_sticker'") && bridge.includes("setAvatar: 'qq_set_avatar'"));
 
 check("常量 IMAGE_DIR = state/images", bridge.includes("const IMAGE_DIR = path.join(STATE_DIR, 'images');"));

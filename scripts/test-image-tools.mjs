@@ -211,6 +211,13 @@ check('判据缺省即启用（!== false，不是 === true）', imageBlock.inclu
 check('关掉时返回「当前没有开启生图功能，不要重试」', imageBlock.includes('当前没有开启生图功能，不要重试'));
 check('四个工具都在回调开头判开关', (imageBlock.match(/if \(!imagesEnabled\(\)\) \{/g) ?? []).length === 4,
   `实际 ${(imageBlock.match(/if \(!imagesEnabled\(\)\) \{/g) ?? []).length} 处`);
+// 只停生图（2026-10-21）：draw 的闸门里再叠一层 generateEnabled，其余三个工具不受影响。
+check('generateEnabled 判据独立且叠在 imagesEnabled 之上',
+  imageBlock.includes('const generateEnabled = () => imagesEnabled() && cfg?.socialV2?.images?.generateEnabled !== false;'));
+check('只有 qq_draw_image 回调判 generateEnabled（其余三个工具不被连带关掉）',
+  (imageBlock.match(/if \(!generateEnabled\(\)\) \{/g) ?? []).length === 1,
+  `实际 ${(imageBlock.match(/if \(!generateEnabled\(\)\) \{/g) ?? []).length} 处`);
+check('停生图时明说「别重试、用现成图片」', imageBlock.includes('生图渠道暂时停用了') && imageBlock.includes('别重试'));
 {
   const flags = sliceBetween(mcp, 'const TOOL_CONFIG_FLAGS = {', '\n};');
   check('能切出 TOOL_CONFIG_FLAGS 表', flags.length > 500, `长度 ${flags.length}`);

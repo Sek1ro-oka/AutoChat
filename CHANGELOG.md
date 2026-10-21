@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### 暂停生图渠道（2026-10-21）
+
+- 新增细分开关 `socialV2.images.generateEnabled`（缺省 `true`）：设为 `false` 只停 `qq_draw_image`，发图 / 存表情 / 换头像三条腿继续可用（换头像仍可吃收藏表情或图片链接）。
+- 停用时的表现：`POST /api/socialV2/images/generate` → 403 `generate_disabled`（文案比总开关更具体）；prompt 的 `images.tools` 自动摘掉 `qq_draw_image`、`generateEnabled:false`、hint 换成「别调、用现成图片」；MCP 侧 `qq_draw_image` 直接回一句「生图渠道暂时停用了，别重试」。
+- 本机 `config.json` 已置 `false`：Pollinations 出图质量不达标，暂停使用，代码与其余三项保留。
+
 ### 私聊群聊互通与名字映射（2026-10-21，T-016 / T-018）
 
 - **跨渠道互通**：会话按互通编号分组（`socialV2.cross.groups`），同号会话共享记忆池——`qq_recall` 按需检索别处说过的话（只给元数据提示，不自动灌正文，每会话 5 分钟 3 次）、成员印象按 QQ 号合并、日记写进共用本子（`state/diaries/cross_<gid>/`）；编号 `0` = 不共享。控制台新增「跨渠道互通」页。

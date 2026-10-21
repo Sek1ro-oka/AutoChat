@@ -1826,7 +1826,12 @@ if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.setStickerR
 // 拿到一句明确的「没开、不要重试」，而不是去撞 /api/socialV2/images/generate 的 403 之后
 // 换个 prompt 硬试（那样既白烧额度，也会让模型怀疑是自己描述写得不对）。
 const imagesEnabled = () => cfg?.socialV2?.images?.enabled !== false;
+// 只停「生图」的细分开关：Pollinations 出图质量不行时把它关掉，发图 / 存表情 /
+// 换头像三条腿继续可用。工具注册时不能摘（注册发生在启动，配置会热改），所以
+// 在 qq_draw_image 的回调里挡，并给一句「别重试、改用现成图片」的明确话。
+const generateEnabled = () => imagesEnabled() && cfg?.socialV2?.images?.generateEnabled !== false;
 const IMAGES_DISABLED_TEXT = '当前没有开启生图功能，不要重试。';
+const GENERATE_DISABLED_TEXT = '生图渠道暂时停用了（socialV2.images.generateEnabled = false），别重试：想发图 / 存表情 / 换头像，用现成的收藏表情或图片链接即可。';
 
 // 毫秒 → 「N 秒 / N 分钟 / N 小时」。45 秒这种短等待必须按秒说：formatProfileWait 的最小
 // 粒度是分钟，会把「还要等 45 秒」说成「不到 1 分钟」，模型读完会立刻再试一次。
@@ -1896,6 +1901,9 @@ server.tool(
   async ({ prompt, width, height, seed, send, save_sticker, token, key }) => {
     if (!imagesEnabled()) {
       return { content: [{ type: 'text', text: IMAGES_DISABLED_TEXT }], isError: true };
+    }
+    if (!generateEnabled()) {
+      return { content: [{ type: 'text', text: GENERATE_DISABLED_TEXT }], isError: true };
     }
     // 长度先在这里挡一道：桥接也会挡，但先挡能省一次 400 往返，而且模型拿到的是一句
     // 「改成 3~300 字」，不是一段 JSON。

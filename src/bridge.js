@@ -6410,6 +6410,16 @@ async function main() {
             sendJson({ ok: false, reason: 'disabled', error: '生图功能已关闭（socialV2.images.enabled = false）' }, 403);
             return;
           }
+          // 只关了生图这条腿（2026-10-21）：发图 / 存表情 / 换头像仍然可用，所以这里
+          // 必须报得比总开关更具体，否则模型会以为整套图片能力都没了。
+          if (imageCfg.generateEnabled === false) {
+            sendJson({
+              ok: false,
+              reason: 'generate_disabled',
+              error: '生图已停用（socialV2.images.generateEnabled = false）；发图、存表情、换头像仍然可用'
+            }, 403);
+            return;
+          }
           const cleaned = cleanImagePrompt(body.prompt, imageCfg.promptMaxChars);
           const verdict = checkImagePrompt(cleaned, imageCfg);
           if (!verdict.ok) {
@@ -8301,9 +8311,12 @@ async function main() {
           // 和 normalizeImageConfig 的默认一致，没写这一段也照常可用。
           const imageToolFlags = new Set(['drawImage', 'sendImage', 'saveSticker', 'setAvatar']);
           const imagesEnabled = cfg.socialV2?.images?.enabled !== false;
+          // 生图单独一档：渠道质量不行时只关 qq_draw_image，发图 / 存表情 / 换头像
+          // 三条腿继续出现在清单里（换头像还可以吃链接或收藏表情）。
+          const drawEnabled = imagesEnabled && cfg.socialV2?.images?.generateEnabled !== false;
           const enabledTools = [];
           for (const [flag, name] of Object.entries(toolMap)) {
-            if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled()) && !(profileToolFlags.has(flag) && !profileEnabled) && !(imageToolFlags.has(flag) && !imagesEnabled)) enabledTools.push(name);
+            if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled()) && !(profileToolFlags.has(flag) && !profileEnabled) && !(imageToolFlags.has(flag) && (!imagesEnabled || (flag === 'drawImage' && !drawEnabled)))) enabledTools.push(name);
           }
           sendJson({
             ok: true,
@@ -8358,13 +8371,19 @@ async function main() {
                 const quota = readImageUsageFor(kind, now, usage);
                 return quota.ok ? quota.remaining : 0;
               };
+              const canDraw = cfg.socialV2?.images?.generateEnabled !== false;
               return {
                 enabled: true,
-                tools: ['qq_draw_image', 'qq_send_image', 'qq_save_sticker', 'qq_set_avatar'],
+                generateEnabled: canDraw,
+                tools: (canDraw
+                  ? ['qq_draw_image', 'qq_send_image', 'qq_save_sticker', 'qq_set_avatar']
+                  : ['qq_send_image', 'qq_save_sticker', 'qq_set_avatar']),
                 quota: { drawLeft: left('generate'), stickerLeft: left('sticker'), avatarLeft: left('avatar') },
                 // 一句话说清「这是本能的动作」+ 一条硬底线。不写具体额度数字：
                 // 数字由上面的 quota 给，文案里再写一遍就会和配置分叉（改窗口后对不上）。
-                hint: '想画点什么直接画；画完可以发、可以存表情、也可以换头像。别拿它画真人照片。'
+                hint: canDraw
+                  ? '想画点什么直接画；画完可以发、可以存表情、也可以换头像。别拿它画真人照片。'
+                  : '生图渠道暂时停了（别调 qq_draw_image，也别反复试）：想发图 / 存表情 / 换头像时，用现成的收藏表情或图片链接。'
               };
             })(),
             // 名字映射表（T-018）：当前会话叫什么、最近谁在这里说过话（号码 → 名字）。

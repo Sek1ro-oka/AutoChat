@@ -138,6 +138,10 @@ export function normalizeImageConfig(source) {
   const raw = isPlainObject(source) ? source : {};
   return Object.freeze({
     enabled: raw.enabled !== false,
+    // 只停「生图」的细分开关：出图渠道质量不行时关掉它，发图 / 存表情 / 换头像
+    // 三条腿仍可用（换头像还能吃收藏表情或图片链接）。与 enabled 同口径：
+    // 只有显式 false 才算关。
+    generateEnabled: raw.generateEnabled !== false,
     provider: raw.provider === 'pollinations' ? raw.provider : IMAGE_DEFAULTS.provider,
     maxWidth: clampInt(raw.maxWidth, IMAGE_LIMITS.maxSide, IMAGE_DEFAULTS.maxWidth),
     maxHeight: clampInt(raw.maxHeight, IMAGE_LIMITS.maxSide, IMAGE_DEFAULTS.maxHeight),

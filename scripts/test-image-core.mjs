@@ -90,6 +90,10 @@ console.log('\n① normalizeImageConfig');
 
 const dflt = normalizeImageConfig({});
 eq(dflt.enabled, true, 'enabled 出厂开');
+eq(dflt.generateEnabled, true, 'generateEnabled 出厂开（只停生图的细分开关默认不关）');
+eq(normalizeImageConfig({ generateEnabled: false }).generateEnabled, false, '显式 false 才停生图');
+eq(normalizeImageConfig({ generateEnabled: 'false' }).generateEnabled, true, '字符串 "false" 不算关（口径与 enabled 一致）');
+eq(normalizeImageConfig({ generateEnabled: 0 }).generateEnabled, true, '0 不算关');
 eq(dflt.provider, 'pollinations', 'provider 出厂 pollinations');
 eq([dflt.maxWidth, dflt.maxHeight], [768, 768], 'maxWidth/maxHeight 768×768');
 eq(dflt.promptMaxChars, 300, 'promptMaxChars 300');
