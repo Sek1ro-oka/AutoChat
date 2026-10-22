@@ -101,7 +101,7 @@ test('each supplement restarts quiet from its actual arrival, and appears exactl
     assert.deepEqual(result.data.newMessages.map(m => m.seq), [2, 3]);
     assert.equal(result.data.readThroughSeq, 3);
   } finally { timers.forEach(clearTimeout); }
-}));
+}, { wait: { minMs: 100, maxMs: 600000, minQuietAfterNewMs: 100, fastQuietMs: 100 } }));
 
 test('reply timeout is a hard budget and cannot grant sleep observation, even with a long requested budget', () => fixture(async ({ h, st, request, append }) => {
   h.cfg.socialV2.wake.preSleepWaitMs = 200;
@@ -220,7 +220,27 @@ test('a group message aimed at us uses the fast quiet floor, not the 6s group fl
   assert.equal(result.data.quietMs, 400, 'the fast floor must be the one applied, not the 6s group floor');
 }, { wait: FAST_LANE_WAIT }));
 
-test('an ordinary group message keeps the slow quiet floor so the bot does not butt in', () => fixture(async ({ st, request, append }) => {
+test('with the default scope every group takes the fast lane, not just @-mentions', () => fixture(async ({ h, key, st, request, append }) => {
+  assert.equal(h.fastLaneScopeV2(), 'all', 'the default must cover every conversation');
+  append('今天天气不错');
+  st.lastIncomingAt = Date.now() - 100;
+  const started = Date.now();
+  const result = await request('wait', { purpose: 'reply', timeoutMs: 4000 });
+  assert.equal(result.status, 200);
+  assert.equal(result.data.quietMs, 400, 'plain group chatter must use fastQuietMs, not the 6s group floor');
+  assert.equal(result.data.quiet, true);
+  assert.ok(Date.now() - started < 1600, 'plain group chatter must not sit out the slow floor');
+  assert.equal(h.fastWakeV2(key, st, 'anyMessage'), true, 'every wake is a fast wake by default');
+}, { wait: FAST_LANE_WAIT }));
+
+test('with the default scope an ordinary group wake also skips the batching window', () => fixture(async ({ h, key, st }) => {
+  h.scheduleWakeV2(key, 'anyMessage');
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  assert.equal(h.calls.prompts.length, 1, 'every group must hear back inside the fast batch window');
+  clearTimeout(st.pendingWakeTimer);
+}, { wake: { preSleepWaitEnabled: true, preSleepWaitMs: 300000, batchWindowMs: 8000, fastBatchWindowMs: 300 } }));
+
+test('an ordinary group message keeps the slow quiet floor when the scope is narrowed to addressed', () => fixture(async ({ st, request, append }) => {
   append('今天天气不错');
   st.lastIncomingAt = Date.now();
   const result = await request('wait', { purpose: 'reply', timeoutMs: 1000 });
@@ -229,9 +249,10 @@ test('an ordinary group message keeps the slow quiet floor so the bot does not b
   assert.equal(result.data.quiet, false);
   assert.ok(result.data.waitedMs >= 900, `slow lane returned after ${result.data.waitedMs}ms`);
   assert.equal(st.fastLaneLoggedAt, undefined, 'slow lane must not take the fast path');
-}, { wait: FAST_LANE_WAIT }));
+}, { wait: FAST_LANE_WAIT, wake: { fastLaneScope: 'addressed' } }));
 
 test('lane selection: private, @, quote and high-priority wakes are fast; idle group chatter is not', () => fixture(async ({ h, st }) => {
+  h.cfg.socialV2.wake.fastLaneScope = 'addressed';
   const atSelf = (time) => ({ atSelf: true, quoteTargetIsSelf: false, time });
   assert.equal(h.isFastLaneKeyV2('private:789'), true);
   assert.equal(h.isFastLaneKeyV2('group:456'), false);
@@ -251,6 +272,12 @@ test('lane selection: private, @, quote and high-priority wakes are fast; idle g
   assert.equal(h.fastWakeV2('group:456', { unread: [] }, 'private'), true);
   assert.equal(h.fastWakeV2('group:456', { unread: [] }, 'anyMessage'), false, 'stray group chatter still batches');
   assert.equal(h.fastWakeV2('group:456', { unread: [] }, 'keyword:在吗'), false);
+
+  // 默认（scope=all）下每个会话都是快车道：没有「普通群聊」这回事了。
+  h.cfg.socialV2.wake.fastLaneScope = 'all';
+  assert.equal(h.fastLaneActiveV2('group:456', { unread: [] }), true, 'the default covers every conversation');
+  assert.equal(h.fastWakeV2('group:456', { unread: [] }, 'anyMessage'), true);
+  assert.equal(h.fastWakeV2('group:456', { unread: [] }, 'keyword:在吗'), true);
 }));
 
 test('a fast-lane wake prompt tells the model to send first, a slow-lane one still counts the quiet window', () => fixture(async ({ h, key, st, append }) => {
@@ -260,6 +287,7 @@ test('a fast-lane wake prompt tells the model to send first, a slow-lane one sti
   assert.match(fast, /不要再调 qq_wait_for_messages/);
   assert.doesNotMatch(fast, /还差约/, 'the fast lane must not hand the model a countdown it no longer needs');
 
+  h.cfg.socialV2.wake.fastLaneScope = 'addressed';
   st.unread = [];
   append('今天有点热');
   const slow = h.buildWakePromptV2(key, 'anyMessage');
@@ -300,11 +328,11 @@ test('a wake aimed at us skips the 8s batching window and reaches DSH at once', 
   h.scheduleWakeV2(key, 'atMention');
   await new Promise((resolve) => setTimeout(resolve, 1200));
   assert.equal(h.calls.prompts.length, 1, 'an @ must be delivered inside 1.2s, not after the 8s batch window');
-}), { wake: WAKE_CFG });
+}, { wake: WAKE_CFG }));
 
-test('an ordinary group wake still waits out the batching window', () => fixture(async ({ h, key, st }) => {
+test('an ordinary group wake still waits out the batching window when the scope is narrowed to addressed', () => fixture(async ({ h, key, st }) => {
   h.scheduleWakeV2(key, 'anyMessage');
   await new Promise((resolve) => setTimeout(resolve, 1200));
   assert.equal(h.calls.prompts.length, 0, 'stray group chatter must keep batching so the bot does not butt in');
   clearTimeout(st.pendingWakeTimer);
-}), { wake: WAKE_CFG });
+}, { wake: { ...WAKE_CFG, fastLaneScope: 'addressed' } }));

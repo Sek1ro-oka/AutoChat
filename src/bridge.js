@@ -8294,6 +8294,9 @@ async function main() {
               merged.wake.recommendedKeywords = (Array.isArray(merged.wake.recommendedKeywords) ? merged.wake.recommendedKeywords : String(merged.wake.recommendedKeywords).split(/[,，\s]+/)).map(String).filter(Boolean);
             }
             if (merged.wake.defaultMode !== 'active') merged.wake.defaultMode = 'diving';
+            if (merged.wake.fastLaneScope !== undefined) {
+              merged.wake.fastLaneScope = String(merged.wake.fastLaneScope) === 'addressed' ? 'addressed' : 'all';
+            }
             if (merged.wake.recommendedHint !== undefined) merged.wake.recommendedHint = String(merged.wake.recommendedHint ?? '');
           }
           // send：数值归一化
@@ -15059,13 +15062,22 @@ async function main() {
   //   · wake.batchWindowMs（8 秒）—— 攒住连发，别每条都唤醒一次；
   //   · wait.minQuietAfterNewMs（8 秒）—— 等对方把话说完，别插嘴。
   // 但私聊、被 @、被引用是「有人正在问你」：这两段延迟会直接变成用户眼里的沉默，
-  // 加起来 16 秒起步。快车道把这两段分别压到 fastBatchWindowMs / fastQuietMs，
-  // 慢车道（概率/关键词/名字/提问唤醒的普通群聊）原样保留，避免插嘴。
+  // 加起来 16 秒起步。快车道把这两段分别压到 fastBatchWindowMs / fastQuietMs。
+  //
+  // `wake.fastLaneScope` 决定「谁算快车道」：
+  //   · 'all'（默认）—— **每一个会话**都走快车道。普通群聊也要求「最多 5 秒内回话」，
+  //     代价是群里别人随口一句也可能被接住（慢车道那 8 秒就是用来防这个的）；
+  //   · 'addressed' —— 只有私聊 / 被 @ / 被引用 / 优先级 ≥ 90 的唤醒走快车道，
+  //     普通群聊保持 8 秒合批 + 8 秒静默，避免插嘴。
   const FAST_LANE_AT_SELF_WINDOW_MS = 120000;
   function isFastLaneKeyV2(key) {
     return String(key ?? '').startsWith('private:');
   }
+  function fastLaneScopeV2() {
+    return String(cfg.socialV2?.wake?.fastLaneScope ?? 'all') === 'addressed' ? 'addressed' : 'all';
+  }
   function fastLaneActiveV2(key, st) {
+    if (fastLaneScopeV2() === 'all') return true;
     if (isFastLaneKeyV2(key)) return true;
     const now = Date.now();
     const unread = Array.isArray(st?.unread) ? st.unread : [];

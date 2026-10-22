@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+### 快车道覆盖到每一个会话：`wake.fastLaneScope`（2026-10-22）
+
+- 新配置 `socialV2.wake.fastLaneScope`，可选 `all`（默认）与 `addressed`：`all` 表示**每个会话**（包括普通群聊）都走快车道——合批 `fastBatchWindowMs`、静默下限 `fastQuietMs`，满足「收到新消息最多 5 秒内回话」；`addressed` 回到旧行为，只有私聊 / 被 @ / 被引用 / `private`·`atMention` 唤醒走快车道，普通群聊保留 8 秒合批 + 8 秒静默以免插嘴。
+- 代码：新增 `fastLaneScopeV2()`（读 `cfg.socialV2.wake.fastLaneScope`，非 `addressed` 一律按 `all` 处理），`fastLaneActiveV2(key, st)` 在 `all` 下直接返回 `true`；控制台 PATCH 会把这个键归一化成 `all`／`addressed` 之一。
+- 代价（写给未来的自己）：`all` 下群里别人随口一句也可能被接住，慢车道那 8 秒本来就是防这个的。想要「安静但被点名必快」就把 scope 切回 `addressed`。
+- 回归：`scripts/test-reply-wait.mjs` 18 → **20** 条，新增「默认 scope 下普通群聊走快车道且静默等于 `fastQuietMs`」「默认 scope 下普通群唤醒也跳过合批窗口」；原来那两条慢车道用例改为显式 `fastLaneScope: 'addressed'`，并补「切回 `all` 后 `anyMessage`/`keyword` 也是快唤醒」的断言。
+
 ### 私聊 / 被 @ / 被引用走快车道：合批与静默窗口压到 1 秒级（2026-10-22）
 
 - 起因：用户要求「收到一句新的信息后必须最多 5 秒内回复」。实测 36 小时 **259** 条回复的端到端 p50 = **19.5 秒**、≤5 秒只占 **8.5%**；拆开看模型单步（一次工具结果 → 下一次工具调用）p50 已经是 **4.3 秒**，剩下的十几秒几乎全是固定等待：`socialV2.wake.batchWindowMs` **8 秒**合批 + `socialV2.wait.minQuietAfterNewMs` **8 秒**静默下限（实测私聊「来信 → 首个工具调用」10.3–11.8 秒，与之吻合）。
