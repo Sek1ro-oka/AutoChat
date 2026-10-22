@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+### 私聊 / 被 @ / 被引用走快车道：合批与静默窗口压到 1 秒级（2026-10-22）
+
+- 起因：用户要求「收到一句新的信息后必须最多 5 秒内回复」。实测 36 小时 **259** 条回复的端到端 p50 = **19.5 秒**、≤5 秒只占 **8.5%**；拆开看模型单步（一次工具结果 → 下一次工具调用）p50 已经是 **4.3 秒**，剩下的十几秒几乎全是固定等待：`socialV2.wake.batchWindowMs` **8 秒**合批 + `socialV2.wait.minQuietAfterNewMs` **8 秒**静默下限（实测私聊「来信 → 首个工具调用」10.3–11.8 秒，与之吻合）。
+- 快车道判定（`src/bridge.js`）：`isFastLaneKeyV2`（`private:` 前缀）／`fastLaneActiveV2`（私聊，或 2 分钟内 `atSelf` / `quoteTargetIsSelf` 的未读）／`fastWakeV2`（再叠加 `wakePriorityV2(reason) >= 90`，即 `private` / `atMention`）。
+- 新配置：`socialV2.wake.fastBatchWindowMs`（默认 **800ms**，下限 200）与 `socialV2.wait.fastQuietMs`（默认 **1200ms**，下限 300）。合批取 `Math.min(batchWindowMs, fastBatchWindowMs)`，模型自己调小合批依然生效；快车道的静默**直接**取 `fastQuietMs`，不再采用 `suggestQuietMsV2` 的 6~12 秒建议值——否则提示词里写的「还差 N 秒」和实际行为对不上。
+- **慢车道原样保留**：普通群聊（概率 / 关键词 / 名字 / 提问唤醒）仍是 8 秒合批 + 8 秒静默下限。那两个窗口是防抢话用的，不该为了快而在别人聊天时插嘴；只有「有人正在直接问我们」才走快车道。
+- 提示词同步：`replyTimingV2(key, st)` 增 `key` 参数，快车道下 `quietMs` 就是 `fastQuietMs`，`/api/socialV2/wait` 与 prompt 里 `replyTiming` 两处口径一致。
+- 日志：`[reserved2] 计划唤醒 <key>（<reason>）［快车道］，800ms 后发送`（毫秒级窗口不再被 `Math.round(ms/1000)` 显示成 `1s`）；wait 走快车道时按会话 **10 分钟一条**记 `快车道 <key>：静默下限 1200ms（慢车道 8000ms）`，避免变成新的日志噪声（`bridge.log` 已有 57% 是同一行的远未来潜水定时器续期）。
+- 回归：`scripts/test-reply-wait.mjs` 10 → **15** 条（@ 走快车道且 `quietMs` 等于 fast floor、普通群聊仍走慢车道并超时、车道判定表、**合批 300ms 与 8000ms 的真计时**）；`scripts/audit-bridge-harness.mjs` 增导出 `scheduleWakeV2 / cancelReplyCheckV2 / isFastLaneKeyV2 / fastLaneActiveV2 / fastWakeV2 / fastQuietMsV2 / fastBatchWindowMsV2`；`scripts/test-device-wiring.mjs` 的切片锚点由 `'replyTiming: replyTimingV2(st),'` 放宽为 `'replyTiming: replyTimingV2('`（签名变了，锚点跟着放宽，免得下次改签名又假红）。
+
 ### 安卓平板：窗口模式（PC 模式浮窗）的点击保护（2026-10-21，T-026）
 
 - 起因：真机验收时让 bot 操作 ZUI PC 模式下的小黑盒**浮窗**（`dumpsys window windows` 里 `frame=[737,0]-[2208,1840]`，1471x1840，而截图是整屏 2944x1840）：两次点在窗口外落到桌面层毫无反应，一次点在底部 1604–1840 触发手势导航把 App 切走；B 站那类**全屏**应用一切正常。坐标换算本身没错，错在工具不知道「目标只是个窗口」。

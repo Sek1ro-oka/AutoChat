@@ -4,7 +4,7 @@ import http from 'node:http';
 import { test } from 'node:test';
 import { bridgeHarness } from './audit-bridge-harness.mjs';
 
-async function fixture(run, cfg = {}) {
+async function fixture(run, cfg = {}, key = 'group:456') {
   const h = await bridgeHarness({ config: { socialV2: {
     wake: { preSleepWaitEnabled: true, preSleepWaitMs: 300000 },
     wait: { minMs: 100, maxMs: 600000, minQuietAfterNewMs: 100 },
@@ -12,7 +12,6 @@ async function fixture(run, cfg = {}) {
     ...cfg,
   } } });
   h.setMode('reserved2');
-  const key = 'group:456';
   const st = h.getSocialV2State(key);
   const server = h.startConsoleServer();
   if (!server.listening) await new Promise(resolve => server.once('listening', resolve));
@@ -45,7 +44,9 @@ async function fixture(run, cfg = {}) {
     req.setTimeout(5000, () => req.destroy(new Error('Fixture request timed out')));
     req.end();
   });
-  const append = text => h.appendSocialV2Message(key, 'fixture-person', text, text, false, false, `fixture-${st.lastUnreadSeq + 1}`, [], '789', []);
+  // `flags.atSelf` / `flags.quoteTargetIsSelf` mark the message as aimed at us; the
+  // fast-lane tests depend on it, the older slow-lane tests leave both off.
+  const append = (text, flags = {}) => h.appendSocialV2Message(key, 'fixture-person', text, text, flags.quoteTargetIsSelf === true, false, `fixture-${st.lastUnreadSeq + 1}`, [], '789', [], flags.atSelf === true);
   try { await run({ h, key, st, request, get, append }); }
   finally { await new Promise(resolve => server.close(resolve)); await h.close(); }
 }
@@ -201,3 +202,68 @@ test('each reply-wait buffer obeys its own tool switch, never the other one', ()
   assert.deepEqual(r3.data.newMessages, []);
   assert.equal(r3.data.readThroughSeq, 5, 'a message nobody was allowed to see may not advance the watermark');
 }));
+
+// ── Fast lane (2026-10-22): 私聊 / 被 @ / 被引用 不再吃慢车道的合批与静默下限 ──
+// 慢车道那 8 秒合批 + 8 秒静默是给「群里顺便聊两句」用的；对方直接问我们时
+// 它只会变成 16 秒沉默，所以这两组用例把两条车道的 floor 分别钉住。
+const FAST_LANE_WAIT = { minMs: 100, maxMs: 600000, minQuietAfterNewMs: 6000, fastQuietMs: 400 };
+
+test('a group message aimed at us uses the fast quiet floor, not the 6s group floor', () => fixture(async ({ h, st, request, append }) => {
+  append('@小鲸鱼 你在吗', { atSelf: true });
+  st.lastIncomingAt = Date.now() - 100;
+  const started = Date.now();
+  const result = await request('wait', { purpose: 'reply', timeoutMs: 4000 });
+  const elapsed = Date.now() - started;
+  assert.equal(result.status, 200);
+  assert.equal(result.data.quiet, true, `fast lane should report quiet; got ${JSON.stringify(result.data)}`);
+  assert.ok(elapsed < 1600, `@-message waited ${elapsed}ms for a 400ms fast floor`);
+  assert.equal(result.data.quietMs, 400, 'the fast floor must be the one applied, not the 6s group floor');
+}, { wait: FAST_LANE_WAIT }));
+
+test('an ordinary group message keeps the slow quiet floor so the bot does not butt in', () => fixture(async ({ st, request, append }) => {
+  append('今天天气不错');
+  st.lastIncomingAt = Date.now();
+  const result = await request('wait', { purpose: 'reply', timeoutMs: 1000 });
+  assert.equal(result.status, 200);
+  assert.equal(result.data.timeout, true, 'slow lane must still wait out its 6s floor rather than answer instantly');
+  assert.equal(result.data.quiet, false);
+  assert.ok(result.data.waitedMs >= 900, `slow lane returned after ${result.data.waitedMs}ms`);
+  assert.equal(st.fastLaneLoggedAt, undefined, 'slow lane must not take the fast path');
+}, { wait: FAST_LANE_WAIT }));
+
+test('lane selection: private, @, quote and high-priority wakes are fast; idle group chatter is not', () => fixture(async ({ h, st }) => {
+  const atSelf = (time) => ({ atSelf: true, quoteTargetIsSelf: false, time });
+  assert.equal(h.isFastLaneKeyV2('private:789'), true);
+  assert.equal(h.isFastLaneKeyV2('group:456'), false);
+  assert.equal(h.fastLaneActiveV2('private:789', { unread: [] }), true, 'private chats are always fast');
+  assert.equal(h.fastLaneActiveV2('group:456', { unread: [] }), false, 'idle group chatter keeps the slow lane');
+
+  st.unread = [{ seq: 1, text: '@小鲸鱼', atSelf: true, time: Date.now() }];
+  assert.equal(h.fastLaneActiveV2('group:456', st), true, 'a fresh @ is a direct address');
+  st.unread = [{ seq: 2, text: 'reply', atSelf: false, quoteTargetIsSelf: true, time: Date.now() }];
+  assert.equal(h.fastLaneActiveV2('group:456', st), true, 'a quote aimed at us is a direct address');
+  st.unread = [{ seq: 3, text: 'old @', atSelf: true, time: Date.now() - 5 * 60 * 1000 }];
+  assert.equal(h.fastLaneActiveV2('group:456', st), false, 'a five-minute-old @ must not keep the group fast');
+  st.unread = [{ seq: 4, text: 'plain', atSelf: false, quoteTargetIsSelf: false, time: Date.now() }];
+  assert.equal(h.fastLaneActiveV2('group:456', st), false);
+
+  assert.equal(h.fastWakeV2('group:456', { unread: [] }, 'atMention'), true, 'atMention outranks any batching');
+  assert.equal(h.fastWakeV2('group:456', { unread: [] }, 'private'), true);
+  assert.equal(h.fastWakeV2('group:456', { unread: [] }, 'anyMessage'), false, 'stray group chatter still batches');
+  assert.equal(h.fastWakeV2('group:456', { unread: [] }, 'keyword:在吗'), false);
+}));
+
+const WAKE_CFG = { preSleepWaitEnabled: true, preSleepWaitMs: 300000, batchWindowMs: 8000, fastBatchWindowMs: 300 };
+
+test('a wake aimed at us skips the 8s batching window and reaches DSH at once', () => fixture(async ({ h, key }) => {
+  h.scheduleWakeV2(key, 'atMention');
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  assert.equal(h.calls.prompts.length, 1, 'an @ must be delivered inside 1.2s, not after the 8s batch window');
+}), { wake: WAKE_CFG });
+
+test('an ordinary group wake still waits out the batching window', () => fixture(async ({ h, key, st }) => {
+  h.scheduleWakeV2(key, 'anyMessage');
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  assert.equal(h.calls.prompts.length, 0, 'stray group chatter must keep batching so the bot does not butt in');
+  clearTimeout(st.pendingWakeTimer);
+}), { wake: WAKE_CFG });

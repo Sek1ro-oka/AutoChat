@@ -1086,6 +1086,10 @@ function loadConfig() {
         recommendedPoke: true,
         recommendedHint: '如果你要潜水，推荐先调用 qq_wait_for_messages(timeoutMs=300000) 完成一次沉睡前观察：5 分钟内没人说话就可以设置下一次唤醒并沉睡；若期间有人发新消息，先查看 newMessages，判断不需要你参与可直接沉睡，若参与了则下次想睡需再等观察窗口。潜水时长推荐 5~120 分钟，普通消息概率 0.05；@/名字/关键词/提问唤醒建议保持开启。需要等特定某人/某几人时，可额外设置 triggers.speakerIds。',
         batchWindowMs: 8000,
+        // 快车道合批窗口：私聊 / 被 @ / 被引用时用这个（默认 0.8 秒）。
+        // 慢车道的 8 秒是给「群里顺便聊两句」留的攒批时间；有人直接问你时，
+        // 这 8 秒全是纯延迟，用户看到的就是「机器人没反应」。
+        fastBatchWindowMs: 800,
         maxWakePerMinute: 1,
         maxWakePerHour: 12,
         noActionLimit: 3,
@@ -1112,7 +1116,10 @@ function loadConfig() {
         minMs: 5000,
         maxMs: 600000,
         defaultQuietMs: 8000,
-        minQuietAfterNewMs: 10000   // 收到新消息后至少再等这么久（默认 10 秒），防止抢话
+        minQuietAfterNewMs: 10000,  // 收到新消息后至少再等这么久（默认 10 秒），防止抢话
+        // 快车道静默下限：私聊 / 被 @ / 被引用时，收到新消息后只再等这么久（默认 1.2 秒）。
+        // 只够挡住「一句话拆成两条」的情况，不再让人盯着「正在输入」等 8 秒。
+        fastQuietMs: 1200
       },
       sticker: {
         enabled: true,             // 表情包体系总开关
@@ -8196,7 +8203,7 @@ async function main() {
           // wake：数值与字符串数组归一化
           if (body.wake && typeof body.wake === 'object') {
             merged.wake = { ...(current.wake ?? {}), ...body.wake };
-            for (const k of ['sleepMinMs', 'sleepMaxMs', 'recommendedSleepMinMs', 'recommendedSleepMaxMs', 'recommendedProbability', 'batchWindowMs', 'maxWakePerMinute', 'maxWakePerHour', 'noActionLimit', 'maxWakeConfigReminders', 'preSleepWaitMs']) {
+            for (const k of ['sleepMinMs', 'sleepMaxMs', 'recommendedSleepMinMs', 'recommendedSleepMaxMs', 'recommendedProbability', 'batchWindowMs', 'fastBatchWindowMs', 'maxWakePerMinute', 'maxWakePerHour', 'noActionLimit', 'maxWakeConfigReminders', 'preSleepWaitMs']) {
               if (merged.wake[k] !== undefined) {
                 const n = Number(merged.wake[k]);
                 merged.wake[k] = Number.isFinite(n) ? n : current.wake?.[k] ?? 0;
@@ -8232,7 +8239,7 @@ async function main() {
           // wait：数值归一化
           if (body.wait && typeof body.wait === 'object') {
             merged.wait = { ...(current.wait ?? {}), ...body.wait };
-            for (const k of ['defaultMs', 'minMs', 'maxMs', 'defaultQuietMs', 'minQuietAfterNewMs']) {
+            for (const k of ['defaultMs', 'minMs', 'maxMs', 'defaultQuietMs', 'minQuietAfterNewMs', 'fastQuietMs']) {
               if (merged.wait[k] !== undefined) {
                 const n = Number(merged.wait[k]);
                 merged.wait[k] = Number.isFinite(n) ? Math.max(0, Math.round(n)) : current.wait?.[k] ?? 5000;
@@ -8794,7 +8801,7 @@ async function main() {
                     : `玩完把这次玩的经过写成日记，写到这个 key：${diaryKey}（qq_diary_write 的 key 参数就填它）。`)
               };
             })(),
-            replyTiming: replyTimingV2(st),
+            replyTiming: replyTimingV2(key, st),
             unreadCount: st.unread.length,
             recentCount: st.recentMessages.length,
             currentWakeConfig: st.wakeConfig,
@@ -10167,14 +10174,31 @@ async function main() {
           // 那条路径不会经过下面的 finishWait()，会留下 15 分钟的假 429。
           res.on('close', finishWait);
           const minQuietAfterNewMs = Number.isFinite(Number(waitCfg.minQuietAfterNewMs)) ? Math.max(0, Number(waitCfg.minQuietAfterNewMs)) : 10000;
-          const suggestedQuietMs = Math.max(suggestQuietMsV2(st), minQuietAfterNewMs);
+          // 快车道（私聊 / 被 @ / 被引用）用更短的静默下限。
+          // 慢车道那个 8~10 秒下限是为了别插嘴普通群聊，不是给「有人直接问你」用的——
+          // 在私聊里它只会变成「发完消息盯着输入框等 8 秒」。
+          const fastLane = fastLaneActiveV2(key, st);
+          const quietFloorMs = fastLane ? fastQuietMsV2() : minQuietAfterNewMs;
+          // 快车道直接按 short 窗口走：suggestQuietMsV2 会在「像是没说完」时给 12000ms，
+          // 那正好把用户要的 5 秒变成 12 秒。真在分段打字的话，工具会返回「又来了新消息」，
+          // 模型可以再等一轮，比一律先压 12 秒更划算。
+          const suggestedQuietMs = fastLane ? quietFloorMs : Math.max(suggestQuietMsV2(st), quietFloorMs);
           const rawQuietMs = body.quietMs != null ? Number(body.quietMs) : suggestedQuietMs;
-          // 收到新消息后至少再等 minQuietAfterNewMs（默认 10 秒），防止抢话；
-          // 即使 AI 传了 quietMs=0，也会被抬升到最小静默窗口。
+          // 收到新消息后至少再等 quietFloorMs（快车道 1.2 秒 / 慢车道 8~10 秒），防止抢话；
+          // 即使 AI 传了 quietMs=0，也会被抬升到这一下限。
           // 同时给 quietMs 加上限（默认 60 秒；2026-10-21 从 120 秒收紧，配合「稍微快一点」的节奏要求），
           // 避免被模型/群友诱导导致 HTTP handler 长时间挂起。
-          const maxQuietMs = Math.max(minQuietAfterNewMs, Math.min(60000, Number(waitCfg.maxMs) || 600000));
-          const quietMs = Math.min(maxQuietMs, Math.max(minQuietAfterNewMs, Math.round(rawQuietMs) || 0));
+          const maxQuietMs = Math.max(quietFloorMs, Math.min(60000, Number(waitCfg.maxMs) || 600000));
+          const quietMs = Math.min(maxQuietMs, Math.max(quietFloorMs, Math.round(rawQuietMs) || 0));
+          if (fastLane && quietMs < minQuietAfterNewMs) {
+            // 每个会话最多每 10 分钟记一次，避免变成新的日志噪声（bridge.log 已经被
+            // 「远未来潜水定时器续期」刷到 57% 是同一行）。
+            const lastLogAt = Number(st.fastLaneLoggedAt) || 0;
+            if (Date.now() - lastLogAt > 600000) {
+              st.fastLaneLoggedAt = Date.now();
+              log(`[reserved2] 快车道 ${key}：静默下限 ${quietMs}ms（慢车道 ${minQuietAfterNewMs}ms）`);
+            }
+          }
           if (st.pendingWakeTimer) {
             clearTimeout(st.pendingWakeTimer);
             st.pendingWakeTimer = null;
@@ -14953,11 +14977,55 @@ async function main() {
     return packet;
   }
 
-  function replyTimingV2(st) {
+  // ── 快车道（2026-10-22）───────────────────────────────────────────────
+  // 慢车道的两个大延迟是为「群里顺便聊两句」设计的：
+  //   · wake.batchWindowMs（8 秒）—— 攒住连发，别每条都唤醒一次；
+  //   · wait.minQuietAfterNewMs（8 秒）—— 等对方把话说完，别插嘴。
+  // 但私聊、被 @、被引用是「有人正在问你」：这两段延迟会直接变成用户眼里的沉默，
+  // 加起来 16 秒起步。快车道把这两段分别压到 fastBatchWindowMs / fastQuietMs，
+  // 慢车道（概率/关键词/名字/提问唤醒的普通群聊）原样保留，避免插嘴。
+  const FAST_LANE_AT_SELF_WINDOW_MS = 120000;
+  function isFastLaneKeyV2(key) {
+    return String(key ?? '').startsWith('private:');
+  }
+  function fastLaneActiveV2(key, st) {
+    if (isFastLaneKeyV2(key)) return true;
+    const now = Date.now();
+    const unread = Array.isArray(st?.unread) ? st.unread : [];
+    return unread.some((m) => {
+      if (!m || (m.atSelf !== true && m.quoteTargetIsSelf !== true)) return false;
+      const at = Number(m.time);
+      // 没有时间戳的老数据按「当前有效」处理；有时间的只认最近两分钟内的 @，
+      // 避免几分钟前被 @ 过一次之后，整场群聊都停在快车道里抢话。
+      return !Number.isFinite(at) || at <= 0 || now - at <= FAST_LANE_AT_SELF_WINDOW_MS;
+    });
+  }
+  function fastQuietMsV2() {
+    const value = Number(cfg.socialV2?.wait?.fastQuietMs);
+    return Math.max(300, Number.isFinite(value) ? Math.round(value) : 1200);
+  }
+  function fastBatchWindowMsV2() {
+    const value = Number(cfg.socialV2?.wake?.fastBatchWindowMs);
+    return Math.max(200, Number.isFinite(value) ? Math.round(value) : 800);
+  }
+  /** 这一轮唤醒该不该走快车道：私聊 / @·引用未读 / 高优先级唤醒原因（private、atMention）。 */
+  function fastWakeV2(key, st, reason) {
+    if (isFastLaneKeyV2(key)) return true;
+    if (fastLaneActiveV2(key, st)) return true;
+    return wakePriorityV2(reason) >= 90;
+  }
+
+  function replyTimingV2(key, st) {
     const minimum = Number(cfg.socialV2?.wait?.minQuietAfterNewMs);
-    const minQuietMs = Number.isFinite(minimum) ? Math.max(0, minimum) : 10000;
+    const slowFloorMs = Number.isFinite(minimum) ? Math.max(0, minimum) : 10000;
+    const fastLane = fastLaneActiveV2(key, st);
+    const minQuietMs = fastLane ? fastQuietMsV2() : slowFloorMs;
     const maxQuietMs = Math.max(minQuietMs, Math.min(60000, Number(cfg.socialV2?.wait?.maxMs) || 600000));
-    const quietMs = Math.min(maxQuietMs, Math.max(minQuietMs, Math.round(suggestQuietMsV2(st)) || 0));
+    // 快车道不采用 suggestQuietMsV2 的 6~12 秒建议值，只给 quietFloor（默认 1.2 秒）；
+    // 否则提示词里写的「还差 N 秒静默」会和实际行为对不上。
+    const quietMs = fastLane
+      ? minQuietMs
+      : Math.min(maxQuietMs, Math.max(minQuietMs, Math.round(suggestQuietMsV2(st)) || 0));
     const value = Number(st.lastIncomingAt);
     const elapsedMs = Number.isFinite(value) && value > 0 ? Math.max(0, Date.now() - value) : 0;
     return { purpose: 'reply', quietMs, remainingQuietMs: Math.max(0, quietMs - elapsedMs) };
@@ -15039,7 +15107,7 @@ async function main() {
       : '';
     const preSleepMs = Math.max(0, Number(cfg.socialV2?.wake?.preSleepWaitMs) || 300000);
     const proactiveLine = '【积极性】不要习惯性潜水：群里有你能接的话题就主动参与，偶尔插一句别人的话题也很正常；只有确实没话可说、对方已明确结束、或长时间没人说话时才潜水。\n\n';
-    const replyTiming = replyTimingV2(st);
+    const replyTiming = replyTimingV2(key, st);
     const replyLine = `【首回复节奏】先处理已有消息，完整的问题及时回答。需要确认对方是否继续补充时，用 qq_wait_for_messages(purpose="reply", quietMs=${replyTiming.quietMs})；从最后来信计时，合批和读提示词的耗时也算，目前还差约 ${Math.ceil(replyTiming.remainingQuietMs / 1000)} 秒静默。已安静够久可直接回，工具也会立即返回并补上思考期间的新消息。只有明确没说完、你确实要等下文时，才用普通 messages 长等待。\n\n`;
     const preSleepLine = `【沉睡前强制等待】这是决定潜水收尾时的步骤，不是首回复的前置条件。除非对方明确说“不聊了/晚安/下了/拜拜”等结束语，否则每次设置潜水/下一次唤醒前，必须先调用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成一次沉睡前观察；回复前 purpose="reply" 的短静默不能代替这次完整观察。若 ${Math.round(preSleepMs / 60000)} 分钟内没人说话，返回 preSleepWaitSatisfied=true，可以设置下一次唤醒并沉睡；若期间有人发新消息，先查看返回的 newMessages——判断不需要你参与就可以直接沉睡，若你选择参与回复，则下次想睡时需要重新等待观察窗口。如果返回里带 preSleepWaitRemainingMs，就按剩余时间继续等待。\n\n`;
     const lastMsg = [...(Array.isArray(st.recentMessages) ? st.recentMessages : [])].reverse().find((m) => m && !m.isSelf);
@@ -15355,7 +15423,11 @@ async function main() {
       st.sleepTimer = null;
     }
     st.pendingWakeReason = reason;
-    const batchMs = Math.max(1000, Number(st.wakeConfig?.batchWindowMs) || 8000);
+    const batchWindowMs = Math.max(1000, Number(st.wakeConfig?.batchWindowMs) || 8000);
+    // 快车道（私聊 / @ / 引用 / atMention）用短合批窗口：那 8 秒是慢车道「攒住连发」用的，
+    // 对方正在等你回话时它只是纯延迟。仍取 min()，所以 AI 自己调小了合批窗口依然生效。
+    const fastWake = fastWakeV2(key, st, reason);
+    const batchMs = fastWake ? Math.min(batchWindowMs, fastBatchWindowMsV2()) : batchWindowMs;
     st.pendingWakeTimer = setTimeout(() => {
       st.pendingWakeTimer = null;
       const finalReason = st.pendingWakeReason || reason;
@@ -15364,7 +15436,7 @@ async function main() {
     }, batchMs);
     // 与其它 per-conversation 定时器保持一致：别让一个待唤醒定时器把进程钉住不退出。
     st.pendingWakeTimer.unref?.();
-    log(`[reserved2] 计划唤醒 ${key}（${reason}），${Math.round(batchMs / 1000)}s 后发送`);
+    log(`[reserved2] 计划唤醒 ${key}（${reason}）${fastWake ? '［快车道］' : ''}，${batchMs >= 1000 ? `${Math.round(batchMs / 1000)}s` : `${batchMs}ms`} 后发送`);
   }
 
   /**

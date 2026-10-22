@@ -178,8 +178,8 @@ console.log('\n六 prompt 的 device 块');
 
 check('prompt payload 里有 device 块', bridge.includes('device: (() => {'));
 check('device 块在 heybox 块之后', lineOf(bridge, 'device: (() => {') > lineOf(bridge, 'heybox: (() => {'));
-check('device 块在 replyTiming 之前（仍在同一个 payload 里）', lineOf(bridge, 'device: (() => {') < lineOf(bridge, 'replyTiming: replyTimingV2(st),'));
-const deviceBlock = sliceBetween(bridge, 'device: (() => {', 'replyTiming: replyTimingV2(st),');
+check('device 块在 replyTiming 之前（仍在同一个 payload 里）', lineOf(bridge, 'device: (() => {') < lineOf(bridge, 'replyTiming: replyTimingV2('));
+const deviceBlock = sliceBetween(bridge, 'device: (() => {', 'replyTiming: replyTimingV2(');
 check('device 块切片存在', deviceBlock.length > 200, deviceBlock.length);
 check('禁用时短路成 { enabled: false }（整段不注入）', deviceBlock.includes('if (!deviceEnabled) return { enabled: false };'));
 check('现算额度：devicePromptBlock(cfg.device, readDeviceState(), nowMs, 窗口快照)', deviceBlock.includes('const block = devicePromptBlock(cfg.device, readDeviceState(), nowMs, readJsonSafe(DEVICE_WINDOW_FILE, null));'));

@@ -207,6 +207,9 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     extractMediaFromSegments, segmentsToText, fetchOneBotImage, fetchMediaData, resolveMediaList,
     emojiCdnCandidates, getImageDimensions, acceptImageBuffer, MAX_MEDIA_BYTES, bot,
     isConversationBusyV2, v2TurnStartAt, turnLeaseNoted, TURN_BUSY_LEASE_MS,
+    // Fast lane (2026-10-22): 私聊 / @ / 引用的短合批与短静默判定。
+    scheduleWakeV2, cancelReplyCheckV2, isFastLaneKeyV2, fastLaneActiveV2,
+    fastWakeV2, fastQuietMsV2, fastBatchWindowMsV2,
     settingFromDshNamespace, selfIdentityTextV2, buildWakeReminderPromptV2,
     getMode() { return currentMode; },
     setSelfIdentity(display, id) {
