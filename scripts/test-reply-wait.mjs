@@ -457,3 +457,12 @@ test('a reply without a prior look does not acknowledge anything', () => fixture
   assert.equal(st.lastReadThroughSeq, 0);
   assert.equal(st.unread.length, 1, 'sending is not a licence to skip unread messages');
 }));
+test('the fast lane tells the model not to spend a step looking first', () => fixture(async ({ h, key }) => {
+  const fast = h.buildWakePromptV2(key, 'question');
+  assert.match(fast, /【行动前·快车道】/, 'fast replies must not start with a lookup step');
+  assert.match(fast, /不要先调 qq_get_unread_messages/);
+
+  h.cfg.socialV2.wake.fastLaneScope = 'addressed';
+  const slow = h.buildWakePromptV2(key, 'anyMessage');
+  assert.doesNotMatch(slow, /【行动前·快车道】/);
+}));
