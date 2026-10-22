@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+### 互通组不再被当成「串线」：给跨会话消息记出处 + 提示词说明（2026-10-22）
+
+- 现象（实测）：群 `group:119212385` 与私聊 `private:1691642607` 在同一个互通组里。14:21–14:24 私聊会话用带 `key=group:119212385` 的发送工具替群说了三道题，群里那条会话的上下文中**没有这段经历**，于是连着三次判定「你这是把谁家上下文串我头上了」「又串了」——对方只能理解为桥接串线。实际一条都没串。
+- 根因：跨会话发出的消息只落进**目标会话**的 `recentMessages`（`isSelf`、无出处），唤醒提示词又只说「未读 N 条 / 最近一条来自 X」，`qq_get_unread_messages` 只列来信 —— 模型看不出「这句话是同组另一个会话替我说的」。
+- 代码：`recordSentMessagesV2(key, messages, via = '')` 新增出处参数，消息对象带上 `via`（来源会话 key）与 `viaLabel`（人名/群名标签），只在来源 ≠ 本会话时写入；`src/qq-model-view.js` 的 `OPTIONAL_FIELDS` 增补 `via`/`viaLabel`；发送端点（发图 / 发消息 / 回复 / 分条发送）改为传 `crossSendSourceV2(key, req)`（按 `x-agent-token` 反查来源会话，本会话自发送返回空串）。
+- 提示词：新增 `buildCrossGroupLineV2(key, st)`，只有存在互通组时才注入【互通组】段 —— 说明「同组共用身份与记忆，看到别处的内容或一句你没印象的『你』说的话是正常的，不是串线/串台/发错人」、带 `via` 的消息怎么读、以及别拿「串线」去跟人解释；如果 15 分钟内确有同组代发，再补一行「谁替你发过几条」。
+- `GET /api/socialV2/prompt` 的 `cross.hint` 同步一句「同组共享身份与记忆是设计…不是串线」。
+- 回归：`scripts/test-reply-wait.mjs` 22 → **26** 条（无互通组不注入 / 说明段与 `via` 读法 / 代发消息保留出处并在提示词里计数 / 自发送不带出处）；`scripts/test-cross-endpoints.mjs` 与 `scripts/test-image-endpoints.mjs` 里两条「源码形状」断言跟着更新。
+
 ### 日记：从「只写不读」变成可以翻回去看（2026-10-22）
 
 - 唤醒提示词新增【日记】段（受 `socialV2.tools.diary` 开关控制）：写明「写之前先 `qq_diary_list` 查今天写过没有」「有人问起以前的事、或自己想回忆某段对话，就 `qq_diary_list` 找那天 + `qq_diary_read` 读全文，照着记下来的说，真没有就说记不清，不要编」。

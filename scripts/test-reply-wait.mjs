@@ -358,3 +358,40 @@ test('an ordinary group wake still waits out the batching window when the scope 
   assert.equal(h.calls.prompts.length, 0, 'stray group chatter must keep batching so the bot does not butt in');
   clearTimeout(st.pendingWakeTimer);
 }, { wake: { ...WAKE_CFG, fastLaneScope: 'addressed' } }));
+
+// A cross group shares identity and memory, and any member session may speak for the
+// others (T-018). The 2026-10-22 incident was the bot calling that "crossed wires":
+// the sibling session asked the question, so the group session had no memory of it.
+// The fixes are provenance on the stored message (`via`) plus an explicit line in the
+// wake prompt; both are asserted here.
+const CROSS_CFG = { cross: { enabled: true, groups: { 'group:456': 1, 'private:789': 1 } } };
+
+test('a standalone session gets no cross-group lecture', () => fixture(async ({ h, key, st }) => {
+  assert.equal(h.buildCrossGroupLineV2(key, st), '', 'session without a shared group must not be told about one');
+}));
+
+test('a shared group is explained as by-design, and the prompt says how to tell messages apart', () => fixture(async ({ h, key, st }) => {
+  const line = h.buildCrossGroupLineV2(key, st);
+  assert.match(line, /【互通组】/);
+  assert.match(line, /不是串线/);
+  assert.match(line, /via/);
+  assert.match(h.buildWakePromptV2(key, 'question'), /【互通组】/, 'the wake prompt must carry the explanation');
+}, CROSS_CFG));
+
+test('a message the sibling session sent on our behalf keeps its origin, and the prompt counts it', () => fixture(async ({ h, key, st }) => {
+  h.recordSentMessagesV2(key, ['我就考它一道重复数'], 'private:789');
+  const last = st.recentMessages[st.recentMessages.length - 1];
+  assert.equal(last.isSelf, true);
+  assert.equal(last.via, 'private:789', 'the stored message must remember which session spoke');
+  assert.ok(last.viaLabel, 'a human label travels with via');
+
+  const prompt = h.buildWakePromptV2(key, 'question');
+  assert.match(prompt, /已经替你在这里发过 1 条/);
+}, CROSS_CFG));
+
+test('a self-sent message carries no origin tag, so normal sends look unchanged', () => fixture(async ({ h, key, st }) => {
+  h.recordSentMessagesV2(key, ['自己说的']);
+  const last = st.recentMessages[st.recentMessages.length - 1];
+  assert.equal(last.via, undefined);
+  assert.equal(last.viaLabel, undefined);
+}, CROSS_CFG));

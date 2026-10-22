@@ -5,7 +5,10 @@ const DEFAULT_FALSE_FIELDS = new Set([
 ]);
 const OPTIONAL_FIELDS = new Set([
   'seq', 'messageId', 'sender', 'userId', 'text', 'plain', 'tail', 'kind',
-  'ownerLabel', 'media', 'forwardIds', 'nestedForwardIds'
+  'ownerLabel', 'media', 'forwardIds', 'nestedForwardIds',
+  // 跨会话发送的出处（T-018）：同组另一个会话替我发的消息带 via / viaLabel，
+  // 模型看到 `via: "private:…"` 就知道「这是那边替我发的」，不会当成串线。
+  'via', 'viaLabel'
 ]);
 
 function isRecord(value) {

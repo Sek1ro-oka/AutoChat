@@ -4708,6 +4708,21 @@ async function main() {
       const ownerGid = groupOf(groups, ownerKey);
       return targetGid > 0 && targetGid === ownerGid;
     };
+    /**
+     * 这次发送是不是「同组里另一个会话借令牌发的」（T-018 跨会话发送）。
+     *
+     * 返回发起方自己的会话 key（例如「私聊那边替群发的」），本会话自己发就返回空串。
+     * 为什么要记下来：跨会话发出的消息只会落进**目标会话**的 recentMessages，而目标会话
+     * 那条 DSH 会话里并没有这段经历。模型下次醒来看见「我」说过一句自己毫无印象的话，
+     * 就会当成串线/串台去质问群友（2026-10-22 群里实测：「异或？我哪句问过你重复的数了」）。
+     * 记下 via 之后，最近消息带出处，提示词里再点明同组共享是设计——两头都不再误判。
+     */
+    const crossSendSourceV2 = (key, req) => {
+      const token = String(req?.headers?.['x-agent-token'] ?? '').trim();
+      if (!token) return '';
+      const ownerKey = agentTokenSessionKey(token);
+      return ownerKey && ownerKey !== key ? ownerKey : '';
+    };
     // 二代会话工具必须仍命中当前模式的白名单/准入；避免白名单移除后旧 agentToken 继续读状态。
     const v2SessionAllowed = isSessionAllowedInCurrentMode;
     // ═══════════════════════════════════════════════════════════════════════
@@ -6844,7 +6859,7 @@ async function main() {
             st.lastAiReplyAt = now;
             st.lastActionAt = now;
             if (st.wakeConfig) st.wakeConfig.noActionCount = 0;
-            recordSentMessagesV2(key, ['[图片]']);
+            recordSentMessagesV2(key, ['[图片]'], crossSendSourceV2(key, req));
             saveSocialV2State();
             log(`[images] 已发送 ${imageId} → ${key} (message_id=${sent.messageId ?? '-'})`);
             appendActivity(`${key} AI 发了一张图`);
@@ -8801,7 +8816,7 @@ async function main() {
                 others,
                 recent,
                 hint: others.length
-                  ? 'recent 是同组其它会话最近的消息（带出处，已经在眼前）；要更早或更细的用 qq_recall 查；要说话就用带 key 的发送工具，同组互发不需要额外权限。'
+                  ? 'recent 是同组其它会话最近的消息（带出处，已经在眼前）；要更早或更细的用 qq_recall 查；要说话就用带 key 的发送工具，同组互发不需要额外权限。同组共享身份与记忆是设计：看到别处的内容、或看到「你」说过一句你没印象的话，是组里另一个会话代发的，不是串线，别跟人解释成消息串了。'
                   : '这个会话暂时没有和别的会话互通。'
               };
             })(),
@@ -9339,7 +9354,7 @@ async function main() {
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             const delays = computeGapsV2(messages, 'auto', undefined, undefined, sendCfg);
             const sentMessages = await sendMessagesV2(key, messages, delays);
-            recordSentMessagesV2(key, sentMessages);
+            recordSentMessagesV2(key, sentMessages, crossSendSourceV2(key, req));
             st.lastAiReplyAt = now;
             st.lastActionAt = now;
             st.wakeConfig.noActionCount = 0;
@@ -9353,7 +9368,7 @@ async function main() {
             sendJson({ ok: true, key, sent: sentMessages.length, failed: messages.length - sentMessages.length, ...(burstHint ? { hint: burstHint } : {}), ...(spaceWarn ? { warn: spaceWarn } : {}), ...(splitWarn ? { splitWarn } : {}) });
           } catch (error) {
             if (error?.sent?.length) {
-              recordSentMessagesV2(key, error.sent);
+              recordSentMessagesV2(key, error.sent, crossSendSourceV2(key, req));
               log(`[reserved2] 工具分条发送部分成功 ${error.sent.length}/${messages.length} 条，已记录已发消息`);
             }
             // 失败/未发出的消息回滚预占的发送额度，避免假 429。
@@ -9491,7 +9506,7 @@ async function main() {
           }
           try {
             const sentMessages = await sendMessagesV2(key, messages, delays, actualReplyToMessageId, atUserId);
-            recordSentMessagesV2(key, sentMessages);
+            recordSentMessagesV2(key, sentMessages, crossSendSourceV2(key, req));
             st.lastAiReplyAt = now;
             st.lastActionAt = now;
             st.wakeConfig.noActionCount = 0;
@@ -9505,7 +9520,7 @@ async function main() {
             sendJson({ ok: true, key, sent: sentMessages.length, failed: messages.length - sentMessages.length, delays, quoted: quotedInfo, ...(burstHint ? { hint: burstHint } : {}), ...(spaceWarn ? { warn: spaceWarn } : {}), ...(splitWarn ? { splitWarn } : {}) });
           } catch (error) {
             if (error?.sent?.length) {
-              recordSentMessagesV2(key, error.sent);
+              recordSentMessagesV2(key, error.sent, crossSendSourceV2(key, req));
               log(`[reserved2] 工具统一发送部分成功 ${error.sent.length}/${messages.length} 条，已记录已发消息`);
             }
             // 失败/未发出的消息回滚预占的发送额度，避免假 429。
@@ -11258,7 +11273,7 @@ async function main() {
             st.sendTimes.push(now);
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             const sentMessages = await sendMessagesV2(key, [message], [], actualReplyToMessageId, atUserId);
-            recordSentMessagesV2(key, sentMessages);
+            recordSentMessagesV2(key, sentMessages, crossSendSourceV2(key, req));
             st.lastAiReplyAt = now;
             st.lastActionAt = now;
             st.wakeConfig.noActionCount = 0;
@@ -11269,7 +11284,7 @@ async function main() {
             sendJson({ ok: true, key, sent: sentMessages.length, failed: sentMessages.length ? 0 : 1, quoted: quotedInfo });
           } catch (error) {
             if (error?.sent?.length) {
-              recordSentMessagesV2(key, error.sent);
+              recordSentMessagesV2(key, error.sent, crossSendSourceV2(key, req));
               log(`[send] ${url.pathname} ${key} 部分成功 ${error.sent.length}/1 条，已记录已发消息`);
             }
             // 失败/未发出的消息回滚预占的发送额度，避免假 429。
@@ -14790,11 +14805,21 @@ async function main() {
     return msg;
   }
 
-  function recordSentMessagesV2(key, messages) {
+  /** 会话 key 的人话标签：先用名字映射表里的群名/备注，没有才退回「群 123 / 私聊 456」。 */
+  function crossSessionLabelV2(k) {
+    const label = identityKey(identityStateNow(), k)?.label;
+    return String(label || humanKeyLabel(k));
+  }
+
+  function recordSentMessagesV2(key, messages, via = '') {
     const st = getSocialV2State(key);
     const now = Date.now();
     const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
     const list = Array.isArray(messages) ? messages : [];
+    // via 只在「同组另一个会话替我发」时才有值：写进消息记录，模型在 unread/recent/wake
+    // 快照里都能看到出处，不会再把自己说过的话当成别人串进来的东西。
+    const viaKey = String(via ?? '').trim() && String(via).trim() !== key ? String(via).trim() : '';
+    const viaLabel = viaKey ? crossSessionLabelV2(viaKey) : '';
     for (let i = 0; i < list.length; i++) {
       // 留一份截断前的原文给跨会话缓冲；recentMessages 仍然只存 200 字（省状态文件）。
       const fullText = redactKnownTokensOnly(String(list[i] ?? ''));
@@ -14807,6 +14832,7 @@ async function main() {
         isOwner: true,
         ownerLabel: '我',
         isSelf: true,
+        ...(viaKey ? { via: viaKey, viaLabel } : {}),
         time: now + i * 1000
       });
       recordCrossMessage(key, {
@@ -14814,7 +14840,8 @@ async function main() {
         from: '我',
         fromQq: null,
         isSelf: true,
-        text: fullText
+        text: fullText,
+        ...(viaKey ? { via: viaKey } : {})
       });
     }
     if (st.recentMessages.length > recentLimit) st.recentMessages.splice(0, st.recentMessages.length - recentLimit);
@@ -15177,6 +15204,46 @@ async function main() {
     return '';
   }
 
+  /**
+   * 「互通组」说明行：只在本会话参与互通（gid > 0）时出现。
+   *
+   * 要解决的不是「消息真的串了」，而是**模型误判串了**：跨会话互发（T-018）让同组的
+   * 另一个会话能替这个会话发言，那些消息只落在本会话的 recentMessages 里，而这边的
+   * DSH 会话上下文并没有那段经历。模型看到「我」说过一句自己毫无印象的话，就当成
+   * 串线、串台，甚至当场质问群友（2026-10-22 实测连说三次，对端以为是桥接 bug）。
+   *
+   * 所以这里把三件事说死：①同组共享是设计；②带 via 的消息是那边代发的；③别对外
+   * 解释成串线。顺带把「那边刚替你发过几条」摆到眼前，省得模型再去翻 recentMessages。
+   */
+  function buildCrossGroupLineV2(key, st) {
+    const groups = cfg.socialV2?.cross?.groups ?? {};
+    // 缺省视为开启：cross.enabled 由 normalizeCrossConfig 补成布尔，老配置里没有这个键。
+    if (cfg.socialV2?.cross?.enabled === false) return '';
+    const gid = groupOf(groups, key);
+    if (!Number.isSafeInteger(gid) || gid <= 0) return '';
+    const peers = membersOf(groups, gid).filter((m) => m && m !== key);
+    if (!peers.length) return '';
+    const peerText = peers.map((m) => `「${crossSessionLabelV2(m)}」`).join('、');
+    const lines = [
+      `【互通组】你和 ${peerText} 在同一个互通组（编号 ${gid}），共用同一套身份和记忆：`,
+      '- 在这里看到别处的内容、或看到「你」说过一句你毫无印象的话，都是正常的：那是同组另一个会话替你发的，**不是串线、不是串台、不是发错人**。',
+      '- 消息里带 via（例如 via: "private:1691642607"）就表示这句是从那个会话发到本会话的。',
+      '- 别跟人解释成「消息串了」「桥接串线」；对方追问时，就说那是同一组里的另一个窗口替你说的，接着聊就行。',
+      '- 你回复默认只发到本会话；确实要发到组里另一个会话，才用带 key 的发送工具。'
+    ];
+    const cutoff = Date.now() - 15 * 60_000;
+    const recent = (Array.isArray(st?.recentMessages) ? st.recentMessages : [])
+      .filter((m) => m && m.isSelf === true && m.via && Number(m.time) >= cutoff);
+    if (recent.length) {
+      const last = recent[recent.length - 1];
+      const minutes = Math.max(0, Math.round((Date.now() - Number(last.time)) / 60000));
+      const label = String(last.viaLabel || humanKeyLabel(last.via));
+      const preview = String(last.plain || last.text || '').slice(0, 30);
+      lines.push(`- 最近 15 分钟里「${label}」已经替你在这里发过 ${recent.length} 条（最后一条 ${minutes} 分钟前：「${preview}」），别当没发生。`);
+    }
+    return `${lines.join('\n')}\n\n`;
+  }
+
   function buildWakePromptV2(key, reason) {
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
@@ -15225,6 +15292,8 @@ async function main() {
     const statusLine = `【此刻状态】${statusBits.join('；')}\n\n`;
     // 「别处动静」：只提醒同组有动静，不带正文；不满足门槛时是空串，base 不受影响。
     const crossLine = buildCrossHintLineV2(key, st);
+    // 「互通组」：同组会话之间的"串台"是设计，不是故障（2026-10-22 实测模型误判现场）。
+    const crossGroupLine = buildCrossGroupLineV2(key, st);
     const wc = st.wakeConfig || {};
     const wcTr = wc.triggers || {};
     const wcMode = wc.mode === 'active' ? '活跃' : '潜水';
@@ -15244,7 +15313,7 @@ async function main() {
     // 后续唤醒不再带它 —— 那时它已经在这条 DSH 会话的上下文里了。
     const initialPromptText = reason === 'bootstrap' ? formatInitialPromptV2(key) : '';
     const initialPromptLine = initialPromptText ? `${initialPromptText}\n\n` : '';
-    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + diaryLine + recallHintLine + proactiveLine + stickerLine + replyLine + statusLine + crossLine + wakeLine + memoryLine + participationLine + preSleepLine;
+    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + diaryLine + recallHintLine + proactiveLine + stickerLine + replyLine + statusLine + crossLine + crossGroupLine + wakeLine + memoryLine + participationLine + preSleepLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }

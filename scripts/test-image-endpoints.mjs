@@ -291,7 +291,7 @@ check('发送频率闸门：st.sendTimes.push(now)', sendBlock.includes('st.send
 check('失败回滚发送名额', sendBlock.includes('st.sendTimes.splice(at, 1);'));
 check('失败回 502 并带上原因', sendBlock.includes("reason: 'send_failed'"));
 check('成功回 messageId', sendBlock.includes('messageId: sent.messageId'));
-check('recentMessages 里只留一句「[图片]」', sendBlock.includes("recordSentMessagesV2(key, ['[图片]']);"));
+check('recentMessages 里只留一句「[图片]」（并带回话出处）', sendBlock.includes("recordSentMessagesV2(key, ['[图片]'], crossSendSourceV2(key, req));"));
 check('成功后排一次回复检查', sendBlock.includes('scheduleReplyCheckV2(key);'));
 check('日志 [images] 已发送', sendBlock.includes('[images] 已发送 ${imageId}'));
 
