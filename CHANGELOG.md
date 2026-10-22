@@ -16,6 +16,16 @@
 - 日志：`[reserved2] 计划唤醒 <key>（<reason>）［快车道］，800ms 后发送`（毫秒级窗口不再被 `Math.round(ms/1000)` 显示成 `1s`）；wait 走快车道时按会话 **10 分钟一条**记 `快车道 <key>：静默下限 1200ms（慢车道 8000ms）`，避免变成新的日志噪声（`bridge.log` 已有 57% 是同一行的远未来潜水定时器续期）。
 - 回归：`scripts/test-reply-wait.mjs` 10 → **15** 条（@ 走快车道且 `quietMs` 等于 fast floor、普通群聊仍走慢车道并超时、车道判定表、**合批 300ms 与 8000ms 的真计时**）；`scripts/audit-bridge-harness.mjs` 增导出 `scheduleWakeV2 / cancelReplyCheckV2 / isFastLaneKeyV2 / fastLaneActiveV2 / fastWakeV2 / fastQuietMsV2 / fastBatchWindowMsV2`；`scripts/test-device-wiring.mjs` 的切片锚点由 `'replyTiming: replyTimingV2(st),'` 放宽为 `'replyTiming: replyTimingV2('`（签名变了，锚点跟着放宽，免得下次改签名又假红）。
 
+### 会话上下文上限：超过就退役重建（2026-10-22）
+
+- 起因：快车道把合批与静默砍到 1 秒级之后，实测 `group:119212385` 的 DSH 会话上下文已经到 **391,970 token**（`state/token-usage.jsonl` 里 step1 的 `cacheHit + cacheMiss`）。这个会话里「一步」要 **6.2 秒**、唤醒后的首步要 **20 秒**——每轮投递的约 8K token 提示词都留在会话历史里，30 轮之后回话速度被自己的历史拖死。
+- 新配置 `socialV2.context.maxSessionTokens`（默认 **120000** ≈ 十几轮对话；设为 **0** 可关闭，让历史无限累积）：每次唤醒前检查该会话最近一步的上下文 token，超过上限就 `retireSession` 退役，下一次 `ensureSession` 建一个干净会话。
+- 必须在 `buildWakePromptV2` **之前**退役：`retireSession` 会轮换 `agentToken`，提示词里带的令牌必须是新会话的，否则模型第一次工具调用就被 403 挡掉。
+- 上下文规模取「最近一步的 `cacheHit + cacheMiss`」（`contextTokensOfUsage`，厂商没给明细时退回 `prompt_tokens`）；重启时从 `state/token-usage.jsonl` 尾部按 `sid` 取最新一条 `k:"turn"` 记录回填（`seedSessionCtxTokens`），否则重启后第一轮仍会对 39 万 token 的旧会话空转一次。
+- 代价：会话历史不再无限累积，群聊大约每 10 轮换代一次。影响可控——每轮提示词本来就重新注入最近 12 条消息、记忆、黑话表与角色卡。
+- 实测（13:27 用控制台手动 `timeout` 唤醒触发）：`group:119212385` 的 392,840 token 旧会话被退役，新建 `session-f5e21565`，「唤醒 → 首个工具调用」由 **21.9 秒** 降到 **3.6 秒**。
+- 回归：`scripts/test-reply-wait.mjs` 15 → **18** 条（超大会话退役 / 未超限保留 / `maxSessionTokens=0` 关闭 / 判定由 provider usage 事件驱动）。
+
 ### 安卓平板：窗口模式（PC 模式浮窗）的点击保护（2026-10-21，T-026）
 
 - 起因：真机验收时让 bot 操作 ZUI PC 模式下的小黑盒**浮窗**（`dumpsys window windows` 里 `frame=[737,0]-[2208,1840]`，1471x1840，而截图是整屏 2944x1840）：两次点在窗口外落到桌面层毫无反应，一次点在底部 1604–1840 触发手势导航把 App 切走；B 站那类**全屏**应用一切正常。坐标换算本身没错，错在工具不知道「目标只是个窗口」。

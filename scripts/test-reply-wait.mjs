@@ -267,6 +267,33 @@ test('a fast-lane wake prompt tells the model to send first, a slow-lane one sti
   assert.doesNotMatch(slow, /快车道/);
 }));
 
+test('an oversized session is retired before the next wake, a small one is left alone', () => fixture(async ({ h, key }) => {
+  h.cfg.socialV2.context.maxSessionTokens = 1000;
+  h.state.sessions[key] = 'session-fat';
+  h.sessionCtxTokens.set('session-fat', 390000);
+  const rotated = h.maybeRotateOversizedSessionV2(key);
+  assert.equal(rotated.rotated, true);
+  assert.equal(rotated.contextTokens, 390000);
+  assert.equal(h.state.sessions[key], undefined, 'the stale mapping must go so ensureSession builds a clean session');
+  assert.equal(h.sessionCtxTokens.has('session-fat'), false);
+
+  h.state.sessions[key] = 'session-thin';
+  h.sessionCtxTokens.set('session-thin', 900);
+  assert.equal(h.maybeRotateOversizedSessionV2(key).rotated, false);
+  assert.equal(h.state.sessions[key], 'session-thin', 'a session below the ceiling keeps its history');
+
+  h.cfg.socialV2.context.maxSessionTokens = 0;
+  assert.equal(h.maybeRotateOversizedSessionV2(key).reason, 'disabled');
+}));
+
+test('provider usage is what drives the rotation decision', () => fixture(async ({ h, key }) => {
+  h.cfg.socialV2.context.maxSessionTokens = 100000;
+  h.state.sessions[key] = 'session-usage';
+  h.recordSessionUsage('session-usage', { type: 'assistant/message', data: { usage: { cache_hit_tokens: 90000, cache_miss_tokens: 12000 } } });
+  assert.equal(h.sessionCtxTokens.get('session-usage'), 102000, 'cached + uncached input is the real context size');
+  assert.equal(h.maybeRotateOversizedSessionV2(key).rotated, true);
+}));
+
 const WAKE_CFG = { preSleepWaitEnabled: true, preSleepWaitMs: 300000, batchWindowMs: 8000, fastBatchWindowMs: 300 };
 
 test('a wake aimed at us skips the 8s batching window and reaches DSH at once', () => fixture(async ({ h, key }) => {

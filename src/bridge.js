@@ -71,7 +71,7 @@ import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken } fro
 import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
-import { createTokenLedger } from './token-ledger.js';
+import { createTokenLedger, usageOfEvent } from './token-ledger.js';
 import {
   loadSlang,
   saveSlang,
@@ -1152,7 +1152,12 @@ function loadConfig() {
         inlineWakeMessages: true,
         wakeMessageLimit: 12,
         wakeRecentLimit: 4,
-        wakeMaxChars: 6000
+        wakeMaxChars: 6000,
+        // 会话上下文上限（token）：超过就退役重建。DSH 会话会把每轮提示词都留在历史里，
+        // 一个活跃群聊跑到 30 轮后上下文就到了 35~40 万 token，每步预填要 6 秒、
+        // 唤醒后的首步要 20 秒（2026-10-22 实测），回话速度被自己的历史拖死。
+        // 默认 12 万 token ≈ 十几轮对话；0 = 关闭（不退役、历史无限累积）。
+        maxSessionTokens: 120000
       },
       // 操作者在控制台为单个会话预写的「初始提示词」的字数上限（只在首次唤醒时注入一次）。
       // 它不是安全边界，只是防止误粘贴一篇长文把首次唤醒的 prompt 撑爆。
@@ -3572,6 +3577,47 @@ async function main() {
         : undefined)
   });
 
+  /** sessionId -> 最近一步的输入 token 数（≈会话上下文规模），用于判断是否该退役重建。 */
+  const sessionCtxTokens = new Map();
+
+  function contextTokensOfUsage(usage) {
+    if (!usage || typeof usage !== 'object') return 0;
+    const num = (...keys) => {
+      for (const k of keys) {
+        const v = Number(usage[k]);
+        if (Number.isFinite(v) && v > 0) return v;
+      }
+      return 0;
+    };
+    // 缓存命中与未命中相加才是「这一步喂进去的全部上下文」；只有厂商没给明细时才退回 prompt_tokens。
+    const cached = num('cache_hit_tokens', 'cached_tokens', 'cachedTokens', 'prompt_cache_hit_tokens');
+    const miss = num('cache_miss_tokens', 'cacheMissTokens', 'prompt_cache_miss_tokens');
+    if (cached + miss > 0) return cached + miss;
+    return num('prompt_tokens', 'input_tokens');
+  }
+
+  // 启动时用账本尾部补齐「每个会话最近一步的上下文规模」。不做这件事的话，桥接重启后
+  // 第一轮仍会对着 39 万 token 的旧会话空转一次（要等这一步的 usage 回来才可能退役）。
+  (function seedSessionCtxTokens() {
+    try {
+      if (!fs.existsSync(TOKEN_USAGE_FILE)) return;
+      const lines = fs.readFileSync(TOKEN_USAGE_FILE, 'utf8').split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i];
+        if (!line) continue;
+        let rec;
+        try { rec = JSON.parse(line); } catch { continue; }
+        // 只认 k:'turn' 的逐步记录；k:'base' 是整条会话的累计桶，不是上下文规模。
+        if (rec?.k !== 'turn' || !rec.sid || !rec.b) continue;
+        if (sessionCtxTokens.has(String(rec.sid))) continue;
+        const ctx = Number(rec.b.cacheHit ?? 0) + Number(rec.b.cacheMiss ?? 0);
+        if (ctx > 0) sessionCtxTokens.set(String(rec.sid), ctx);
+      }
+    } catch (error) {
+      log('读取 token 账本尾部失败（不影响回话）', error?.message ?? error);
+    }
+  })();
+
   /** sessionId -> 最近一次已知的实际模型。切换模型会让单价差好几倍，所以按会话记。 */
   const sessionModels = new Map();
   const nominalModel = () => cfg.dsh?.model || 'deepseek-flash';
@@ -3587,6 +3633,8 @@ async function main() {
   function recordSessionUsage(sessionId, event) {
     try {
       if (event?.type === 'model/selection') rememberModel(sessionId, event.data);
+      const ctxTokens = contextTokensOfUsage(usageOfEvent(event));
+      if (ctxTokens > 0) sessionCtxTokens.set(sessionId, ctxTokens);
       const known = sessionModels.get(sessionId);
       tokenLedger.ingestEvent({
         sessionId,
@@ -3893,7 +3941,7 @@ async function main() {
     markReadCalledKeys.delete(key);
   }
 
-  function retireSession(key) {
+  function retireSession(key, reason = '会话权限已变化') {
     const sessionId = state.sessions[key];
     delete state.sessions[key];
     delete state.sessionPolicies[key];
@@ -3902,6 +3950,7 @@ async function main() {
     forgetConversationCaches(key);
     if (!sessionId) return;
     reverse.delete(sessionId);
+    sessionCtxTokens.delete(sessionId);
     collectors.delete(sessionId);
     sessionModels.delete(sessionId);
     modelAppliedSessions.delete(sessionId);
@@ -3933,7 +3982,33 @@ async function main() {
     saveState();
     saveSocialV2State();
     stopRetiredSessionWork(sessionId, key);
-    log(`会话权限已变化，停用旧映射 ${key} -> ${sessionId}`);
+    log(`${reason}，停用旧映射 ${key} -> ${sessionId}`);
+  }
+
+  /**
+   * 上下文过大的会话主动退役重建。
+   *
+   * 为什么需要（2026-10-22 实测）：DSH 会话会把每一轮投递的提示词都留在历史里，一个活跃
+   * 群聊聊到 30 轮，上下文就到 35~40 万 token。在 39 万 token 时同一会话里「一步」要 6 秒、
+   * 唤醒后的首步要 20 秒——回话速度被自己的历史拖死。而最近 12 条消息、记忆、黑话都
+   * 在每轮提示词里重新注入，旧历史的价值远低于它的延迟成本。
+   *
+   * 判定与动作放在唤醒前：此刻没有在途 turn，退役不会打断正在进行的对话。
+   * 不删 DSH 侧会话（由 stopRetiredSessionWork 停掉在途工作并归档），下次 ensureSession
+   * 会新建一个干净的会话，提示词里的会话令牌也随之轮换——所以调用方必须在
+   * buildWakePromptV2 之前调用本函数，否则会把旧令牌发进新会话。
+   */
+  function maybeRotateOversizedSessionV2(key) {
+    const limit = Number(cfg.socialV2?.context?.maxSessionTokens);
+    if (!(limit > 0)) return { rotated: false, reason: 'disabled' };
+    const sessionId = state.sessions[key];
+    if (!sessionId) return { rotated: false, reason: 'no-session' };
+    const contextTokens = Number(sessionCtxTokens.get(sessionId)) || 0;
+    if (contextTokens < limit) return { rotated: false, contextTokens };
+    retireSession(key, '会话上下文超限');
+    sessionCtxTokens.delete(sessionId);
+    log(`[reserved2] ${key} 的会话上下文 ${contextTokens} tokens 超过上限 ${limit}，已退役重建（预填越短回话越快）`);
+    return { rotated: true, contextTokens };
   }
 
   function reconcileSessionPolicies() {
@@ -8307,6 +8382,8 @@ async function main() {
               merged.context[name] = Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : fallback;
             }
             if (merged.context.inlineWakeMessages !== undefined) merged.context.inlineWakeMessages = merged.context.inlineWakeMessages === true;
+            const maxSessionTokens = Number(merged.context.maxSessionTokens);
+            merged.context.maxSessionTokens = Number.isFinite(maxSessionTokens) && maxSessionTokens > 0 ? Math.round(maxSessionTokens) : 0;
           }
           if (merged.enabled !== undefined) merged.enabled = merged.enabled === true;
           if (merged.provideRecommendations !== undefined) merged.provideRecommendations = merged.provideRecommendations === true;
@@ -15254,6 +15331,9 @@ async function main() {
     // 跨会话通知的轮次计数：只在真实唤醒时 +1（繁忙/限频的提前 return 不算轮）。
     st.wakeSeq = (Number(st.wakeSeq) || 0) + 1;
     saveSocialV2State();
+    // 上下文太长的会话先退役重建：此刻没有在途 turn，且必须在 buildWakePromptV2 之前
+    // 完成，否则提示词里携带的旧会话令牌会指向刚退役的会话。
+    maybeRotateOversizedSessionV2(key);
     const promptText = buildWakePromptV2(key, reason);
     log(`[reserved2] 唤醒 ${key}（${reason}）`);
     const rollbackWakeTime = () => {
