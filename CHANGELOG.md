@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+### 日记：从「只写不读」变成可以翻回去看（2026-10-22）
+
+- 唤醒提示词新增【日记】段（受 `socialV2.tools.diary` 开关控制）：写明「写之前先 `qq_diary_list` 查今天写过没有」「有人问起以前的事、或自己想回忆某段对话，就 `qq_diary_list` 找那天 + `qq_diary_read` 读全文，照着记下来的说，真没有就说记不清，不要编」。
+- 新增【回忆线索】：当最新一条消息命中「记得/上次/之前/那天/当时/前几天/去年/小时候/说过/聊过/回忆/还欠」时，额外注入一行针对性指引（带消息前 40 字），普通聊天不占字数。
+- 起因（实测）：`state/tool-calls.jsonl` 覆盖的 10-21 12:16 → 10-22 13:39 里 `qq_diary_write` 6 次、`qq_diary_list` 与 `qq_diary_read` **各 0 次** —— 工具描述里那句「写之前先看一眼」模型从来没执行过，日记等于单向账本。
+- 回归：`scripts/test-reply-wait.mjs` 20 → **22** 条（日记段的出现与关闭、【回忆线索】的命中与不命中）。
+
 ### 快车道覆盖到每一个会话：`wake.fastLaneScope`（2026-10-22）
 
 - 新配置 `socialV2.wake.fastLaneScope`，可选 `all`（默认）与 `addressed`：`all` 表示**每个会话**（包括普通群聊）都走快车道——合批 `fastBatchWindowMs`、静默下限 `fastQuietMs`，满足「收到新消息最多 5 秒内回话」；`addressed` 回到旧行为，只有私聊 / 被 @ / 被引用 / `private`·`atMention` 唤醒走快车道，普通群聊保留 8 秒合批 + 8 秒静默以免插嘴。

@@ -15190,6 +15190,13 @@ async function main() {
     const participationText = formatParticipationV2(st);
     const participationLine = participationText ? `${participationText}\n\n` : '';
     const antiAiLine = '【反AI味】你不是客服：不用有求必应，可以装傻、已读乱回、拒绝推荐；少用“一绝/真管用/保证/绝对”这类词。\n\n';
+    // 日记：写与读都要有人提一句。工具描述里本来就写着「写之前先看一眼」，但实测
+    // 2026-10-21 12:16 → 10-22 13:39 的 tool-calls 里 qq_diary_write 6 次、
+    // qq_diary_list / qq_diary_read 各 0 次 —— 模型只写不读，等于一本单向账本。
+    // 所以这里显式给出「写之前查重、想回忆就翻」的两条用法。
+    const diaryLine = v2ToolEnabled('diary')
+      ? '【日记】你的日记按天存在自己的日记本里（只有你看得到）。想写的时候先 qq_diary_list 看一眼今天写过没有，别同一天把同一件事写两遍；有人问起以前的事、或你自己想回忆某段对话，就 qq_diary_list 找到那天、再用 qq_diary_read 读全文，照着记下来的说；确实没有记录就说记不清，不要编。\n\n'
+      : '';
     const stickerCfg = cfg.socialV2?.sticker ?? {};
     const stickerLine = stickerCfg.enabled !== false && stickerCfg.includeInPrompt !== false
       ? `${buildStickerStrategyHint()}\n${buildStickerContext(stickerEntries, stickerCfg.promptMaxStickers ?? 8)}\n\n`
@@ -15204,6 +15211,12 @@ async function main() {
       : `【首回复节奏】先处理已有消息，完整的问题及时回答。需要确认对方是否继续补充时，用 qq_wait_for_messages(purpose="reply", quietMs=${replyTiming.quietMs})；从最后来信计时，合批和读提示词的耗时也算，目前还差约 ${Math.ceil(replyTiming.remainingQuietMs / 1000)} 秒静默。已安静够久可直接回，工具也会立即返回并补上思考期间的新消息。只有明确没说完、你确实要等下文时，才用普通 messages 长等待。\n\n`;
     const preSleepLine = `【沉睡前强制等待】这是决定潜水收尾时的步骤，不是首回复的前置条件。除非对方明确说“不聊了/晚安/下了/拜拜”等结束语，否则每次设置潜水/下一次唤醒前，必须先调用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成一次沉睡前观察；回复前 purpose="reply" 的短静默不能代替这次完整观察。若 ${Math.round(preSleepMs / 60000)} 分钟内没人说话，返回 preSleepWaitSatisfied=true，可以设置下一次唤醒并沉睡；若期间有人发新消息，先查看返回的 newMessages——判断不需要你参与就可以直接沉睡，若你选择参与回复，则下次想睡时需要重新等待观察窗口。如果返回里带 preSleepWaitRemainingMs，就按剩余时间继续等待。\n\n`;
     const lastMsg = [...(Array.isArray(st.recentMessages) ? st.recentMessages : [])].reverse().find((m) => m && !m.isSelf);
+    // 「回忆线索」：对方在问旧事时，别让模型靠脑补 —— 日记就是它自己的记忆库。
+    // 只在命中回忆词时注入一行，普通聊天不占字数。
+    const recallText = String(lastMsg?.plain || lastMsg?.text || '');
+    const recallHintLine = diaryLine && /(记得|上次|之前|那天|当时|前几天|去年|小时候|说过|聊过|回忆|还欠)/.test(recallText)
+      ? `【回忆线索】这条消息像是在问以前的事：「${recallText.slice(0, 40)}」。先用 qq_diary_list 看有没有那几天的日记，再用 qq_diary_read 读全文；查到就按记录说，查不到就说记不清。\n\n`
+      : '';
     const lastAiMin = st.lastAiReplyAt ? Math.max(0, Math.round((Date.now() - Number(st.lastAiReplyAt)) / 60000)) : null;
     const statusBits = [`未读 ${(st.unread || []).length} 条`];
     if (lastMsg) statusBits.push(`最近一条来自 ${String(lastMsg.sender || '未知')}：${String(lastMsg.text || lastMsg.plain || '').slice(0, 30)}`);
@@ -15231,7 +15244,7 @@ async function main() {
     // 后续唤醒不再带它 —— 那时它已经在这条 DSH 会话的上下文里了。
     const initialPromptText = reason === 'bootstrap' ? formatInitialPromptV2(key) : '';
     const initialPromptLine = initialPromptText ? `${initialPromptText}\n\n` : '';
-    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + crossLine + wakeLine + memoryLine + participationLine + preSleepLine;
+    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + diaryLine + recallHintLine + proactiveLine + stickerLine + replyLine + statusLine + crossLine + wakeLine + memoryLine + participationLine + preSleepLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }

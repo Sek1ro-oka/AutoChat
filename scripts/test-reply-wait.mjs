@@ -295,6 +295,28 @@ test('a fast-lane wake prompt tells the model to send first, a slow-lane one sti
   assert.doesNotMatch(slow, /快车道/);
 }));
 
+test('the wake prompt teaches the diary tools, and drops the block when they are off', () => fixture(async ({ h, key }) => {
+  const on = h.buildWakePromptV2(key, 'question');
+  assert.match(on, /【日记】/, 'the model only ever wrote diaries, never read them: the prompt has to say how');
+  assert.match(on, /qq_diary_list/);
+  assert.match(on, /qq_diary_read/);
+
+  h.cfg.socialV2.tools.diary = false;
+  const off = h.buildWakePromptV2(key, 'question');
+  assert.doesNotMatch(off, /【日记】/, 'a disabled diary must not be advertised');
+}));
+
+test('a message asking about the past gets a diary recall cue, plain chatter does not', () => fixture(async ({ h, key, append }) => {
+  append('你还记得上次说要一起去看的那部片子吗');
+  const past = h.buildWakePromptV2(key, 'question');
+  assert.match(past, /【回忆线索】/);
+  assert.match(past, /qq_diary_list/);
+
+  h.appendSocialV2Message(key, 'fixture-person', '今天午饭吃啥', '今天午饭吃啥', false, false, `fixture-${h.getSocialV2State(key).lastUnreadSeq + 1}`, [], '789', []);
+  const now = h.buildWakePromptV2(key, 'question');
+  assert.doesNotMatch(now, /【回忆线索】/);
+}));
+
 test('an oversized session is retired before the next wake, a small one is left alone', () => fixture(async ({ h, key }) => {
   h.cfg.socialV2.context.maxSessionTokens = 1000;
   h.state.sessions[key] = 'session-fat';
