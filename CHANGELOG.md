@@ -11,7 +11,8 @@
 - 快车道判定（`src/bridge.js`）：`isFastLaneKeyV2`（`private:` 前缀）／`fastLaneActiveV2`（私聊，或 2 分钟内 `atSelf` / `quoteTargetIsSelf` 的未读）／`fastWakeV2`（再叠加 `wakePriorityV2(reason) >= 90`，即 `private` / `atMention`）。
 - 新配置：`socialV2.wake.fastBatchWindowMs`（默认 **800ms**，下限 200）与 `socialV2.wait.fastQuietMs`（默认 **1200ms**，下限 300）。合批取 `Math.min(batchWindowMs, fastBatchWindowMs)`，模型自己调小合批依然生效；快车道的静默**直接**取 `fastQuietMs`，不再采用 `suggestQuietMsV2` 的 6~12 秒建议值——否则提示词里写的「还差 N 秒」和实际行为对不上。
 - **慢车道原样保留**：普通群聊（概率 / 关键词 / 名字 / 提问唤醒）仍是 8 秒合批 + 8 秒静默下限。那两个窗口是防抢话用的，不该为了快而在别人聊天时插嘴；只有「有人正在直接问我们」才走快车道。
-- 提示词同步：`replyTimingV2(key, st)` 增 `key` 参数，快车道下 `quietMs` 就是 `fastQuietMs`，`/api/socialV2/wait` 与 prompt 里 `replyTiming` 两处口径一致。
+- 提示词同步：`replyTimingV2(key, st)` 增 `key` 参数并返回 `fastLane`，快车道下 `quietMs` 就是 `fastQuietMs`，`/api/socialV2/wait` 与 prompt 里 `replyTiming` 两处口径一致。
+- 快车道的【首回复节奏】换成另一段话术（`replyLine`）：不再给「还差约 N 秒静默」的倒计时，而是写明「最后一条消息已经过去 N 秒，正常情况下直接 `qq_send_message`，**不要再调 `qq_wait_for_messages`**；只有对方明显话没说完才 wait」。理由：模型每多调一次工具就多一整步（实测一步约 2 秒），而这 2 秒恰好卡在 5 秒预算里；慢车道保留原话术。
 - 日志：`[reserved2] 计划唤醒 <key>（<reason>）［快车道］，800ms 后发送`（毫秒级窗口不再被 `Math.round(ms/1000)` 显示成 `1s`）；wait 走快车道时按会话 **10 分钟一条**记 `快车道 <key>：静默下限 1200ms（慢车道 8000ms）`，避免变成新的日志噪声（`bridge.log` 已有 57% 是同一行的远未来潜水定时器续期）。
 - 回归：`scripts/test-reply-wait.mjs` 10 → **15** 条（@ 走快车道且 `quietMs` 等于 fast floor、普通群聊仍走慢车道并超时、车道判定表、**合批 300ms 与 8000ms 的真计时**）；`scripts/audit-bridge-harness.mjs` 增导出 `scheduleWakeV2 / cancelReplyCheckV2 / isFastLaneKeyV2 / fastLaneActiveV2 / fastWakeV2 / fastQuietMsV2 / fastBatchWindowMsV2`；`scripts/test-device-wiring.mjs` 的切片锚点由 `'replyTiming: replyTimingV2(st),'` 放宽为 `'replyTiming: replyTimingV2('`（签名变了，锚点跟着放宽，免得下次改签名又假红）。
 

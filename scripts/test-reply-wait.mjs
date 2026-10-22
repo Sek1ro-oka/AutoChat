@@ -253,6 +253,20 @@ test('lane selection: private, @, quote and high-priority wakes are fast; idle g
   assert.equal(h.fastWakeV2('group:456', { unread: [] }, 'keyword:在吗'), false);
 }));
 
+test('a fast-lane wake prompt tells the model to send first, a slow-lane one still counts the quiet window', () => fixture(async ({ h, key, st, append }) => {
+  append('@小鲸鱼 在吗', { atSelf: true });
+  const fast = h.buildWakePromptV2(key, 'atMention');
+  assert.match(fast, /快车道/);
+  assert.match(fast, /不要再调 qq_wait_for_messages/);
+  assert.doesNotMatch(fast, /还差约/, 'the fast lane must not hand the model a countdown it no longer needs');
+
+  st.unread = [];
+  append('今天有点热');
+  const slow = h.buildWakePromptV2(key, 'anyMessage');
+  assert.match(slow, /还差约/, 'the slow lane keeps the quiet countdown');
+  assert.doesNotMatch(slow, /快车道/);
+}));
+
 const WAKE_CFG = { preSleepWaitEnabled: true, preSleepWaitMs: 300000, batchWindowMs: 8000, fastBatchWindowMs: 300 };
 
 test('a wake aimed at us skips the 8s batching window and reaches DSH at once', () => fixture(async ({ h, key }) => {
