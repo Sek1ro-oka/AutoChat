@@ -214,7 +214,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     maybeRotateOversizedSessionV2, sessionCtxTokens, recordSessionUsage, retireSession,
     // 互通组「不是串线」（2026-10-22）：跨会话发送的出处 + 提示词里的说明行。
     // crossSendSourceV2 定义在 startConsoleServer 内部，导出不到 main 作用域，故不列。
-    buildCrossGroupLineV2, crossSessionLabelV2,
+    buildCrossGroupLineV2, buildCrossLedgerLineV2, crossSessionLabelV2,
     settingFromDshNamespace, selfIdentityTextV2, buildWakeReminderPromptV2,
     getMode() { return currentMode; },
     setSelfIdentity(display, id) {

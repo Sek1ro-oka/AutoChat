@@ -286,8 +286,8 @@ check('注入后记账 crossHintTs/crossHintWake 并落盘',
   hintFn.includes('st.crossHintTs = lastAt || Date.now();')
   && hintFn.includes('st.crossHintWake = wakeSeq;')
   && hintFn.includes('saveSocialV2State();'));
-check('crossLine 插在 statusLine 之后、wakeLine 之前（互通组说明紧随其后）',
-  bridge.includes('statusLine + crossLine + crossGroupLine + wakeLine'));
+check('crossLine 插在 statusLine 之后、wakeLine 之前（互通组说明与组内近况紧随其后）',
+  bridge.includes('statusLine + crossLine + crossGroupLine + crossLedgerLine + wakeLine'));
 check('每次真实唤醒 wakeSeq +1',
   bridge.includes('st.wakeSeq = (Number(st.wakeSeq) || 0) + 1;'));
 

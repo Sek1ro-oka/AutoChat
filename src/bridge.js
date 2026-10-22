@@ -3978,6 +3978,9 @@ async function main() {
       rememberAgentToken(key, st.agentToken);
       st.bootstrapSent = false;
       st.modelSeenSeqs = new Set();
+      // 会话重建 = 这条窗口的记忆清零。标记一下，下一次唤醒会给它补一段
+      // 【组内近况·接续】（同组最近的对话），别让「刚聊完就装不认识」发生。
+      st.resumeAfterRotationAt = Date.now();
     }
     saveState();
     saveSocialV2State();
@@ -10278,7 +10281,12 @@ async function main() {
           // 那正好把用户要的 5 秒变成 12 秒。真在分段打字的话，工具会返回「又来了新消息」，
           // 模型可以再等一轮，比一律先压 12 秒更划算。
           const suggestedQuietMs = fastLane ? quietFloorMs : Math.max(suggestQuietMsV2(st), quietFloorMs);
-          const rawQuietMs = body.quietMs != null ? Number(body.quietMs) : suggestedQuietMs;
+          // 快车道**不允许调用方把静默调大**：模型习惯传 quietMs=12000（旧慢车道口径），
+          // 那会直接把我们压到 1 秒的目标打回 12 秒（2026-10-22 实测私聊里它一直这么传）。
+          // 慢车道保持原语义：传多大就等多大（最多到 maxQuietMs）。
+          const rawQuietMs = body.quietMs != null
+            ? (fastLane ? Math.min(Number(body.quietMs) || 0, quietFloorMs) : Number(body.quietMs))
+            : suggestedQuietMs;
           // 收到新消息后至少再等 quietFloorMs（快车道 1.2 秒 / 慢车道 8~10 秒），防止抢话；
           // 即使 AI 传了 quietMs=0，也会被抬升到这一下限。
           // 同时给 quietMs 加上限（默认 60 秒；2026-10-21 从 120 秒收紧，配合「稍微快一点」的节奏要求），
@@ -15244,6 +15252,71 @@ async function main() {
     return `${lines.join('\n')}\n\n`;
   }
 
+  /**
+   * 组内近况：把同组其它会话最近的对话摊在眼前。
+   *
+   * 为什么要（2026-10-22）：互通组里两个窗口各有各的上下文，A 说的话 B 只在
+   * 「未读 N 条」里知道数字。用户不想为此真的合并成一个对话窗口（会串行、会
+   * 把私聊内容灌进群上下文），那就改成「共享账本」：直接读同组的跨会话缓冲
+   * （`crossStore`，本来就是按会话落 ndjson 的），挑最近的几条渲染成一段。
+   *
+   * 顺带解决「会话退役重建就失忆」：重建后 `resumeAfterRotationAt` 被置上，
+   * 这一次唤醒把窗口和条数放大 4 倍，等于自动补课（`crossStore` 是落盘的，
+   * 不随 DSH 会话退役而丢）。
+   */
+  function buildCrossLedgerLineV2(key, st) {
+    const groups = cfg.socialV2?.cross?.groups ?? {};
+    if (cfg.socialV2?.cross?.enabled === false) return '';
+    const gid = groupOf(groups, key);
+    if (!Number.isSafeInteger(gid) || gid <= 0) return '';
+    const resumeAt = Number(st?.resumeAfterRotationAt) || 0;
+    const boosted = resumeAt > 0 && Date.now() - resumeAt < 30 * 60_000;
+    const perKey = Math.max(0, Number(cfg.socialV2?.cross?.ledgerPerKey ?? 3)) * (boosted ? 4 : 1);
+    const hours = Math.max(0, Number(cfg.socialV2?.cross?.ledgerHours ?? 6)) * (boosted ? 4 : 1);
+    const maxChars = Math.max(0, Number(cfg.socialV2?.cross?.ledgerMaxChars ?? 1200)) * (boosted ? 2 : 1);
+    if (perKey <= 0 || hours <= 0 || maxChars <= 0) return '';
+    const since = Date.now() - hours * 3600_000;
+    const identityState = identityStateNow();
+    const rows = [];
+    for (const other of membersOf(groups, gid)) {
+      if (!other || other === key) continue;
+      loadCrossChannel(other);
+      const entries = crossStore.conversations[other]?.entries ?? [];
+      const slice = entries.filter((e) => Number(e?.ts) >= since).slice(-perKey);
+      if (!slice.length) continue;
+      const label = crossSessionLabelV2(other);
+      for (const e of slice) {
+        const text = String(e?.text ?? '').replace(/\s+/g, ' ').trim();
+        if (!text) continue;
+        rows.push({
+          ts: Number(e?.ts) || 0,
+          label,
+          from: e?.isSelf ? '我' : (String(e?.from ?? '').trim() || '对方'),
+          text
+        });
+      }
+    }
+    if (!rows.length) return '';
+    rows.sort((a, b) => a.ts - b.ts);
+    // 从最新往回装，装到字数上限为止；再翻回正序输出（模型读起来是「刚才发生了什么」）。
+    const picked = [];
+    let used = 0;
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      const row = rows[i];
+      const clock = new Date(row.ts).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' });
+      const line = `- ${clock}｜${row.label}｜${row.from}：${row.text.slice(0, 120)}`;
+      if (used + line.length > maxChars) break;
+      used += line.length + 1;
+      picked.push(line);
+    }
+    if (!picked.length) return '';
+    picked.reverse();
+    const head = boosted
+      ? `【组内近况·接续】你上一次的会话因为太长被重建了，下面是你不在的这个窗口里同组聊过的事（按时间正序，可以直接接着聊，别再问「刚才聊了什么」）：`
+      : '【组内近况】同组其它窗口最近聊到的（按时间正序；更早的用 qq_recall 查，别问对方「我们刚才聊了什么」）：';
+    return `${head}\n${picked.join('\n')}\n\n`;
+  }
+
   function buildWakePromptV2(key, reason) {
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
@@ -15294,6 +15367,7 @@ async function main() {
     const crossLine = buildCrossHintLineV2(key, st);
     // 「互通组」：同组会话之间的"串台"是设计，不是故障（2026-10-22 实测模型误判现场）。
     const crossGroupLine = buildCrossGroupLineV2(key, st);
+    const crossLedgerLine = buildCrossLedgerLineV2(key, st);
     const wc = st.wakeConfig || {};
     const wcTr = wc.triggers || {};
     const wcMode = wc.mode === 'active' ? '活跃' : '潜水';
@@ -15313,7 +15387,7 @@ async function main() {
     // 后续唤醒不再带它 —— 那时它已经在这条 DSH 会话的上下文里了。
     const initialPromptText = reason === 'bootstrap' ? formatInitialPromptV2(key) : '';
     const initialPromptLine = initialPromptText ? `${initialPromptText}\n\n` : '';
-    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + diaryLine + recallHintLine + proactiveLine + stickerLine + replyLine + statusLine + crossLine + crossGroupLine + wakeLine + memoryLine + participationLine + preSleepLine;
+    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + diaryLine + recallHintLine + proactiveLine + stickerLine + replyLine + statusLine + crossLine + crossGroupLine + crossLedgerLine + wakeLine + memoryLine + participationLine + preSleepLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }

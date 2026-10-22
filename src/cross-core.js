@@ -36,7 +36,13 @@ export const CROSS_DEFAULTS = Object.freeze({
   recentHours: 2,
   // T-021：qq_recall 的限流旋钮，控制台可改。0 次 = 不限次数（显式写 0 才算）。
   recallWindowMs: 5 * 60 * 1000,
-  recallMaxPerWindow: 3
+  recallMaxPerWindow: 3,
+  // 2026-10-22：组内近况（共享账本）。同组每个会话各取最近 ledgerPerKey 条、只看
+  // ledgerHours 小时内的，整段不超过 ledgerMaxChars 字。0 都表示关掉这一段。
+  // 唤醒提示词里它排在【互通组】后面——先把「为什么会有别处的记忆」说清，再给料。
+  ledgerPerKey: 3,
+  ledgerHours: 6,
+  ledgerMaxChars: 1200
 });
 
 /**
@@ -52,7 +58,11 @@ export const CROSS_LIMITS = Object.freeze({
   recentPerKey: Object.freeze([0, 20]),
   recentHours: Object.freeze([0, 72]),
   recallWindowMs: Object.freeze([60 * 1000, 60 * 60 * 1000]),
-  recallMaxPerWindow: Object.freeze([0, 100])
+  recallMaxPerWindow: Object.freeze([0, 100]),
+  // 组内近况（共享账本）：perKey 0（关）–20；hours 0（关）–72；字数 200–8000。
+  ledgerPerKey: Object.freeze([0, 20]),
+  ledgerHours: Object.freeze([0, 72]),
+  ledgerMaxChars: Object.freeze([200, 8000])
 });
 
 // 会话 key 的唯一合法形态（与 src/diary-store.js:15-23、social-v2.json 的 conversations 一致）。
@@ -228,6 +238,13 @@ export function normalizeCrossConfig(raw) {
       source.recallMaxPerWindow,
       CROSS_DEFAULTS.recallMaxPerWindow,
       CROSS_LIMITS.recallMaxPerWindow
+    ),
+    ledgerPerKey: clampIntTo(source.ledgerPerKey, CROSS_DEFAULTS.ledgerPerKey, CROSS_LIMITS.ledgerPerKey),
+    ledgerHours: clampIntTo(source.ledgerHours, CROSS_DEFAULTS.ledgerHours, CROSS_LIMITS.ledgerHours),
+    ledgerMaxChars: clampIntTo(
+      source.ledgerMaxChars,
+      CROSS_DEFAULTS.ledgerMaxChars,
+      CROSS_LIMITS.ledgerMaxChars
     ),
     groups
   };

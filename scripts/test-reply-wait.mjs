@@ -395,3 +395,46 @@ test('a self-sent message carries no origin tag, so normal sends look unchanged'
   assert.equal(last.via, undefined);
   assert.equal(last.viaLabel, undefined);
 }, CROSS_CFG));
+// B/C（2026-10-22）：用户不想为了「别再说串线」把两个会话并成一个窗口（会串行、
+// 会把私聊内容灌进群上下文）。改成共享账本：唤醒提示词直接带上同组最近的对话，
+// 会话退役重建后还自动放大窗口补一次课。
+
+test('the ledger hands us what the sibling chat said, so neither window has to guess', () => fixture(async ({ h, key, st }) => {
+  h.appendSocialV2Message('private:789', '无一', '群里的题我替你答了', '群里的题我替你答了', false, false, 'm-ledger-1', [], '789', []);
+  const line = h.buildCrossLedgerLineV2(key, st);
+  assert.match(line, /【组内近况】/);
+  assert.match(line, /替你答了/, 'the sibling message text must be readable here');
+  assert.match(line, /无一/);
+  assert.match(h.buildWakePromptV2(key, 'question'), /【组内近况】/, 'the wake prompt must carry it');
+}, CROSS_CFG));
+
+test('cross.ledgerPerKey = 0 turns the shared ledger off', () => fixture(async ({ h, key, st }) => {
+  h.appendSocialV2Message('private:789', '无一', '随便说一句', '随便说一句', false, false, 'm-ledger-2', [], '789', []);
+  assert.equal(h.buildCrossLedgerLineV2(key, st), '');
+  assert.doesNotMatch(h.buildWakePromptV2(key, 'question'), /【组内近况】/);
+}, { cross: { enabled: true, groups: { 'group:456': 1, 'private:789': 1 }, ledgerPerKey: 0 } }));
+
+test('a rebuilt session gets a catch-up block with wider limits', () => fixture(async ({ h, key, st }) => {
+  for (let i = 0; i < 12; i += 1) {
+    const text = `第 ${i} 条：聊的是第 ${i} 个话题`;
+    h.appendSocialV2Message('private:789', '无一', text, text, false, false, `m-cap-${i}`, [], '789', []);
+  }
+  // 会话因太长被退役 —— 这一步会让窗口失忆，所以下一次唤醒要补课。
+  h.cfg.socialV2.context.maxSessionTokens = 1000;
+  h.state.sessions[key] = 'session-fat';
+  h.sessionCtxTokens.set('session-fat', 390000);
+  assert.equal(h.maybeRotateOversizedSessionV2(key).rotated, true);
+  assert.ok(st.resumeAfterRotationAt > 0, 'retiring a session must leave a resume marker');
+
+  const line = h.buildCrossLedgerLineV2(key, st);
+  assert.match(line, /【组内近况·接续】/);
+  assert.match(line, /第 11 条/, 'the boosted window must reach further back than the steady-state one');
+}, CROSS_CFG));
+test('the fast lane caps a model-supplied quietMs instead of letting it rebuild the 12s wait', () => fixture(async ({ h, st, request }) => {
+  // 实测：模型习惯性传 quietMs=12000（旧慢车道口径），以前会把 800ms 的快车道直接打回 12s。
+  st.lastIncomingAt = Date.now() - 100;
+  const result = await request('wait', { purpose: 'reply', timeoutMs: 4000, quietMs: 12000 });
+  assert.equal(result.status, 200);
+  assert.equal(result.data.quietMs, 400, 'the fast floor must clamp a bigger request, not the other way round');
+  assert.ok(result.data.waitedMs < 1600);
+}, { wait: FAST_LANE_WAIT }));
