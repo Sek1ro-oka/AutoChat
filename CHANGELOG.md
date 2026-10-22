@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+### 回复即已读：发完话就把「看过的那几条」从 unread 里划掉（2026-10-22）
+
+- 起因（实测）：模型经常回完话忘了调 `qq_mark_read`，`group:119212385` 攒了 8 条、`private:3189435602` 攒了 4 条「已回复但仍算未读」。下一轮唤醒又把它们当新消息塞进 prompt——既费 token，也可能让它把同一件事答两遍。
+- `recordSentMessagesV2` 末尾新增 `acknowledgeShownUnreadV2(st)`：把水位推进到 `readThroughSeqV2(st)` 并丢掉对应 unread。**口径与 `qq_mark_read` 完全一致**——只推进到真正展示给模型看过的 seq（或被 `unreadLimit` 挤出去、再也不可能展示的前缀），没看过的一条都不动；`modelSeenSeqs` 里超过水位的也一并清掉。
+- 不变量保持不变（`test-token-economy` 那条「没看过就不能被确认」的用例仍然绿）：发送本身不等于读过，只有「展示过 + 回了话」才确认。
+- 回归：`scripts/test-reply-wait.mjs` 30 → **32** 条（展示过的被确认、没展示的不跟着被吞；没看过就发送时水位不动）。
+- 踩坑记录：`st` 来自 vm realm，`st.unread.map(...)` 得到的是**另一个 realm 的 Array**，`assert.deepEqual` 会因原型不同而失败（内容明明一样）——跨 realm 比较改用 `JSON.stringify`。
+
 ### 组内近况：同组窗口共享「最近说了什么」，会话重建后自动补课（2026-10-22）
 
 - 背景：用户问「要不直接共享对话窗口」。评估后不合并窗口——共享会把私聊内容灌进群上下文、把并发变成串行、预填膨胀 3–4 倍（实测 39 万 token 时单步 6.2 秒，vs 9 万时 2.5 秒），刚做到的 5 秒目标会当场打穿。改成**共享账本**。

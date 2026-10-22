@@ -14857,7 +14857,31 @@ async function main() {
     st.preSleepWaitSatisfiedAt = 0;
     st.preSleepWaitObservedAt = 0;
     st.preSleepWaitAccumMs = 0;
+    // 回复即已读（见 acknowledgeShownUnreadV2）：只推进会到“展示过的水位”，
+    // 没给模型看过的消息一条都不动，所以与 mark-read 的口径完全一致。
+    acknowledgeShownUnreadV2(st);
     saveSocialV2State();
+  }
+
+  /**
+   * 回复即已读：把「已经展示给模型」的未读推进水位并丢掉。
+   *
+   * 为什么需要（2026-10-22 实测）：模型常常回完话就忘了调 `qq_mark_read`，于是
+   * `group:119212385` 攒了 8 条、`private:3189435602` 攒了 4 条「已回复但仍算未读」。
+   * 下一轮唤醒又把它们当新消息塞进 prompt：既费 token，也可能让它把同一件事答两遍。
+   *
+   * 安全边界与 mark-read 完全一致：只推进到 `readThroughSeqV2(st)`，也就是真正展示过的
+   * 那些 seq（或被 unreadLimit 挤出去、再也不可能展示的前缀）；没展示过的一条不动。
+   */
+  function acknowledgeShownUnreadV2(st) {
+    const through = readThroughSeqV2(st);
+    const current = Number.isSafeInteger(st.lastReadThroughSeq) ? st.lastReadThroughSeq : 0;
+    if (through <= current) return 0;
+    const before = st.unread.length;
+    st.unread = st.unread.filter((m) => !Number.isSafeInteger(m.seq) || m.seq > through);
+    st.lastReadThroughSeq = through;
+    st.modelSeenSeqs = new Set([...(st.modelSeenSeqs || [])].filter((seq) => seq > through));
+    return before - st.unread.length;
   }
 
   function readFeedbackEntries() {

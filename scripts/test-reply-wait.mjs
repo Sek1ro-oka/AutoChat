@@ -438,3 +438,22 @@ test('the fast lane caps a model-supplied quietMs instead of letting it rebuild 
   assert.equal(result.data.quietMs, 400, 'the fast floor must clamp a bigger request, not the other way round');
   assert.ok(result.data.waitedMs < 1600);
 }, { wait: FAST_LANE_WAIT }));
+// 回复即已读（2026-10-22）：模型常回完话忘了 mark_read，旧消息下一轮又被当新消息塞一遍。
+// 口径与 mark-read 一致：只推进到「展示过」的水位，没给模型看过的一条都不动。
+test('a reply acknowledges the unread it was shown, and only that', () => fixture(async ({ h, key, st, request, append }) => {
+  append('看过的那条');
+  await request('unread');                 // 展示给模型 → 水位可到 1
+  append('还没展示的那条');                 // 未展示 → 不能跟着被吞掉
+  assert.equal(st.unread.length, 2);
+
+  h.recordSentMessagesV2(key, ['回一句']);
+  assert.equal(st.lastReadThroughSeq, 1, 'only the shown message may be acknowledged');
+  assert.equal(JSON.stringify(st.unread.map((m) => m.seq)), '[2]', 'the unseen message must stay unread (vm-realm arrays cannot deepEqual host arrays)');
+}));
+
+test('a reply without a prior look does not acknowledge anything', () => fixture(async ({ h, key, st, append }) => {
+  append('没看过');
+  h.recordSentMessagesV2(key, ['主动说一句']);
+  assert.equal(st.lastReadThroughSeq, 0);
+  assert.equal(st.unread.length, 1, 'sending is not a licence to skip unread messages');
+}));
