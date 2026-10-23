@@ -6,6 +6,8 @@
 //   ⑧ reach_search 参数校验与 unavailable 语义 ⑨ 只读源码断言
 // 另加：三个解析器之外的两个解析器（parseBiliVideo / parseXhsNote / 小黑盒两个）、
 //       target 校验、reach_read、reach_status（断言不发请求）、工具注册与启用开关、node --check。
+// T-028 追加：小红书 ask 降级（成功 / 双失败 / 关闭开关 / 参数错误不降级 / 长 answer）
+//       与 T-027 审查残余（numeric status/code、空 error、heybox items、图片笔记、环境过滤、`--` 分隔）。
 //
 // 真实上游的样本照抄 work/agent-tasks/T-027/research.md 与本机实测输出（2026-10-23），
 // 包括 bili 前面那行 Python SSL 警告、小红书 `{field,value}` 字段对、小黑盒字段名。
@@ -21,6 +23,7 @@ import {
   failureOf,
   formatReadResult,
   formatSearchResult,
+  formatXhsAsk,
   normalizeBiliTarget,
   normalizeHeyboxTarget,
   normalizePlatform,
@@ -31,11 +34,13 @@ import {
   parseBiliVideo,
   parseHeyboxPost,
   parseHeyboxSearch,
+  parseXhsAsk,
   parseXhsNote,
   parseXhsSearch,
   PLATFORM_CHOICES,
   searchShape,
-  upstreamErrorText
+  upstreamErrorText,
+  XHS_ASK_PREFIX
 } from '../src/reach-core.js';
 import {
   childEnv,
@@ -121,6 +126,34 @@ const XHS_SEARCH_FAIL = JSON.stringify({
   error: { code: 'COMMAND_EXEC', message: 'Xiaohongshu in-site search failed: search_input_not_available', exitCode: 1 }
 });
 
+// 小红书 AI 问答（ask）的真实形状（2026-10-23 实测）：answer + sources。
+// 第一条 URL 故意 >300 字，用来钉住「URL ≤300」；sources 给 9 条，用来钉住「最多 5 条」。
+const XHS_ASK_STDOUT = JSON.stringify({
+  ok: true,
+  data: {
+    query: '咖啡',
+    answer: '挑选手冲咖啡豆，核心是看烘焙度和产区风味。\n\n- 前街耶加雪菲：茉莉花香、柑橘。',
+    source_count: 9,
+    source_total_text: 'ai总结82篇笔记生成',
+    sources: Array.from({ length: 9 }, (_, index) => ({
+      rank: index + 1,
+      type: 'note',
+      title: `咖啡笔记 ${index + 1}`,
+      author: `作者${index + 1}`,
+      url: index === 0
+        ? `https://www.xiaohongshu.com/explore/note0?${'x'.repeat(500)}`
+        : `https://www.xiaohongshu.com/explore/note${index + 1}`,
+      note_id: `note${index + 1}`,
+      quote: '这句话不该出现在降级话术里'
+    }))
+  }
+});
+const XHS_ASK_FAIL = JSON.stringify({
+  ok: false,
+  error: { code: 'TIMEOUT', message: 'ask timed out after 60s', exitCode: 75 }
+});
+const XHS_ASK_ANSWER_ONLY = JSON.stringify({ ok: true, data: { answer: '只有回答，没有来源' } });
+
 // ── 测试替身 ────────────────────────────────────────────────────────────────
 function fakeHeybox(overrides = {}) {
   return {
@@ -151,6 +184,22 @@ function recorder(stdout, code = 0) {
   const runCli = async (bin, argv, options) => {
     calls.push({ bin, argv, options });
     return { stdout, stderr: '', code };
+  };
+  runCli.calls = calls;
+  return runCli;
+}
+
+/**
+ * 按顺序返回不同结果的 runCli 桩（T-028 的「搜索失败 → ask」需要两次调用）。
+ * 队列见底后重复最后一项，这样意外的第三次调用也能被看见。
+ */
+function sequenceRecorder(responses) {
+  const queue = [...responses];
+  const calls = [];
+  const runCli = async (bin, argv, options) => {
+    calls.push({ bin, argv, options });
+    const next = queue.length > 1 ? queue.shift() : queue[queue.length - 1];
+    return typeof next === 'function' ? await next(bin, argv, options) : next;
   };
   runCli.calls = calls;
   return runCli;
@@ -507,7 +556,7 @@ console.log('## ⑭ 只读兜底（源码断言）');
   }
   ok(!/--execute/.test(toolsSource), 'reach-tools.js 里不出现 --execute（opencli 的写动作要它才生效）');
   ok(!/unfollow|draft|liked\b/.test(toolsSource), 'reach-tools.js 里没有关注/草稿等别的能力');
-  ok(/xiaohongshu', 'search'/.test(toolsSource) && /xiaohongshu', 'note'/.test(toolsSource), 'opencli 只调 search / note 两个读子命令');
+  ok(/xiaohongshu', 'search'/.test(toolsSource) && /xiaohongshu', 'note'/.test(toolsSource) && /xiaohongshu', 'ask'/.test(toolsSource), 'opencli 只调 search / note / ask 三个读子命令');
   ok(/'search', word, '--type', 'video', '-n'/.test(toolsSource), 'bili 只调 search 读接口');
   ok(/heyboxTools\.search|heyboxTools\.post/.test(toolsSource), '小黑盒只经 heybox-tools 的 search/post');
 
@@ -682,8 +731,344 @@ console.log('## ⑳ preset 提示词 / 文档口径（R-009）');
   ok(reachDoc.includes('captcha') && reachDoc.includes('验证码'), 'REACH.md 小黑盒现状写明验证码（不再声称一定有结果）');
 }
 
-// ── ㉑ node --check ─────────────────────────────────────────────────────────
-console.log('## ㉑ node --check 新增源文件');
+// ── ㉒ 小红书 ask 降级（T-028）──────────────────────────────────────────────
+console.log('## ㉒ 小红书 ask 降级（T-028）');
+{
+  const askRun = sequenceRecorder([
+    { stdout: XHS_SEARCH_FAIL, stderr: '', code: 1 },
+    { stdout: XHS_ASK_STDOUT, stderr: '', code: 0 }
+  ]);
+  const fallback = await makeTools({ runCli: askRun }).search({ platform: 'xhs', query: '咖啡', limit: 3 });
+  ok(fallback.ok === true && fallback.mode === 'ask_fallback', '搜索失败 + ask 成功 → mode=ask_fallback');
+  ok(fallback.count === 0 && fallback.items === undefined, 'count=0 且不返回 items（不是笔记列表）', `count=${fallback.count}`);
+  ok(fallback.text.startsWith(XHS_ASK_PREFIX), 'text 第一行是固定前缀');
+  ok(fallback.text.includes('挑选手冲咖啡豆'), '正文包含真实 answer');
+  ok(fallback.text.includes('ai总结82篇笔记生成'), '带上 AI 汇总说明');
+  ok(Array.isArray(fallback.sources) && fallback.sources.length === 5, 'sources 最多 5 条', `len=${fallback.sources?.length}`);
+  ok(fallback.sources.every((entry) => entry.url.length <= 300), '每条来源 URL ≤300 字', fallback.sources.map((entry) => entry.url.length).join(','));
+  ok(fallback.text.includes('参考来源') && fallback.text.includes('点开链接才是原笔记'), '来源区说明「不是笔记原文」');
+  ok(askRun.calls.length === 2, '只调用两次 CLI（search + ask）', `calls=${askRun.calls.length}`);
+  ok(!askRun.calls[1].argv.includes('--limit'), 'ask 不传 --limit（会 commander.unknownOption）', askRun.calls[1].argv.join(' '));
+  ok(askRun.calls[1].argv.join(' ') === 'xiaohongshu ask 咖啡 -f json', 'ask 参数形状正确', askRun.calls[1].argv.join(' '));
+  const searchLimitIndex = askRun.calls[0].argv.indexOf('--limit');
+  ok(searchLimitIndex >= 0 && askRun.calls[0].argv[searchLimitIndex + 1] === '8', 'xhs 搜索请求条数按 max(limit×2, 8) 抬到 8', askRun.calls[0].argv.join(' '));
+
+  // ask 也失败：error 同时带两条原因
+  const bothFail = sequenceRecorder([
+    { stdout: XHS_SEARCH_FAIL, stderr: '', code: 1 },
+    { stdout: XHS_ASK_FAIL, stderr: '', code: 75 }
+  ]);
+  const failed = await makeTools({ runCli: bothFail }).search({ platform: 'xhs', query: '咖啡' });
+  ok(failed.ok === false && failed.code === 'unavailable', 'ask 也失败 → unavailable');
+  ok(failed.error.includes('小红书 搜索失败：') && failed.error.includes('AI 问答也失败：'), 'error 同时带搜索与问答两条原因', failed.error);
+  ok(failed.error.includes('search_input_not_available') && failed.error.includes('ask timed out after 60s'), '两条原因都是原文');
+  ok(failed.reason === 'ask_fallback_failed', '带 reason=ask_fallback_failed');
+
+  // 显式关闭降级：行为回到 T-027，且不调 ask
+  const offRun = sequenceRecorder([
+    { stdout: XHS_SEARCH_FAIL, stderr: '', code: 1 },
+    { stdout: XHS_ASK_STDOUT, stderr: '', code: 0 }
+  ]);
+  const off = await makeTools({ runCli: offRun, reachConfig: { xhsAskFallback: false } }).search({ platform: 'xhs', query: '咖啡' });
+  ok(off.ok === false && off.code === 'unavailable' && off.error.includes('search_input_not_available'), 'xhsAskFallback:false → 直接 unavailable + 搜索原因');
+  ok(offRun.calls.length === 1, '关闭降级时不调 ask', `calls=${offRun.calls.length}`);
+
+  // 参数错误不降级（runCli 一次都不能被调）
+  const badQueryRun = sequenceRecorder([{ stdout: XHS_ASK_STDOUT, stderr: '', code: 0 }]);
+  const badQuery = await makeTools({ runCli: badQueryRun }).search({ platform: 'xhs', query: '   ' });
+  ok(badQuery.ok === false && badQuery.code === 'bad_query', 'bad_query 不触发降级');
+  ok(badQueryRun.calls.length === 0, 'bad_query 时 runner 调用 0 次', `calls=${badQueryRun.calls.length}`);
+
+  // ask 返回错误 JSON：必须走失败分支，不能当答案
+  const askErrorRun = sequenceRecorder([
+    { stdout: XHS_SEARCH_FAIL, stderr: '', code: 1 },
+    { stdout: XHS_ASK_FAIL, stderr: '', code: 75 }
+  ]);
+  const askError = await makeTools({ runCli: askErrorRun }).search({ platform: 'xhs', query: '咖啡' });
+  ok(askError.ok === false && askError.code === 'unavailable' && askError.text === undefined, 'ask 返回 ok:false 不被当成答案');
+
+  // 长 answer 截断
+  const longAsk = JSON.stringify({ ok: true, data: { answer: '长'.repeat(4500) } });
+  const longRun = sequenceRecorder([
+    { stdout: XHS_SEARCH_FAIL, stderr: '', code: 1 },
+    { stdout: longAsk, stderr: '', code: 0 }
+  ]);
+  const long = await makeTools({ runCli: longRun }).search({ platform: 'xhs', query: '咖啡' });
+  ok(long.ok === true && long.text.includes('AI 回答已截断，原文共 4500 字'), '长 answer 截断并标注');
+  ok(long.text.includes('长'.repeat(4000)) && !long.text.includes('长'.repeat(4001)), 'answer 正文截到 4000 字');
+
+  // S-001 行为级：有效的 xhs data + code:200（+ 成功 message）不能被判失败、不能走 ask
+  const code200Run = recorder(JSON.stringify({ ok: true, code: 200, message: 'parsed 3 notes', data: XHS_SEARCH_API.data }));
+  const code200 = await makeTools({ runCli: code200Run }).search({ platform: 'xhs', query: '咖啡' });
+  ok(code200.ok === true && code200.mode === 'search' && code200.count === 1, 'xhs 有效 data + code:200 + message parsed → mode=search');
+  ok(code200Run.calls.length === 1, 'code:200 的成功搜索只调 1 次（不降级）', `calls=${code200Run.calls.length}`);
+
+  // S-002 行为级：message 只有 search_input_not_available（ok:true）也要触发 ask
+  const siteMsgRun = sequenceRecorder([
+    { stdout: JSON.stringify({ ok: true, data: [], message: 'search_input_not_available' }), stderr: '', code: 0 },
+    { stdout: XHS_ASK_STDOUT, stderr: '', code: 0 }
+  ]);
+  const siteMsg = await makeTools({ runCli: siteMsgRun }).search({ platform: 'xhs', query: '咖啡' });
+  ok(siteMsg.ok === true && siteMsg.mode === 'ask_fallback' && siteMsgRun.calls.length === 2, 'message=search_input_not_available 也触发 ask 降级');
+}
+
+// ── ㉓ parseXhsAsk / formatXhsAsk（T-028）──────────────────────────────────
+console.log('## ㉓ parseXhsAsk / formatXhsAsk（T-028）');
+{
+  const parsed = parseXhsAsk(JSON.parse(XHS_ASK_STDOUT));
+  ok(parsed.answer.includes('手冲咖啡豆') && parsed.sourceCount === 9, '解析 answer / source_count');
+  ok(parsed.sources.length === 5 && parsed.sources[0].url.length <= 300, 'sources 截到 5 条且 URL ≤300', `len=${parsed.sources[0]?.url.length}`);
+  ok(parsed.sources[1].url === 'https://www.xiaohongshu.com/explore/note2', '短 URL 原样保留');
+  ok(parsed.sourceTotalText === 'ai总结82篇笔记生成', '带 source_total_text');
+  const text = formatXhsAsk(parsed);
+  ok(text.startsWith(XHS_ASK_PREFIX), 'formatXhsAsk 第一行是固定前缀');
+  ok(text.includes('ai总结82篇笔记生成') && text.includes('参考来源'), '话术带汇总说明与来源区');
+  ok(!text.includes('不该出现在'), '不把 quote 等内部字段带进话术');
+
+  const noSource = formatXhsAsk(parseXhsAsk(JSON.parse(XHS_ASK_ANSWER_ONLY)));
+  ok(noSource.includes('只有回答，没有来源') && !noSource.includes('参考来源'), '无来源时不编来源');
+  const empty = formatXhsAsk({ answer: '' });
+  ok(empty.includes('没有返回可读的正文'), '空 answer 如实说明');
+  const emptyAnswer = await makeTools({
+    runCli: sequenceRecorder([
+      { stdout: XHS_SEARCH_FAIL, stderr: '', code: 1 },
+      { stdout: JSON.stringify({ ok: true, data: { answer: '   ' } }), stderr: '', code: 0 }
+    ])
+  }).search({ platform: 'xhs', query: '咖啡' });
+  ok(emptyAnswer.ok === false && emptyAnswer.code === 'unavailable' && emptyAnswer.error.includes('没有可读的 answer'), 'ask 无 answer → 降级失败（不返回空话术）');
+}
+
+// ── ㉔ 失败判定 / 形状 / 图片笔记（T-027 审查 P1）───────────────────────────
+console.log('## ㉔ 失败判定 / 形状 / 图片笔记（P1）');
+{
+  ok(failureOf({ status: 500 }).failed === true, 'numeric status:500 判失败');
+  ok(failureOf({ code: 75 }).failed === true, 'numeric code:75 判失败');
+  ok(failureOf({ code: 0, data: [] }).failed === false, 'numeric code:0 不判失败');
+  ok(failureOf({ message: 'TIMEOUT' }).failed === true, '只有 message:TIMEOUT 也判失败');
+  ok(failureOf({ message: 'CAPTCHA required' }).failed === true, 'message 命中 CAPTCHA 也判失败');
+  ok(failureOf({ message: 'Rate limit hit' }).failed === true, 'message 命中 rate limit 也判失败');
+  ok(failureOf({ message: 'author is unknown' }).failed === false, 'message 里的 author/unknown 不误判');
+  ok(failureOf({ ok: true, data: [], error: {} }).failed === false, '空 error 对象不判失败');
+  ok(failureOf({ ok: true, data: [], error: [] }).failed === false, '空 error 数组不判失败');
+  ok(failureOf({ ok: true, data: [], error: { code: 'TIMEOUT' } }).failed === true, '非空 error 仍判失败');
+  ok(failureOf({ error: {} }).failed === false, 'error:{} 单独出现也不判失败');
+  const statusFailure = failureOf({ status: 500 });
+  ok(statusFailure.text.includes('500'), 'status 失败文案带上 500', statusFailure.text);
+
+  // S-001 定向探针：成功载荷不能被判失败（尤其是 code:200/1 与成功 message）
+  ok(failureOf({ ok: true, data: [], code: 200 }).failed === false, 'ok:true + code:200 不判失败');
+  ok(failureOf({ ok: true, data: [], code: 1 }).failed === false, 'ok:true + code:1 不判失败');
+  ok(failureOf({ ok: true, data: [], error: { code: 0 } }).failed === false, 'error:{code:0} 不算错误内容');
+  ok(failureOf({ ok: true, data: [], error: { code: 'OK' } }).failed === false, 'error:{code:"OK"} 不算错误内容');
+  ok(failureOf({ ok: true, data: [], error: { message: '' } }).failed === false, 'error:{message:""} 不算错误内容');
+  ok(failureOf({ ok: true, data: [], error: { code: 'GARBAGE' } }).failed === false, 'error 里未知字符串 code 不判失败');
+  ok(failureOf({ ok: true, data: [], message: 'parsed 3 notes' }).failed === false, 'message:"parsed 3 notes" 不判失败');
+  ok(failureOf({ ok: true, data: [], message: 'TIMEOUT' }).failed === true, 'ok:true + 空 data + message:TIMEOUT 仍判失败（§7.1 #6）');
+  ok(failureOf({ code: 75, data: [] }).failed === true, 'numeric code:75 仍判失败');
+  ok(failureOf({ ok: true, data: [], message: 'search_input_not_available' }).failed === true, 'message=search_input_not_available 即使 ok:true 也判失败');
+  ok(failureOf({ ok: true, data: [], message: 'not_available' }).failed === false, '裸 not_available 不再判失败（避免 cover_not_available 误伤）');
+
+  // 小黑盒：{ok:true} 但 items 缺失 / 非数组 → unexpected_shape，不是「没有结果」
+  const noItems = await makeTools({ heybox: fakeHeybox({ search: async () => ({ ok: true, query: 'q' }) }) })
+    .search({ platform: 'heybox', query: '黑神话' });
+  ok(noItems.ok === false && noItems.code === 'unavailable' && noItems.reason === 'unexpected_shape', 'heybox {ok:true} 无 items → unexpected_shape', noItems.error);
+  const badItems = await makeTools({ heybox: fakeHeybox({ search: async () => ({ ok: true, items: 'nope' }) }) })
+    .search({ platform: 'heybox', query: '黑神话' });
+  ok(badItems.ok === false && badItems.reason === 'unexpected_shape', 'heybox items 非数组 → unexpected_shape');
+  const emptyItems = await makeTools({ heybox: fakeHeybox({ search: async () => ({ ok: true, items: [] }) }) })
+    .search({ platform: 'heybox', query: '黑神话' });
+  ok(emptyItems.ok === true && emptyItems.count === 0, 'heybox items:[] 仍是「没有结果」（不是失败）');
+
+  // 只有图片、没有正文的小红书笔记：ok:true + 「没有正文可取」
+  const imageOnlyJson = JSON.stringify({
+    ok: true,
+    data: {
+      note_id: '6ad882dc000000003101e722',
+      image_list: [{ url: 'https://img.example/a.jpg' }],
+      user: { nickname: '小禾' }
+    }
+  });
+  const imageOnly = await makeTools({ runCli: recorder(imageOnlyJson) }).read({ platform: 'xhs', target: '6ad882dc000000003101e722' });
+  ok(imageOnly.ok === true && imageOnly.text.includes('没有正文可取'), '只有图片没有正文 → ok:true + 没有正文可取', imageOnly.error);
+  const weirdXhs = await makeTools({ runCli: recorder(JSON.stringify({ ok: true, data: { weird: true } })) })
+    .read({ platform: 'xhs', target: '6ad882dc000000003101e722' });
+  ok(weirdXhs.ok === false && weirdXhs.reason === 'unexpected_shape', '认不出的笔记形状仍 → unexpected_shape');
+
+  // S-004：recognized 收紧——空壳 note / 未知 field 对不算认得出
+  ok(parseXhsNote({ ok: true, data: { note: {} } }).recognized === false, 'data:{note:{}} 不算 recognized');
+  ok(parseXhsNote({ ok: true, data: [{ field: 'code', value: 'x' }] }).recognized === false, '未知 field/value 对不算 recognized');
+  ok(parseXhsNote({ ok: true, data: [{ field: 'images', value: [{ url: 'x' }] }] }).recognized === true, '非空 images 字段对仍算 recognized');
+  const emptyNoteRead = await makeTools({ runCli: recorder(JSON.stringify({ ok: true, data: { note: {} } })) })
+    .read({ platform: 'xhs', target: '6ad882dc000000003101e722' });
+  ok(emptyNoteRead.ok === false && emptyNoteRead.reason === 'unexpected_shape', '空壳 note 走 → unexpected_shape');
+  const pairsCodeRead = await makeTools({ runCli: recorder(JSON.stringify({ ok: true, data: [{ field: 'code', value: 'x' }] })) })
+    .read({ platform: 'xhs', target: '6ad882dc000000003101e722' });
+  ok(pairsCodeRead.ok === false && pairsCodeRead.reason === 'unexpected_shape', '未知 field 对走 → unexpected_shape');
+}
+
+// ── ㉕ 安全 / 禁用 / 前导 -（T-027 审查 P2/P3）──────────────────────────────
+console.log('## ㉕ 安全 / 禁用 / 前导 -（P2/P3）');
+{
+  const env = childEnv({
+    PATH: 'x', KEEP_ME: '1',
+    MY_PASSWORD: 'p', MY_PASS: 'p', SESSION_COOKIE: 'c', GITHUB_AUTH: 'a', AUTH_TOKEN: 't',
+    MY_CREDENTIAL: 'c', SIGNING_SIGNATURE: 's', SSH_AUTH_SOCK: '/tmp/agent.sock'
+  });
+  ok(!('MY_PASSWORD' in env) && !('MY_PASS' in env) && !('SESSION_COOKIE' in env) && !('GITHUB_AUTH' in env), 'PASSWORD / PASS / COOKIE / AUTH 都不透传');
+  ok(!('MY_CREDENTIAL' in env) && !('SIGNING_SIGNATURE' in env), 'CREDENTIAL / SIGNATURE 也不透传');
+  ok(env.SSH_AUTH_SOCK === '/tmp/agent.sock', 'SSH_AUTH_SOCK 不被 /auth/i 误伤');
+  ok(env.KEEP_ME === '1', '普通变量仍保留');
+
+  ok(cmdUnsafeArgvError(['x'], 'C:\\Program Files (x86)\\opencli.exe') !== '', 'bin 路径含括号被拒');
+  ok(cmdUnsafeArgvError(['x'], 'C:\\tools\\bili.exe') === '', '正常 bin 路径放行');
+  ok(cmdUnsafeArgvError(['a&b'], '') !== '', 'argv 检查仍生效');
+
+  // bili.enabled=false：reach 不 spawn bili
+  const disabledRun = recorder(BILI_SEARCH_STDOUT);
+  const biliOffTools = createReachTools({
+    runCli: disabledRun,
+    heybox: fakeHeybox(),
+    readConfig: () => ({ reach: { enabled: true }, bili: { enabled: false } }),
+    exists: () => true
+  });
+  const biliOff = await biliOffTools.search({ platform: 'bili', query: '原神' });
+  ok(biliOff.ok === false && biliOff.code === 'unavailable' && biliOff.error.includes('bili.enabled'), 'bili.enabled=false → unavailable，不 spawn', biliOff.error);
+  ok(disabledRun.calls.length === 0, 'bili.enabled=false 时 runner 0 次调用', `calls=${disabledRun.calls.length}`);
+  const statusOff = await biliOffTools.status();
+  ok(statusOff.platforms.find((entry) => entry.platform === 'bili').available === false, 'status 也如实报 bili 不可用');
+  const readOff = await biliOffTools.read({ platform: 'bili', target: 'BV1Lonq6HEQ4' });
+  ok(readOff.ok === false && readOff.error.includes('bili.enabled') && disabledRun.calls.length === 0, 'read 也遵守 bili.enabled=false');
+
+  // 前导 - 的 query：用 -- 分隔，避免被 CLI 当成选项
+  const dashBiliRun = recorder(BILI_SEARCH_STDOUT);
+  await makeTools({ runCli: dashBiliRun }).search({ platform: 'bili', query: '-原神' });
+  const dashBiliArgs = dashBiliRun.calls[0].argv;
+  ok(dashBiliArgs.at(-2) === '--' && dashBiliArgs.at(-1) === '-原神', 'bili 前导 - query 用 -- 分隔', dashBiliArgs.join(' '));
+
+  const dashXhsRun = sequenceRecorder([
+    { stdout: XHS_SEARCH_FAIL, stderr: '', code: 1 },
+    { stdout: XHS_ASK_STDOUT, stderr: '', code: 0 }
+  ]);
+  await makeTools({ runCli: dashXhsRun }).search({ platform: 'xhs', query: '-咖啡' });
+  ok(dashXhsRun.calls[0].argv.at(-2) === '--' && dashXhsRun.calls[0].argv.at(-1) === '-咖啡', 'xhs search 前导 - 用 -- 分隔', dashXhsRun.calls[0].argv.join(' '));
+  ok(dashXhsRun.calls[1].argv.at(-2) === '--' && dashXhsRun.calls[1].argv.at(-1) === '-咖啡', 'xhs ask 前导 - 也用 -- 分隔', dashXhsRun.calls[1].argv.join(' '));
+  const dashHeybox = await makeTools().search({ platform: 'heybox', query: '-黑神话' });
+  ok(dashHeybox.ok === false && dashHeybox.code === 'bad_query' && dashHeybox.error.includes('不能以 - 开头'), 'heybox 前导 - 直接 bad_query（heybox-tools 无法插 --）', dashHeybox.error);
+
+  ok(normalizeReachConfig({}).xhsAskFallback === true, 'xhsAskFallback 默认 true');
+  ok(normalizeReachConfig({ xhsAskFallback: false }).xhsAskFallback === false, '显式 false 生效');
+  ok(normalizeReachConfig({ xhsAskFallback: 0 }).xhsAskFallback === true, '非 false 值不关（与 enabled 同口径）');
+
+  // 提示词 / 文档口径
+  const presetText = fs.readFileSync(path.join(ROOT, 'dsh', 'agent-presets', 'qq-chat-v2', 'agent.cordis.yml'), 'utf8');
+  ok(presetText.includes('ask_fallback') && presetText.includes('AI 汇总'), 'preset 说明 ask_fallback 是 AI 汇总');
+  const reachDoc = fs.readFileSync(path.join(ROOT, 'docs', 'guides', 'REACH.md'), 'utf8');
+  ok(reachDoc.includes('小红书：搜索坏了怎么办') && reachDoc.includes('xhsAskFallback') && reachDoc.includes('ask_fallback'), 'REACH.md 有降级小节与开关');
+}
+
+// ── ㉖ 失败判定决策表 v1.1（S-001 复审）──────────────────────────────────
+console.log('## ㉖ failureOf 决策表 v1.1 / §7.4 矩阵');
+{
+  const rows = [
+    ['§7.4-1 ok:true+data:[]+code:200', { ok: true, data: [], code: 200 }, false],
+    ['§7.4-2 ok:true+data:[]+code:1', { ok: true, data: [], code: 1 }, false],
+    ['§7.4-3 ok:true+data:[]+error:{code:0}', { ok: true, data: [], error: { code: 0 } }, false],
+    ['§7.4-4 ok:true+data:[]+error:{code:OK}', { ok: true, data: [], error: { code: 'OK' } }, false],
+    ['§7.4-5 ok:true+data:[]+error:{code:200,message:OK}', { ok: true, data: [], error: { code: 200, message: 'OK' } }, false],
+    ['§7.4-6 ok:true+data:[]+error:{message:OK}', { ok: true, data: [], error: { message: 'OK' } }, false],
+    ['§7.4-7 ok:true+data:[]+message:parsed 3 notes', { ok: true, data: [], message: 'parsed 3 notes' }, false],
+    ['§7.4-8 ok:true+data:[...]+message:cover_not_available', { ok: true, data: XHS_SEARCH_API.data, message: 'cover_not_available' }, false],
+    ['§7.4-9 ok:true+data:[...]+code:200+message:OK', { ok: true, data: XHS_SEARCH_API.data, code: 200, message: 'OK' }, false],
+    ['§7.4-10 ok:true+data:[]+message:search_input_not_available', { ok: true, data: [], message: 'search_input_not_available' }, true],
+    ['§7.4-11 ok:true+data:[]+code:75', { ok: true, data: [], code: 75 }, true],
+    ['§7.4-12 ok:false+error:{code:COMMAND_EXEC}', { ok: false, error: { code: 'COMMAND_EXEC' } }, true],
+    ['§7.4-13 ok:false+message:""', { ok: false, message: '' }, true]
+  ];
+  for (const [name, payload, expected] of rows) {
+    const actual = failureOf(payload).failed;
+    ok(actual === expected, name, `failed=${actual}`);
+  }
+
+  // 复审指定的 6 个探针（前 5 个必须 false，最后一个 true）
+  const probes = [
+    ['probe-1 error:{code:200,message:OK}', { ok: true, data: [], error: { code: 200, message: 'OK' } }, false],
+    ['probe-2 error:{code:OK,message:OK}', { error: { code: 'OK', message: 'OK' } }, false],
+    ['probe-3 error:{code:0,message:OK}', { error: { code: 0, message: 'OK' } }, false],
+    ['probe-4 error:{message:OK}', { error: { message: 'OK' } }, false],
+    ['probe-5 message:cover_not_available', { message: 'cover_not_available' }, false],
+    ['probe-6 message:search_input_not_available', { message: 'search_input_not_available' }, true]
+  ];
+  for (const [name, payload, expected] of probes) {
+    ok(failureOf(payload).failed === expected, name, `failed=${failureOf(payload).failed}`);
+  }
+  ok(failureOf({ ok: true, data: [], reason: 'search_input_not_available' }).failed === true, 'reason 里的 search_input_not_available 也生效');
+  ok(failureOf({ ok: true, data: [], hint: 'search_input_not_available' }).failed === true, 'hint 里的 search_input_not_available 也生效');
+
+  // 第 4 轮：error 字段的字符串/数字也走 codeKind
+  ok(failureOf({ ok: true, data: [], error: 'OK' }).failed === false, 'error:"OK" 不判失败');
+  ok(failureOf({ ok: true, data: [], error: '0' }).failed === false, 'error:"0" 不判失败');
+  ok(failureOf({ ok: true, data: [], error: 200 }).failed === false, 'error:200 不判失败');
+  ok(failureOf({ ok: true, data: [], error: 'boom' }).failed === true, 'error:"boom" 仍判失败（非空错误文本）');
+  ok(failureOf({ ok: true, data: [], error: 75 }).failed === true, 'error:75 判失败');
+
+  // 第 4 轮：data 的空结果对象也算空
+  ok(failureOf({ ok: true, data: { items: [] }, message: 'search_input_not_available' }).failed === true, 'data:{items:[]} 算空结果');
+  ok(failureOf({ ok: true, data: { notes: [] }, message: 'search_input_not_available' }).failed === true, 'data:{notes:[]} 算空结果');
+  ok(failureOf({ ok: true, data: { list: [] }, message: 'search_input_not_available' }).failed === true, 'data:{list:[]} 算空结果');
+  ok(failureOf({ ok: true, data: { items: [{ id: 1 }] }, message: 'search_input_not_available' }).failed === false, 'data:{items:[…非空]} 不算空结果');
+
+  // 行为级：三个 *_not_available 软短语都不能影响非空结果、不能走 ask
+  for (const phrase of ['cover_not_available', 'title_not_available', 'subtitle_not_available']) {
+    const run = recorder(JSON.stringify({ ok: true, data: XHS_SEARCH_API.data, message: phrase }));
+    const result = await makeTools({ runCli: run }).search({ platform: 'xhs', query: '咖啡' });
+    ok(result.ok === true && result.mode === 'search' && result.count === 1 && run.calls.length === 1,
+      `非空 data + ${phrase} → mode=search、runner 1 次`, `mode=${result.mode}, calls=${run.calls.length}`);
+  }
+
+  const codeOkRun = recorder(JSON.stringify({ ok: true, data: XHS_SEARCH_API.data, code: 200, message: 'OK' }));
+  const codeOk = await makeTools({ runCli: codeOkRun }).search({ platform: 'xhs', query: '咖啡' });
+  ok(codeOk.ok === true && codeOk.mode === 'search' && codeOk.count === 1 && codeOkRun.calls.length === 1,
+    '非空 data + code:200 + message:OK → mode=search、runner 1 次', `mode=${codeOk.mode}, calls=${codeOkRun.calls.length}`);
+
+  const siteOnlyRun = sequenceRecorder([
+    { stdout: JSON.stringify({ ok: true, data: [], message: 'search_input_not_available' }), stderr: '', code: 0 },
+    { stdout: XHS_ASK_STDOUT, stderr: '', code: 0 }
+  ]);
+  const siteOnly = await makeTools({ runCli: siteOnlyRun }).search({ platform: 'xhs', query: '咖啡' });
+  ok(siteOnly.ok === true && siteOnly.mode === 'ask_fallback' && siteOnlyRun.calls.length === 2,
+    '空 data + 仅 message:search_input_not_available → ask_fallback、runner 2 次',
+    `mode=${siteOnly.mode}, calls=${siteOnlyRun.calls.length}`);
+
+  // 第 4 轮：空结果对象 data:{items:[]} 也要触发降级
+  const emptyObjRun = sequenceRecorder([
+    { stdout: JSON.stringify({ ok: true, data: { items: [] }, message: 'search_input_not_available' }), stderr: '', code: 0 },
+    { stdout: XHS_ASK_STDOUT, stderr: '', code: 0 }
+  ]);
+  const emptyObj = await makeTools({ runCli: emptyObjRun }).search({ platform: 'xhs', query: '咖啡' });
+  ok(emptyObj.ok === true && emptyObj.mode === 'ask_fallback' && emptyObjRun.calls.length === 2,
+    'data:{items:[]} + search_input_not_available → ask_fallback、runner 2 次',
+    `mode=${emptyObj.mode}, calls=${emptyObjRun.calls.length}`);
+
+  // 空 data + 软短语（非 search_input_not_available）不能触发降级
+  const emptyCoverRun = recorder(JSON.stringify({ ok: true, data: [], message: 'cover_not_available' }));
+  const emptyCover = await makeTools({ runCli: emptyCoverRun }).search({ platform: 'xhs', query: '咖啡' });
+  ok(emptyCover.ok === true && emptyCover.mode === 'search' && emptyCover.count === 0 && emptyCoverRun.calls.length === 1,
+    '空 data + cover_not_available → 仍是「没有结果」、不调 ask',
+    `mode=${emptyCover.mode}, calls=${emptyCoverRun.calls.length}`);
+
+  // §7.3 条件 2 独立于 failureOf：成功码 veto 下，空 data + search_input_not_available 仍要降级
+  const codeSiteRun = sequenceRecorder([
+    { stdout: JSON.stringify({ ok: true, data: [], code: 200, message: 'search_input_not_available' }), stderr: '', code: 0 },
+    { stdout: XHS_ASK_STDOUT, stderr: '', code: 0 }
+  ]);
+  const codeSite = await makeTools({ runCli: codeSiteRun }).search({ platform: 'xhs', query: '咖啡' });
+  ok(codeSite.ok === true && codeSite.mode === 'ask_fallback' && codeSiteRun.calls.length === 2,
+    '空 data + code:200 + message:search_input_not_available → §7.3 条件 2 仍降级',
+    `mode=${codeSite.mode}, calls=${codeSiteRun.calls.length}`);
+}
+
+// ── ㉗ node --check ─────────────────────────────────────────────────────────
+console.log('## ㉗ node --check 新增源文件');
 {
   for (const file of ['src/reach-core.js', 'src/reach-tools.js']) {
     const result = spawnSync(process.execPath, ['--check', path.join(ROOT, file)], { cwd: ROOT, encoding: 'utf8' });

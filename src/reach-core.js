@@ -56,6 +56,17 @@ export const URL_MAX = 300;
 export const ERROR_TEXT_MAX = 500;
 
 /**
+ * 小红书 AI 问答降级结果的固定前缀（T-028）。
+ *
+ * 这是**话术的一部分**，不是装饰：模型与群友都必须一眼看出「这不是笔记列表」。
+ * 改这句话等于改契约（单测 scripts/test-reach-tools.mjs 会逐字断言）。
+ */
+export const XHS_ASK_PREFIX = '【小红书·AI 问答（站内搜索当前不可用，已降级；这不是笔记列表，是小红书的 AI 汇总）】';
+
+/** 降级结果里最多列几条来源：AI 回答本身已经很长，来源只用来给出处。 */
+export const ASK_SOURCES_MAX = 5;
+
+/**
  * 已知的「失败码」：上游把错误放在 `code` 里而**不带** `ok:false` 时靠它兜住。
  * 取自三个 CLI 的真实输出（opencli 的 TIMEOUT / COMMAND_EXEC / ARGUMENT 等）。
  */
@@ -63,6 +74,15 @@ export const FAILURE_CODES = Object.freeze(new Set([
   'TIMEOUT', 'COMMAND_EXEC', 'ARGUMENT', 'AUTH', 'AUTH_REQUIRED', 'CAPTCHA',
   'RATE_LIMIT', 'NETWORK', 'PROTOCOL', 'PARSE', 'INTERNAL', 'UNKNOWN', 'ERROR', 'FAILED'
 ]));
+
+/**
+ * 数字错误码的白名单：只有 HTTP 风格（≥400）与明确约定的 sysexits 值才算失败。
+ *
+ * 为什么不能「非 0 即错」：`code: 200` / `code: 1` 在真实成功载荷里都出现过
+ * （T-028 审查 S-001 的定向探针），把成功判成失败会让有效搜索结果被丢掉、再走一次 ask。
+ * 75 = EX_TEMPFAIL，是 opencli 超时用过的退出码（见 T-027 research）。
+ */
+const NUMERIC_FAILURE_CODES = Object.freeze(new Set([75]));
 
 const BVID_RE = /^BV[0-9A-Za-z]{10}$/;
 // 控制字符 + 零宽/方向标记 + 行分隔符 + BOM：关键词里出现这些只会把参数弄脏。
@@ -95,6 +115,19 @@ export function truncateChars(value, max) {
   if (!Number.isFinite(max) || max <= 0) return { text: '', total: chars.length, truncated: chars.length > 0 };
   if (chars.length <= max) return { text, total: chars.length, truncated: false };
   return { text: `${chars.slice(0, max).join('')}…`, total: chars.length, truncated: true };
+}
+
+/**
+ * URL 的展示截断：保证**含省略号也不超过 URL_MAX 字**。
+ *
+ * 不能直接用 truncateChars(url, URL_MAX)：它会给出 max+1 个字（省略号另算），
+ * 而文档/契约写的是「每条 URL ≤300 字」。这里截到 299 再补一个 `…`。
+ */
+export function truncateUrl(value) {
+  const text = textOf(value);
+  const chars = [...text];
+  if (chars.length <= URL_MAX) return text;
+  return `${chars.slice(0, URL_MAX - 1).join('')}…`;
 }
 
 /**
@@ -183,6 +216,8 @@ export function normalizeReachConfig(raw) {
     enabled: source.enabled !== false,
     timeoutMs: clampInt(source.timeoutMs, 120000, 5000, 300000),
     maxResults: clampLimit(source.maxResults, LIMIT_DEFAULT),
+    // 小红书站内搜索坏掉时的降级开关：默认开，只有显式 false 才关（关掉后回到 T-027 的裸 unavailable）。
+    xhsAskFallback: source.xhsAskFallback !== false,
     biliBin: textOf(source.biliBin).trim(),
     opencliBin: textOf(source.opencliBin).trim(),
     xiaoheiheBin: textOf(source.xiaoheiheBin).trim()
@@ -225,7 +260,11 @@ export function upstreamErrorText(json) {
   if (!json || typeof json !== 'object') return '';
   const error = json.error && typeof json.error === 'object' ? json.error : {};
   const parts = [];
-  const code = firstText(error.code, json.code);
+  // `status` 也算一种「码」：HTTP 风格的 `{status:500}` 没有 code/message 时，
+  // 不把它带出来的话，模型只会看到「上游没有给出原因」。只认数字形态，别把 `status:'ok'` 当码。
+  const statusText = textOf(json.status).trim();
+  const status = typeof json.status === 'number' || /^\d+$/.test(statusText) ? json.status : '';
+  const code = firstText(error.code, json.code, status);
   const message = firstText(error.message, json.message, json.reason, json.hint);
   if (code !== '') parts.push(code);
   if (message !== '') parts.push(message);
@@ -235,26 +274,162 @@ export function upstreamErrorText(json) {
   return truncateChars(parts.join('：'), ERROR_TEXT_MAX).text;
 }
 
+const SUCCESS_CODE_TEXT_RE = /^(OK|0)$/i;
+
 /**
- * 这段上游 JSON 是不是**失败**。
+ * `code` 归类（§7.1 / §7.2）：成功码 / 失败码 / 未知。
  *
- * 踩过的坑：opencli 超时返回 `{"error":{"code":"TIMEOUT",…}}`（**没有** `ok:false`），
- * 只判 `ok === false` 会让它一路走到「解析出 0 条」→ 模型看到「没有结果」。
- * 失败与「搜不到」是两件事，这里必须宁可多报失败。
+ * 成功码：numeric 0 / 2xx、字符串 `'OK'` / `'0'`。
+ * 失败码：numeric ≥400 或 75、字符串 FAILURE_CODES 白名单及 `*_ERROR` / `ERROR` / `FAILED`。
+ * 其它（numeric 1、3xx、`'PARSE'` 之类）一律「未知」：单独出现不构成失败。
+ */
+function codeKind(value) {
+  if (value === null || value === undefined || value === '') return 'unknown';
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return 'unknown';
+    if (value === 0 || (value >= 200 && value < 300)) return 'success';
+    if (value >= 400 || NUMERIC_FAILURE_CODES.has(value)) return 'failure';
+    return 'unknown';
+  }
+  const text = textOf(value).trim();
+  if (text === '') return 'unknown';
+  if (SUCCESS_CODE_TEXT_RE.test(text)) return 'success';
+  const upper = text.toUpperCase();
+  if (FAILURE_CODES.has(upper) || /_ERROR$|^ERROR$|^FAILED$/.test(upper)) return 'failure';
+  return 'unknown';
+}
+
+/**
+ * 失败短语（§7.1 权威列表）：
+ * `TIMEOUT|timed out|CAPTCHA|验证码|RATE_LIMIT|too many requests|AUTH|unauthorized|forbidden|
+ * network|ECONN|ENOTFOUND|search_input_not_available`。
+ *
+ * 注意：**不含裸 `not_available`**——`cover_not_available` / `title_not_available` 是正常的
+ * 字段缺失提示，不能触发降级。`AUTH` 用负向先行断言，避免命中 `author`。
+ */
+const FAILURE_PHRASE_RE = /(TIMEOUT|timed\s+out|CAPTCHA|验证码|RATE[_\s-]?LIMIT|too many requests|AUTH(?![A-Za-z])|unauthorized|forbidden|network|ECONN|ENOTFOUND|search_input_not_available)/i;
+
+function messageOf(json) {
+  return firstText(json?.message, json?.reason, json?.hint);
+}
+
+/** 顶层 message / reason / hint 的所有非空文案（§7.1 #6 要求三者都看）。 */
+function messagesOf(json) {
+  return [json?.message, json?.reason, json?.hint]
+    .map((value) => textOf(value).trim())
+    .filter((value) => value !== '');
+}
+
+/**
+ * `data` 是否为空结果（§7.1 #6 与 §7.3 的「结果为空」）。
+ *
+ * 三种形态都算空：
+ *   · `data` 缺失 / null；
+ *   · `data` 是空数组；
+ *   · `data` 是对象，且它的 `items` / `notes` / `list` 中**存在**的列表全是空数组
+ *     （`{items:[]}`、`{notes:[]}`、`{list:[]}`；混合时只要有一个非空就不算空）。
+ * 最后一条是 S-002 的非阻断残余：xhs 的空结果对象不能被当成「有数据」而漏掉降级。
+ */
+function hasEmptyData(json) {
+  if (!json || typeof json !== 'object') return true;
+  const data = json.data;
+  if (data === undefined || data === null) return true;
+  if (Array.isArray(data)) return data.length === 0;
+  if (typeof data !== 'object') return false;
+  const listKeys = ['items', 'notes', 'list'];
+  const present = listKeys.filter((key) => Array.isArray(data[key]));
+  return present.length > 0 && present.every((key) => data[key].length === 0);
+}
+
+/**
+ * §7.3 条件 2：`data` 为空 **且** 顶层 `message`/`reason`/`hint` 精确包含
+ * `search_input_not_available`。`searchXhs` 专用，绝不碰非空结果。
+ */
+export function xhsSearchUnavailableByMessage(json) {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return false;
+  if (!hasEmptyData(json)) return false;
+  return messagesOf(json).some((message) => message.toLowerCase().includes('search_input_not_available'));
+}
+
+/**
+ * `error` 字段是否「有内容」（§7.2）。
+ *
+ * 空对象/空数组/空串/`0`/`false` → 无内容；`code` 是成功码 → **无内容**（message 再花哨也不算）；
+ * 否则 code 命中失败码，或 message 非空且命中失败短语 → 有内容。
+ */
+function hasErrorContent(value) {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (text === '') return false;
+    const kind = codeKind(text);
+    if (kind === 'success') return false;
+    if (kind === 'failure') return true;
+    // 非空错误文本（如 'boom'）本身就是内容；成功码文本已在上面否决。
+    return true;
+  }
+  if (typeof value === 'number') {
+    return codeKind(value) === 'failure';
+  }
+  if (typeof value === 'boolean') return value === true;
+  if (Array.isArray(value)) return value.some((entry) => hasErrorContent(entry));
+  if (typeof value !== 'object') return false;
+  const kind = codeKind(value.code ?? value.error_code);
+  if (kind === 'success') return false;
+  if (kind === 'failure') return true;
+  return messagesOf(value).some((message) => FAILURE_PHRASE_RE.test(message));
+}
+
+function failureResult(json, messageMatch) {
+  const error = json?.error && typeof json.error === 'object' && !Array.isArray(json.error) ? json.error : {};
+  const codeText = firstText(error.code ?? error.error_code, json?.code, json?.status);
+  return {
+    failed: true,
+    code: codeText || messageMatch?.[1]?.toUpperCase() || 'error',
+    text: truncateChars(upstreamErrorText(json) || textOf(json?.error) || messageOf(json) || '上游没有给出原因', ERROR_TEXT_MAX).text
+  };
+}
+
+/**
+ * 这段上游 JSON 是不是**失败**（§7.1 决策表，按优先级自上而下）。
+ *
+ * 原则：只信结构化信号；成功码一旦出现在 `code` 位置，就绝不因为 message 判失败。
+ * message/reason/hint 只在 `ok !== true` 或 `data` 为空时参与判断，且必须是失败短语。
  */
 export function failureOf(json) {
-  if (!json || typeof json !== 'object') return { failed: false };
-  const errorValue = json.error;
-  const hasErrorObject = errorValue && typeof errorValue === 'object';
-  const hasErrorString = typeof errorValue === 'string' && errorValue.trim() !== '';
-  const code = firstText(hasErrorObject ? errorValue.code : '', json.code, json.status);
-  const byCode = code !== '' && (FAILURE_CODES.has(code.toUpperCase()) || /_ERROR$|^ERROR$|^FAILED$/i.test(code));
-  if (json.ok === false || json.success === false || hasErrorObject || hasErrorString || byCode) {
-    return {
-      failed: true,
-      code: code || 'error',
-      text: truncateChars(upstreamErrorText(json) || textOf(errorValue) || '上游没有给出原因', ERROR_TEXT_MAX).text
-    };
+  // #1 非对象：交给上层按形状处理
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return { failed: false };
+  const messageMatch = messagesOf(json)
+    .map((value) => value.match(FAILURE_PHRASE_RE))
+    .find((match) => match !== null) ?? null;
+
+  // #2 ok/success 显式 false
+  if (json.ok === false || json.success === false) return failureResult(json, messageMatch);
+  // #3 error 是非空字符串：先认成功码文本（'OK'/'0'），其余非空文本一律算错
+  const errorValueKind = typeof json.error === 'string' || typeof json.error === 'number'
+    ? codeKind(json.error)
+    : 'unknown';
+  if (typeof json.error === 'string' && json.error.trim() !== '' && errorValueKind !== 'success') {
+    return failureResult(json, messageMatch);
+  }
+
+  const errorIsObject = json.error && typeof json.error === 'object' && !Array.isArray(json.error);
+  const errorKind = errorIsObject ? codeKind(json.error.code ?? json.error.error_code) : 'unknown';
+  const topKind = codeKind(json.code);
+
+  // #4 error 对象的结构化信号（成功码已在 hasErrorContent 内部被否决）
+  if (hasErrorContent(json.error)) return failureResult(json, messageMatch);
+  // #5 顶层 code 失败码
+  if (topKind === 'failure') return failureResult(json, messageMatch);
+  // status 是结构化信号（T-027 残余要求保留）：≥400 判失败
+  const statusRaw = json.status;
+  const statusNumber = statusRaw === null || statusRaw === undefined || statusRaw === '' ? Number.NaN : Number(statusRaw);
+  if (Number.isFinite(statusNumber) && statusNumber >= 400) return failureResult(json, messageMatch);
+  // 成功码 veto：成功码出现在任何 code/error 位置，就绝不因为 message 判失败
+  if (errorValueKind === 'success' || errorKind === 'success' || topKind === 'success') return { failed: false };
+  // #6 顶层 message 只在 ok !== true 或 data 为空时生效
+  if (messageMatch !== null && (json.ok !== true || hasEmptyData(json))) {
+    return failureResult(json, messageMatch);
   }
   return { failed: false };
 }
@@ -447,6 +622,31 @@ export function parseHeyboxSearch(result, limit = LIMIT_DEFAULT) {
 }
 
 /**
+ * 这个「笔记对象」里有没有任何能证明它确实是笔记的**实际内容**。
+ *
+ * 只用于区分「合法但只有图片/没有正文的笔记」与「上游返回了完全认不出的结构」：
+ * 前者应当 `ok:true` + 「没有正文可取」，后者才是 unexpected_shape。
+ * 所以不能只看「有没有 user / interact_info 这类空壳对象」——S-004 的反例里
+ * `data:{note:{}}` 就是空壳；必须至少有一个真实字段值、非空图片数组或 note_id。
+ */
+function looksLikeNote(note) {
+  if (!note || typeof note !== 'object') return false;
+  const hasValue = (value) => textOf(value).trim() !== '';
+  if (hasValue(note.note_id) || hasValue(note.noteId) || hasValue(note.id)) return true;
+  if (hasValue(note.title) || hasValue(note.display_title)) return true;
+  if (hasValue(note.desc) || hasValue(note.content) || hasValue(note.text)) return true;
+  if (hasValue(note.share_url)) return true;
+  return ['image_list', 'images', 'imageList'].some((key) => Array.isArray(note[key]) && note[key].length > 0);
+}
+
+/** 字段对数组形状的同一套收紧：只有真实字段值 / 非空图片数组才算认得出。 */
+function fieldPairsLooksLikeNote(pairs) {
+  const textFields = ['note_id', 'noteId', 'id', 'title', 'display_title', 'desc', 'content', 'text', 'share_url'];
+  if (textFields.some((key) => textOf(pairs?.[key]).trim() !== '')) return true;
+  return ['image_list', 'images', 'imageList'].some((key) => Array.isArray(pairs?.[key]) && pairs[key].length > 0);
+}
+
+/**
  * 小红书单篇：真实样本（opencli 2.0.0 实测）是**字段对数组**——
  *   `{ok:true, data:[{field:'title',value:'…'},{field:'author',value:'…'},
  *                   {field:'content',value:'…'},{field:'likes',value:'16'},
@@ -454,15 +654,20 @@ export function parseHeyboxSearch(result, limit = LIMIT_DEFAULT) {
  *                   {field:'tags',value:'#…'}]}`
  * 另有页面内嵌结构 `{data:{note:{…}}}`。两种都认；一个都认不出就**不编**，
  * 把原始 JSON 片段放进 `raw` 交给调用方如实展示（research.md §四就是这么定的）。
+ *
+ * `recognized` 是给 requireReadable 用的：认得出形状但没正文（图片笔记）≠ 上游坏了。
+ * 前者应该正常返回，话术里说「没有正文可取」；后者才报 unexpected_shape。
  */
 export function parseXhsNote(json) {
   const data = json?.data ?? json ?? {};
   const pairs = fieldPairsOf(data);
   if (pairs) {
     const noteId = firstText(pairs.note_id, pairs.noteId, pairs.id);
-    return {
+    const recognized = fieldPairsLooksLikeNote(pairs);
+    const item = {
       platform: 'xhs',
       target: noteId,
+      recognized,
       title: squash(firstText(pairs.title, pairs.display_title), 120),
       author: squash(firstText(pairs.author, pairs.nickname), 60),
       liked: intOrNull(pairs.likes ?? pairs.liked_count),
@@ -472,15 +677,19 @@ export function parseXhsNote(json) {
       url: noteId !== '' ? `https://www.xiaohongshu.com/explore/${noteId}` : '',
       text: textOf(firstText(pairs.content, pairs.desc, pairs.text))
     };
+    if (!recognized) item.raw = truncateChars(JSON.stringify(json ?? null), 800).text;
+    return item;
   }
 
   const note = data?.note ?? data?.note_card ?? data?.noteCard ?? (Array.isArray(data?.items) ? data.items[0]?.note_card ?? data.items[0] : null) ?? data;
   const user = note?.user ?? data?.user ?? {};
   const interact = note?.interact_info ?? note?.interactInfo ?? data?.interact_info ?? {};
   const id = firstText(note?.note_id, note?.noteId, note?.id, data?.note_id);
+  const recognized = looksLikeNote(note);
   const item = {
     platform: 'xhs',
     target: id,
+    recognized,
     title: squash(firstText(note?.title, note?.display_title), 120),
     author: squash(firstText(user?.nickname, user?.name, note?.nickname), 60),
     liked: intOrNull(interact?.liked_count ?? interact?.likedCount ?? note?.liked_count),
@@ -489,7 +698,7 @@ export function parseXhsNote(json) {
     url: id !== '' ? `https://www.xiaohongshu.com/explore/${id}` : textOf(note?.share_url),
     text: textOf(firstText(note?.desc, note?.content, note?.text, data?.desc, data?.content))
   };
-  if (item.title === '' && item.text === '') {
+  if (!recognized) {
     // 认不出内容时**不编**：给一段原始 JSON 摘要，模型能看见“后端到底给了什么”，
     // 也能如实告诉群友“这个读不出来”。
     item.raw = truncateChars(JSON.stringify(json ?? null), 800).text;
@@ -509,6 +718,46 @@ function fieldPairsOf(data) {
     matched += 1;
   }
   return matched > 0 ? pairs : null;
+}
+
+/**
+ * 小红书 AI 问答（`opencli xiaohongshu ask <query> -f json`）的解析。
+ *
+ * 真实形状（2026-10-23 实测）：
+ *   `{ok:true,data:{query,answer,source_count,source_total_text,
+ *                   sources:[{rank,type,title,url,note_id,author,…}]}}`
+ * 只取 answer 与来源标题/作者/链接；`deeplink`、`quote`、xsec_token 这些一律不碰。
+ * 来源缺 url 但有 note_id 时用 note_id 拼公开链接（与 parseXhsSearch 同口径）。
+ */
+export function parseXhsAsk(json) {
+  const data = json?.data && typeof json.data === 'object' && !Array.isArray(json.data)
+    ? json.data
+    : (json && typeof json === 'object' && !Array.isArray(json) ? json : {});
+  const answer = textOf(firstText(data.answer, data.content, data.text, data.result?.answer));
+  const rawSources = Array.isArray(data.sources)
+    ? data.sources
+    : (Array.isArray(data.source) ? data.source : (Array.isArray(data.result?.sources) ? data.result.sources : []));
+  const sources = rawSources.slice(0, ASK_SOURCES_MAX).map((entry, index) => {
+    const noteId = firstText(entry?.note_id, entry?.noteId, entry?.id);
+    const url = firstText(
+      entry?.url,
+      entry?.link,
+      noteId !== '' ? `https://www.xiaohongshu.com/explore/${noteId}` : ''
+    );
+    return {
+      rank: index + 1,
+      title: squash(entry?.title ?? entry?.name, 80),
+      author: squash(entry?.author ?? entry?.nickname, 60),
+      url: truncateUrl(url)
+    };
+  }).filter((entry) => entry.title !== '' || entry.url !== '');
+  const countRaw = Number(data.source_count ?? data.sourceCount);
+  return {
+    answer,
+    sources,
+    sourceCount: Number.isFinite(countRaw) && countRaw >= 0 ? Math.trunc(countRaw) : rawSources.length,
+    sourceTotalText: squash(data.source_total_text ?? data.sourceTotalText, 80)
+  };
 }
 
 /** 小黑盒单篇：输入是 `createHeyboxTools().post()` 的瘦身结果，正文/作者/评论数都在。 */
@@ -589,11 +838,44 @@ export function formatSearchResult({ platform, query, items } = {}) {
     lines.push(`${index + 1}. ${title} — ${author}（${metricText(item)}）`);
     if (textOf(item?.url) !== '') {
       // 链接也要限长：畸形 URL（几千字的 query）能把一次搜索结果撑到上万字。
-      lines.push(`   ${truncateChars(item.url, URL_MAX).text}`);
+      lines.push(`   ${truncateUrl(item.url)}`);
     } else if (textOf(item?.id) !== '') {
       lines.push(`   ${label} id：${item.id}（看正文用 reach_read）`);
     }
   });
+  return lines.join('\n');
+}
+
+/**
+ * 小红书 AI 问答降级话术（T-028）。
+ *
+ * 形状固定：第一行是 `XHS_ASK_PREFIX`，之后是 answer（≤4000 字，超长标注），
+ * 最后是来源（≤5 条，每条 URL ≤300 字）。**它不是笔记列表**，所以不套
+ * formatSearchResult 的「共 N 条」；`count:0` 由调用方负责。
+ */
+export function formatXhsAsk({ answer, sources, sourceCount, sourceTotalText } = {}) {
+  const body = truncateChars(answer, READ_MAX_CHARS);
+  const lines = [XHS_ASK_PREFIX];
+  if (body.text.trim() !== '') {
+    lines.push('', body.text);
+    if (body.truncated) lines.push(`…（AI 回答已截断，原文共 ${body.total} 字）`);
+  } else {
+    lines.push('', '（AI 问答没有返回可读的正文）');
+  }
+  const list = (Array.isArray(sources) ? sources : []).slice(0, ASK_SOURCES_MAX);
+  const totalText = textOf(sourceTotalText);
+  if (list.length > 0) {
+    lines.push('', `参考来源（这是 AI 汇总，点开链接才是原笔记${totalText !== '' ? `；${totalText}` : ''}）：`);
+    list.forEach((entry, index) => {
+      const title = textOf(entry?.title) || '（没有标题）';
+      const author = textOf(entry?.author) !== '' ? ` — ${textOf(entry.author)}` : '';
+      lines.push(`${index + 1}. ${title}${author}`);
+      const url = textOf(entry?.url);
+      if (url !== '') lines.push(`   ${truncateUrl(url)}`);
+    });
+  } else if (Number.isFinite(sourceCount) && sourceCount > 0) {
+    lines.push('', `（AI 汇总参考了 ${sourceCount} 篇笔记，但这次没给出来源链接）`);
+  }
   return lines.join('\n');
 }
 
@@ -610,7 +892,7 @@ export function formatReadResult({ platform, item } = {}) {
 
   const lines = [`${label} ${kind}：${textOf(target.title) || '（没有标题）'}`, meta.join(' · ')];
   const locatorRaw = textOf(target.url)
-    ? truncateChars(target.url, URL_MAX).text
+    ? truncateUrl(target.url)
     : (textOf(target.target) !== '' ? `${label} id：${target.target}` : '');
   if (locatorRaw !== '') lines.push(locatorRaw);
 

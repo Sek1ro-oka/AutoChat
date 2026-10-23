@@ -26,7 +26,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import { createHeyboxTools, defaultReadConfig } from './heybox-tools.js';
+import { createHeyboxTools, defaultReadConfig, defaultRunCli as defaultHeyboxRunCli } from './heybox-tools.js';
 import {
   LIMIT_DEFAULT,
   PLATFORM_CHOICES,
@@ -38,6 +38,7 @@ import {
   failureOf,
   formatReadResult,
   formatSearchResult,
+  formatXhsAsk,
   normalizePlatform,
   normalizeQuery,
   normalizeReachConfig,
@@ -46,9 +47,11 @@ import {
   parseBiliVideo,
   parseHeyboxPost,
   parseHeyboxSearch,
+  parseXhsAsk,
   parseXhsNote,
   parseXhsSearch,
-  searchShape
+  searchShape,
+  xhsSearchUnavailableByMessage
 } from './reach-core.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -67,6 +70,18 @@ const MAX_STDOUT = 4 * 1024 * 1024;
 const HEYBOX_REQUEST_FLOOR = 8;
 const HEYBOX_REQUEST_MAX = 10; // heybox-tools 自己也会把上限夹到 10
 
+/**
+ * 小红书搜索的「请求条数」：dev-doc §3.2 的 n×2 或 ≥8（上限 20，避免一次要太多）。
+ *
+ * 为什么要多要：站内搜索经常只回一半就结束，按 count 精确要会让本地 slice 后只剩几条。
+ * 本地仍然按调用方的 `limit` 截断，所以多要不影响对外条数。
+ */
+const XHS_REQUEST_FLOOR = 8;
+const XHS_REQUEST_MAX = 20;
+function xhsRequestCount(count) {
+  return Math.min(Math.max(count * 2, XHS_REQUEST_FLOOR), XHS_REQUEST_MAX);
+}
+
 /** 走 cmd.exe 时不能出现的字符：它们会被 cmd 重新解释（`&`=命令分隔、`%`=变量展开、`!`=延迟展开…）。 */
 const CMD_UNSAFE_RE = /["&|<>^%()!\r\n]/;
 
@@ -77,6 +92,18 @@ class ReachError extends Error {
     this.code = code;
     Object.assign(this, detail);
   }
+}
+
+/**
+ * 这次失败该不该触发小红书「搜索 → AI 问答」降级。
+ *
+ * 只认**站点侧不可用**：runCli 抛错（超时/起不来）与 readCliJson/形状检查产生的
+ * `code:'unavailable'` 都算；`bad_query` / `bad_target` 这类参数错误绝不降级
+ * （用户输错了词，改调 ask 只会把错误放大一次）。
+ */
+function fallbackEligible(error) {
+  if (error instanceof ReachError) return error.code === 'unavailable';
+  return true;
 }
 
 function textOf(value) {
@@ -194,7 +221,13 @@ function binAvailable(bin, exists) {
 
 // ── 子进程 ──────────────────────────────────────────────────────────────────
 /** 绝不透传给子进程的环境变量：密钥类与 DSH 自己的运行时变量。 */
-const SECRET_ENV_RE = /(key|token|secret)/i;
+const SECRET_ENV_RE = /(key|token|secret|password|cookie|pass|credential|signature|auth)/i;
+
+/**
+ * 明确放行的「名字里带 auth、但其实不是密钥」的变量。
+ * `SSH_AUTH_SOCK` 只是 ssh-agent 的 socket 路径，不是凭据；直接按 /auth/i 过滤会误伤。
+ */
+const SAFE_ENV_EXCEPTIONS = Object.freeze(new Set(['SSH_AUTH_SOCK']));
 
 /**
  * 子进程环境：**只挑需要的**，不再 `{...process.env}` 全量透传。
@@ -209,7 +242,7 @@ export function childEnv(base = process.env) {
   for (const [name, value] of Object.entries(base)) {
     if (name === '') continue;
     if (name.startsWith('DSH_')) continue;
-    if (SECRET_ENV_RE.test(name)) continue;
+    if (!SAFE_ENV_EXCEPTIONS.has(name) && SECRET_ENV_RE.test(name)) continue;
     env[name] = value;
   }
   // bili-cli / xiaoheihe-cli 都是 Python：Windows 控制台默认 GBK 会让它们打印中文 JSON 时崩。
@@ -292,13 +325,21 @@ function hasCmdUnsafeChars(value) {
 }
 
 /**
- * 走 cmd.exe 时对**整条 argv** 的统一校验：返回错误文案，安全时返回空串。
+ * 走 cmd.exe 时对**整条 argv + bin** 的统一校验：返回错误文案，安全时返回空串。
  *
  * 为什么下沉到这里而不是只在小红书那两处检查：cmd 分支是所有平台的公共出口
  * （`reach.biliBin` 完全可能被配成一个 `.cmd`），只在 xhs 上挡等于只锁了一扇门。
  * 上层仍会先做一次带业务码的校验（bad_query / bad_target），这里是**兜底**。
+ *
+ * T-028 审查残余：`bin` 本身也要查。它来自本地配置（不是模型输入），但
+ * `C:\Program Files (x86)\…` 这种路径里的括号会被 cmd.exe 当成命令分组符——
+ * 一旦走到 cmd 分支，参数再干净也执行不了。宁可报一句清楚的错。
  */
-export function cmdUnsafeArgvError(argv) {
+export function cmdUnsafeArgvError(argv, bin = '') {
+  const binText = textOf(bin);
+  if (binText !== '' && hasCmdUnsafeChars(binText)) {
+    return `可执行文件路径里有 cmd.exe 会解释的字符（& | < > ^ % " ( ) ! 或换行）：${excerpt(binText, 120)}`;
+  }
   const list = Array.isArray(argv) ? argv : [];
   for (const arg of list) {
     const text = textOf(arg);
@@ -320,7 +361,7 @@ export async function defaultRunCli(bin, argv, { timeoutMs = 120000 } = {}) {
   const target = spawnTarget(bin, argv);
   if (target.viaCmd) {
     // 只有真落到 cmd.exe 上才有这层风险（node 入口 / 原生 exe 都是数组传参、零解释）。
-    const unsafe = cmdUnsafeArgvError(argv);
+    const unsafe = cmdUnsafeArgvError(argv, bin);
     if (unsafe !== '') throw new Error(`拒绝经 cmd.exe 执行：${unsafe}`);
   }
   const { command, args } = target;
@@ -400,15 +441,24 @@ export function createReachTools({
     }
   }
 
-  // 小黑盒的实际调用仍交给 heybox-tools，但 `reach.xiaoheiheBin` 一旦配了就得**真的生效**：
-  // 把它折进传给 heybox-tools 的配置里（否则会出现「reach_status 说找到了、搜索却用另一个路径」）。
+  // 小黑盒的实际调用仍交给 heybox-tools，但 `reach.xiaoheiheBin` / `reach.timeoutMs`
+  // 一旦配了就得**真的生效**（R-007）：
+  //   · bin：解析成绝对路径后折进 heybox.cliPath，否则会出现「reach_status 说找到了、
+  //     搜索却 spawn 另一个裸名字」的两套口径；
+  //   · timeout：heybox-tools 自己的默认是 60s，这里用 reach 的 120s 包一层，
+  //     仍然是它自己的 spawn（清代理变量那套逻辑不变）。
   const heyboxTools = heybox ?? createHeyboxTools({
     now,
     readConfig: () => {
       const raw = safeReadConfig();
-      const bin = normalizeReachConfig(raw.reach).xiaoheiheBin;
-      if (bin === '') return raw;
-      return { ...raw, heybox: { ...(raw.heybox ?? {}), cliPath: bin } };
+      const reachCfg = normalizeReachConfig(raw.reach);
+      const configured = reachCfg.xiaoheiheBin !== '' ? reachCfg.xiaoheiheBin : textOf(raw.heybox?.cliPath);
+      const resolved = resolveBinValue(configured, 'xiaoheihe-cli', exists);
+      return { ...raw, heybox: { ...(raw.heybox ?? {}), cliPath: resolved } };
+    },
+    runCli: (argv, options = {}) => {
+      const reachCfg = normalizeReachConfig(safeReadConfig().reach);
+      return defaultHeyboxRunCli(argv, { ...options, timeoutMs: reachCfg.timeoutMs });
     }
   });
 
@@ -418,6 +468,17 @@ export function createReachTools({
 
   function bins(cfg) {
     return resolveBins(cfg, readConfig, exists);
+  }
+
+  /**
+   * `config.json` 顶层 `bili.enabled`（与 src/mcp-bili-safe.js 同口径：只有显式 false 才算关）。
+   *
+   * 为什么 reach 要听它：这个开关的语义是「这台机器不要用 B站 能力」。reach 绕开它自己
+   * spawn bili，等于把用户明确关掉的东西又打开一次（审查残余 R-010）。
+   */
+  function biliFeatureDisabled() {
+    const raw = safeReadConfig();
+    return Boolean(raw?.bili && typeof raw.bili === 'object' && raw.bili.enabled === false);
   }
 
   function nowMs() {
@@ -431,14 +492,17 @@ export function createReachTools({
     const resolved = bins(cfg);
     const platforms = [];
 
-    const biliOk = cfg.enabled && binAvailable(resolved.bili, exists);
+    const biliOn = !biliFeatureDisabled();
+    const biliOk = cfg.enabled && biliOn && binAvailable(resolved.bili, exists);
     platforms.push({
       platform: 'bili',
       label: 'B站',
       available: biliOk,
-      detail: biliOk
-        ? `已找到 ${path.basename(resolved.bili)}（bili-cli，只读）`
-        : `找不到 ${path.basename(resolved.bili) || 'bili'}（没装 bili-cli，或 reach.biliBin 配错了）`
+      detail: !biliOn
+        ? 'B站功能在 config.json 里被 bili.enabled=false 关掉了：reach 不会调用 bili（其它两个平台不受影响）'
+        : (biliOk
+          ? `已找到 ${path.basename(resolved.bili)}（bili-cli，只读）`
+          : `找不到 ${path.basename(resolved.bili) || 'bili'}（没装 bili-cli，或 reach.biliBin 配错了）`)
     });
 
     const opencliOk = cfg.enabled && binAvailable(resolved.opencli, exists);
@@ -452,7 +516,7 @@ export function createReachTools({
       label: '小红书',
       available: opencliOk,
       detail: opencliOk
-        ? `已找到 ${path.basename(resolved.opencli)}${opencliLaunch}；实际能不能搜到取决于本机 Chrome 里的小红书登录态与站点是否改版（失败会如实报 unavailable，不会返回空结果）`
+        ? `已找到 ${path.basename(resolved.opencli)}${opencliLaunch}；实际能不能搜到取决于本机 Chrome 里的小红书登录态与站点是否改版（站内搜索失败会自动改问 AI 问答，并标注不是笔记列表；ask 也失败才报 unavailable）`
         : `找不到 ${path.basename(resolved.opencli) || 'opencli'}（没装 opencli，或 reach.opencliBin 配错了）`
     });
 
@@ -518,17 +582,34 @@ export function createReachTools({
     const cfg = currentConfig();
     const count = clampLimit(limit, cfg.maxResults);
     try {
-      const items = key === 'bili'
-        ? await searchBili(cfg, word, count)
+      // 三个平台正常都回 `{ mode:'search', items }`；小红书站点侧不可用时可能回
+      // `{ mode:'ask_fallback', text, sources, sourceCount }`（T-028）。
+      const outcome = key === 'bili'
+        ? { mode: 'search', items: await searchBili(cfg, word, count) }
         : key === 'xhs'
           ? await searchXhs(cfg, word, count)
-          : await searchHeybox(cfg, word, count);
-      return {
+          : { mode: 'search', items: await searchHeybox(cfg, word, count) };
+      const items = Array.isArray(outcome.items) ? outcome.items : [];
+      const asked = outcome.mode === 'ask_fallback';
+      const base = {
         ok: true,
         platform: key,
         label: (key === 'bili' ? 'B站' : key === 'xhs' ? '小红书' : '小黑盒'),
         query: word,
-        count: items.length,
+        mode: asked ? 'ask_fallback' : 'search',
+        // 降级结果是 AI 汇总，不是笔记列表：count 固定 0，也不给 items（免得被当成列表继续用）。
+        count: asked ? 0 : items.length
+      };
+      if (asked) {
+        return {
+          ...base,
+          sourceCount: Number.isFinite(outcome.sourceCount) ? outcome.sourceCount : 0,
+          sources: Array.isArray(outcome.sources) ? outcome.sources : [],
+          text: textOf(outcome.text) || formatXhsAsk({})
+        };
+      }
+      return {
+        ...base,
         items,
         text: formatSearchResult({ platform: key, query: word, items })
       };
@@ -543,12 +624,19 @@ export function createReachTools({
   }
 
   async function searchBili(cfg, word, count) {
+    if (biliFeatureDisabled()) {
+      throw new ReachError('unavailable', 'B站功能未启用（config.json 的 bili.enabled=false）：reach 不会调用 bili。要用就先把 bili.enabled 设为 true。');
+    }
     const bin = bins(cfg).bili;
     if (!binAvailable(bin, exists)) {
       throw new ReachError('unavailable', `找不到 bili 可执行文件（reach.biliBin 未配且 PATH 里没有 bili）。装法：uv tool install bilibili-cli`);
     }
     assertCmdArgvSafe(bin, word, 'bad_query');
-    const result = await runCli(bin, ['search', word, '--type', 'video', '-n', String(count), '--json'], { timeoutMs: cfg.timeoutMs });
+    // 以 `-` 开头的词会被 CLI 当成选项：把 flags 全放前面，再用 `--` 断选项。
+    const args = word.startsWith('-')
+      ? ['search', '--type', 'video', '-n', String(count), '--json', '--', word]
+      : ['search', word, '--type', 'video', '-n', String(count), '--json'];
+    const result = await runCli(bin, args, { timeoutMs: cfg.timeoutMs });
     return parseSearchOutput(result, 'bili 搜索', 'bili', (json) => parseBiliSearch(json, count));
   }
 
@@ -560,11 +648,64 @@ export function createReachTools({
     // 极少数情况下 .cmd 解析不出 node 入口、只能落到 cmd.exe：这时搜索词里的 cmd 元字符
     // 会被当成命令语法解释——那是注入面，所以直接拒绝（换措辞），而不是硬塞进去。
     assertCmdArgvSafe(bin, word, 'bad_query');
-    const result = await runCli(bin, ['xiaohongshu', 'search', word, '--limit', String(count), '-f', 'json'], { timeoutMs: cfg.timeoutMs });
-    return parseSearchOutput(result, '小红书 搜索', 'xhs', (json) => parseXhsSearch(json, count));
+
+    // dev-doc §3.2：按 n×2 或 ≥8 去要，本地仍按调用方 limit 截断（parseXhsSearch 会 slice）。
+    const requestCount = xhsRequestCount(count);
+    let searchError = null;
+    try {
+      const searchArgs = word.startsWith('-')
+        ? ['xiaohongshu', 'search', '--limit', String(requestCount), '-f', 'json', '--', word]
+        : ['xiaohongshu', 'search', word, '--limit', String(requestCount), '-f', 'json'];
+      const result = await runCli(bin, searchArgs, { timeoutMs: cfg.timeoutMs });
+      // §7.3 条件 2：data 为空 + message 精确包含 search_input_not_available。
+      // 这条独立于 failureOf（成功码 veto 时 failureOf 会是 false），但降级仍要触发；
+      // 非空 data 时 helper 直接 false，真结果绝不会被丢掉。
+      if (xhsSearchUnavailableByMessage(extractJson(textOf(result?.stdout)))) {
+        throw new ReachError('unavailable', '小红书 站内搜索不可用（search_input_not_available）');
+      }
+      const items = parseSearchOutput(result, '小红书 搜索', 'xhs', (json) => parseXhsSearch(json, count));
+      return { mode: 'search', items };
+    } catch (error) {
+      searchError = error;
+    }
+
+    // 失败不是「搜不到」：只有站点侧不可用才值得降级；参数错误（bad_query）在上面就抛了。
+    if (!cfg.xhsAskFallback || !fallbackEligible(searchError)) throw searchError;
+    const searchReason = textOf(searchError?.message) || '未知原因';
+    try {
+      // 注意：ask **不接受** --limit（会 commander.unknownOption），所以这里绝不带条数。
+      const askArgs = word.startsWith('-')
+        ? ['xiaohongshu', 'ask', '-f', 'json', '--', word]
+        : ['xiaohongshu', 'ask', word, '-f', 'json'];
+      const result = await runCli(bin, askArgs, { timeoutMs: cfg.timeoutMs });
+      const json = readCliJson(result, '小红书 AI 问答');
+      const ask = parseXhsAsk(json);
+      if (ask.answer.trim() === '') {
+        throw new ReachError('unavailable', '小红书 AI 问答返回里没有可读的 answer');
+      }
+      return {
+        mode: 'ask_fallback',
+        items: [],
+        sources: ask.sources,
+        sourceCount: ask.sourceCount,
+        text: formatXhsAsk(ask)
+      };
+    } catch (askError) {
+      const askReason = textOf(askError?.message) || '未知原因';
+      throw new ReachError(
+        'unavailable',
+        `小红书 搜索失败：${searchReason}；AI 问答也失败：${askReason}`,
+        { reason: 'ask_fallback_failed' }
+      );
+    }
   }
 
   async function searchHeybox(cfg, word, count) {
+    // 小黑盒的 argv 由 heybox-tools 拼（`search <word>`），reach 插不进 `--` 分隔符：
+    // 以 `-` 开头的词会被 xiaoheihe-cli 当成选项。这里 fail closed，别把用户输入送进选项位。
+    if (word.startsWith('-')) {
+      throw new ReachError('bad_query', '小黑盒的搜索词不能以 - 开头（上游会把开头的 - 当成命令选项）；换个说法再搜');
+    }
     const bin = bins(cfg).heybox;
     if (!binAvailable(bin, exists)) {
       throw new ReachError('unavailable', '找不到 xiaoheihe-cli（reach.xiaoheiheBin 与 heybox.cliPath 都没配，PATH 里也没有）。装法：uv tool install xiaoheihe-cli');
@@ -583,6 +724,12 @@ export function createReachTools({
       const reason = textOf(called?.reason) || '小黑盒没有返回原因';
       const extra = textOf(called?.pauseRemainingText) !== '' ? `；${called.pauseRemainingText}后自动恢复` : '';
       throw new ReachError('unavailable', `小黑盒暂时不可用（${code}）：${reason}${extra}`);
+    }
+    // `{ok:true}` 但 items 缺失/不是数组：这是上游坏了，不是「没有结果」。
+    // 不能 parseHeyboxSearch 静默回空数组——那会把一次坏形状冒充成「平台没这个话题」。
+    if (!Array.isArray(called.items)) {
+      const raw = excerpt(JSON.stringify(called ?? null), 300);
+      throw new ReachError('unavailable', `小黑盒搜索返回了意料之外的形状（unexpected_shape）：${raw}`, { reason: 'unexpected_shape' });
     }
     return parseHeyboxSearch(called, count);
   }
@@ -624,6 +771,9 @@ export function createReachTools({
   }
 
   async function readBili(cfg, parsed) {
+    if (biliFeatureDisabled()) {
+      throw new ReachError('unavailable', 'B站功能未启用（config.json 的 bili.enabled=false）：reach 不会调用 bili。要用就先把 bili.enabled 设为 true。');
+    }
     const bin = bins(cfg).bili;
     if (!binAvailable(bin, exists)) {
       throw new ReachError('unavailable', '找不到 bili 可执行文件（reach.biliBin 未配且 PATH 里没有 bili）');
@@ -652,7 +802,8 @@ export function createReachTools({
     const item = parseXhsNote(json);
     // 上游返回里没带 id 时用调用方给的那个，别在话术里留一个空定位。
     if (textOf(item.target) === '') item.target = parsed.id ?? parsed.ref;
-    return requireReadable('小红书 笔记详情', item, json);
+    // 只有图片、没有正文的笔记是合法的：认得出笔记形状就照常返回，让话术说「没有正文可取」。
+    return requireReadable('小红书 笔记详情', item, json, { allowEmptyBody: item.recognized === true });
   }
 
   async function readHeybox(cfg, parsed) {
@@ -711,9 +862,17 @@ export function createReachTools({
     return items;
   }
 
-  /** 详情：标题与正文都拿不到时同样不能冒充成功（把坏形状当正文返回 = 假的 ok）。 */
-  function requireReadable(action, item, json) {
+  /**
+   * 详情：标题与正文都拿不到时不能一律冒充成功——但「只有图片/视频、没有文字」是**合法**内容。
+   *
+   * 判据不是「有没有字」，而是「认不认得出这是该平台的详情形状」：
+   *   · 小红书：parseXhsNote 认出 note_id/图片数组/用户/互动数等任一项 → 可以空正文；
+   *   · B站 / 小黑盒：仍要求标题或正文至少有一个（它们的详情本来就有标题）。
+   * 认不出形状才报 unexpected_shape（把坏形状当正文返回 = 假的 ok）。
+   */
+  function requireReadable(action, item, json, { allowEmptyBody = false } = {}) {
     if (textOf(item?.title) !== '' || textOf(item?.text) !== '') return item;
+    if (allowEmptyBody) return item;
     const raw = excerpt(JSON.stringify(json ?? null), 300);
     throw new ReachError('unavailable', `${action}返回里没有可识别的标题/正文（unexpected_shape）：${raw}`, { reason: 'unexpected_shape' });
   }
@@ -763,7 +922,7 @@ export function registerReachTools(server, opts = {}) {
 
   server.tool(
     'reach_search',
-    '在三个平台之一搜索（只读，不点赞不发帖）：platform=bili（B站视频）/ xhs（小红书笔记）/ heybox（小黑盒帖子），query 是关键词（单行，≤60 字），limit 是条数（1–20，默认 8）。返回一段纯文本：标题、作者、播放/赞/评论等数字和定位信息。失败会带 code（bad_platform / bad_query / unavailable）和上游原始原因——不要把它当成“搜不到”。',
+    '在三个平台之一搜索（只读，不点赞不发帖）：platform=bili（B站视频）/ xhs（小红书笔记）/ heybox（小黑盒帖子），query 是关键词（单行，≤60 字），limit 是条数（1–20，默认 8）。返回一段纯文本：标题、作者、播放/赞/评论等数字和定位信息。小红书站内搜索不可用时会自动改问小红书的 AI 问答（返回 mode=ask_fallback，正文开头有「这是 AI 汇总、不是笔记列表」的标注，并附来源链接）；这不是搜索失败，但也不是笔记列表。失败会带 code（bad_platform / bad_query / unavailable）和上游原始原因——不要把它当成“搜不到”。',
     {
       platform: z.string().describe(`平台：${PLATFORM_CHOICES}`),
       query: z.string().describe('搜索关键词，单行，最多 60 字'),

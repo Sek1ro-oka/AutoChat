@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+### 小红书搜索坏了就改问 AI：`reach_search` 自动降级（2026-10-23，T-028）
+
+- 背景：小红书的站内搜索接口当前稳定失败（`COMMAND_EXEC / search_input_not_available`，站点侧改版；opencli 2.0.0 与 2.0.2 一致，登录态正常），而 `opencli xiaohongshu ask` 可用（返回 AI 汇总 + 出处）。
+- `reach_search(platform='xhs')`：搜索失败且属于「站点侧不可用」（`COMMAND_EXEC` / `TIMEOUT` / `ARGUMENT` / `unexpected_shape`）时，若 `reach.xhsAskFallback !== false`（默认 `true`），自动改调 `ask`（**不传 `--limit`**，会 `commander.unknownOption`）：
+  - 成功 → `ok:true`、`mode:'ask_fallback'`、`count:0`，正文以固定前缀 `【小红书·AI 问答（站内搜索当前不可用，已降级；这不是笔记列表，是小红书的 AI 汇总）】` 开头，answer 截断 4000 字，sources 最多 5 条、URL ≤300 字；
+  - 失败 → `unavailable` + `reason:'ask_fallback_failed'`，**同时给出搜索与问答两条原因**。
+  - `bad_platform` / `bad_query` 与「开关关闭」一律不降级。
+- 提示词【三平台只读检索】新增第 6 条：返回 `ask_fallback` 时要说清「这是小红书的 AI 汇总、不是某篇笔记原文」，来源有链接就带上；patch 已重新生成；`docs/guides/REACH.md` 新增「小红书：搜索坏了怎么办」。
+- 同时收掉 T-027 审查留下的 9 条非阻断（见上一节）：`searchHeybox` 校验 `items` 数组；`failureOf` 补 numeric `status≥400` / numeric `code≠0` / 仅 `message:'TIMEOUT'` 的形状；空 `error` 对象/数组不再误判失败；只有图片的笔记回「没有正文可取」而不是 unavailable；子进程环境过滤补 `PASSWORD|COOKIE|AUTH`；`cmdUnsafeArgvError` 连 `bin` 一起检查；`bili.enabled=false` 时不再 spawn；以 `-` 开头的 query 自动加 `--`（heybox 的 argv 由 heybox-tools 内部拼，改为 fail-closed 的 `bad_query`）；`reach.xiaoheiheBin` 解析成绝对路径注入 heybox 并把 `reach.timeoutMs` 传下去。
+- 回归：`test-reach-tools` 203 → **270** 条；`test-audit` **69/70**（唯一红灯仍是既有 `test-token-economy`）；`build-agent-preset-patches --check` exit 0。
+- 真实冒烟：`reach_search('xhs','有什么好喝的手冲咖啡豆')` 27.5s 返回 `ask_fallback` + 2551 字真实回答（前 300 字已核对）；`reach_search('bili','原神',2)` 正常；`reach_search('xhs','   ')` → `bad_query` 且不调 ask。
+
 ### 三平台只读检索：B站 / 小红书 / 小黑盒 一个入口（2026-10-23，T-027）
 
 - 三个工具 `reach_status` / `reach_search` / `reach_read` 挂在 snowluma MCP server 上（工具数 66 → **69**），不新增进程、不新增白名单前缀。

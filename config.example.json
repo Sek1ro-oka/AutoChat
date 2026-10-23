@@ -89,6 +89,7 @@
     "enabled": true,
     "timeoutMs": 120000,
     "maxResults": 8,
+    "xhsAskFallback": true,
     "biliBin": "",
     "opencliBin": "",
     "xiaoheiheBin": ""
