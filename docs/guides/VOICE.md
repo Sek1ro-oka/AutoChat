@@ -1,6 +1,6 @@
 # 语音发送全解（VOICE）
 
-> TL;DR：语音是「开口说话」的强表达。**AI 发语音默认是关的**（`socialV2.voice.enabled` 与 `socialV2.tools.sendVoice` 都是 `false`）；你自己发语音不受这个开关限制。先把音频放进语音库 `audio/`，再按需要选一条通道发出去。
+> TL;DR：语音是「开口说话」的强表达。**AI 发语音默认是关的**（`socialV2.voice.enabled` 与 `socialV2.tools.sendVoice` 都是 `false`）；你自己发语音不受这个开关限制。先把音频放进语音库 `audio/`，再按需要选一条通道发出去。模型还可以**把一句话直接合成语音条**（`qq_speak`，T-032）：语音总开关打开、`tools.speak` 没关就能用，最长 80 字。
 
 ## 一、五条通道
 
@@ -11,6 +11,7 @@
 | 桥接 CLI | `node scripts/send-voice.mjs list / list-voice / send / check / status` | 你自己 | 否 |
 | 控制台调试面板 | 「二代仿真 → 语音库与语音发送（调试）」：刷新语音库、目标、只校验不发送、试发选中语音 | 你自己 | 否 |
 | AI 工具 | `qq_send_voice` / `qq_list_voices` | 模型 | **是** |
+| AI 工具 · 文本合成 | `qq_speak`（把一句话合成语音条，T-032） | 模型 | **是**（同 `socialV2.voice.enabled`，另有 `tools.speak`） |
 
 独立工具不在本仓库里：它是仓库上一级并排的 `voice-tool/`，只依赖 SnowLuma，共享内核仍由本仓库 `src/voice-core.js` 提供（单一实现，不复制）。没有这个目录时，语音相关的自检会自动 skip（见 `scripts/voice-tool-locator.mjs`）。
 
@@ -38,6 +39,15 @@
 | `socialV2.voice.loudness` | `normal` | 响度档位：`quiet` / `normal` / `loud`，或直接给 -40~-5 的 LUFS 数字 |
 | `socialV2.voice.ffmpegPath` | `''` | 空 = 走 PATH 找 ffmpeg |
 | `socialV2.voice.autoReadback` | `true` | 发送后自动回读一条确认 |
+| `socialV2.tools.speak` | `true` | 控制 `qq_speak` 是否注册给模型（关掉只影响「文本合成」，不影响发语音库里的成品） |
+| `socialV2.tts.engine` | `auto` | 合成引擎：`auto`（先 edge-tts，失败回落 SAPI）/ `edge` / `sapi` |
+| `socialV2.tts.voice` | `zh-CN-XiaoxiaoNeural` | 默认音色，**只能是下面 `voices` 里的两项之一**；配了别的值会在归一化时回落默认并记一条 warn 日志 |
+| `socialV2.tts.voices` | 见下 | 固定两支女声：`{id:'zh-CN-XiaoxiaoNeural', label:'普通话·晓晓'}`、`{id:'zh-HK-HiuMaanNeural', label:'粤语·曉曼'}`；这是给人看的镜像，真正的白名单在 `src/tts-core.js` 的 `TTS_VOICES`（**不许加男声**） |
+| `socialV2.tts.rate` | `0` | 语速百分比，夹取 -50 ~ +50 |
+| `socialV2.tts.maxChars` | `80` | 一次最多合成多少字，夹取 10 ~ 120；超了**直接拒绝**，不悄悄截断 |
+| `socialV2.tts.timeoutMs` | `15000` | 单次合成超时，夹取 3000 ~ 30000 |
+| `socialV2.tts.pythonPath` | `''` | 装 edge-tts 的 Python；空 = 读环境变量 `EDGE_TTS_PYTHON`，再空 = 本机已知的 venv |
+| `socialV2.tts.dir` | `''` | 临时合成目录；空 = `<语音库>/.tts`（点目录，语音库列表里看不到） |
 
 打开方式：控制台「开关」页 → 「二代仿真」里勾上 `qq_send_voice / qq_list_voices`，再把 `socialV2.voice.enabled` 置 `true`（改 `config.json` 或控制台配置面板），桥接重启后生效。
 
@@ -57,14 +67,29 @@
 5. **回读**：`verifyVoiceMessageSent()` 发送后回读，确认消息真的出去了。
 6. **静默模式**：AI 通道尊重 `shouldBlockSilentReply(key)`，静默期间不发。
 
-## 六、安全边界：AI 只能取语音库里的文件
+## 六、文本合成语音条（T-032，`qq_speak`）
+
+模型想说一句话但不想打字时，可以调 `qq_speak`：桥接把它合成成音频 → 立刻当语音条发出去 → 删掉临时文件。走的是和 `qq_send_voice` **完全同一套**发送链路与闸门。
+
+- **两支女声，别的都不许**：`普通话·晓晓`（`zh-CN-XiaoxiaoNeural`）与 `粤语·曉曼`（`zh-HK-HiuMaanNeural`）。`qq_speak` 的 `voice` 只认三种写法：完整 id、`mandarin` / `普通话`、`cantonese` / `粤语` / `广东话`；其它任何值（含所有男声、外语）一律 400 `bad_voice` 并列出允许的两项 —— **绝不静默回落**：把用户要的粤语念成普通话，比报错更难发现。
+- **粤语没有离线兜底**：本机 SAPI 只有 `Microsoft Huihui Desktop`（zh-CN 女声），没有粤语音色。所以请求粤语时只走 `edge-tts`，它失败就直接返回 `tts_unavailable`（「粤语只有在线合成，这会儿没合成成，改发文字吧」），**不会**用普通话糊过去；只有普通话请求在 `engine:'auto'` 下才会回落 SAPI。
+- **两个引擎**：`edge-tts`（Python 包，音质好、走微软端点，冷启动约 2.8 秒；**只走库 API** —— 参数写进 job JSON，用 `python -c <脚本>` + 环境变量 `TTS_JOB` 调 `edge_tts.Communicate(...).save(...)`，不用它的命令行入口，原因见排障表）与 **SAPI**（Windows 自带 `System.Speech`，离线、音色朴素，约 0.8 秒）。`engine: 'auto'` 时普通话先试 edge-tts，失败自动回落 SAPI；显式配成 `edge` 就不回落（失败就是失败）。
+- **隐私**：`edge-tts` 会把要念的**原文发到微软的 TTS 端点**。合成内容里别出现密码、密钥、本机路径、群友隐私。完全不想出网就把 `socialV2.tts.engine` 设成 `sapi`。
+- **长度**：`maxChars`（默认 80，夹取 10 ~ 120）。超了返回 400 `too_long`，**不会**悄悄截断（截断会断在半句上，还白耗一次合成）。
+- **时长/体积**：合成后仍要过 `maxSeconds` / `maxBytes`。超时长是**硬拒绝**（`too_long`，提示「说短一点或者改发文字」），不会自动裁剪。
+- **额度**：先查 `maxPerMinute` / `maxPerHour` **再**合成（`429 budget`），免得白等一次上游调用。
+- **临时目录**：默认 `<语音库>/.tts/`，文件名 `tts-<pid>-<时间戳>-<随机>.<mp3|wav>`，发送结束（成功或失败）立即删除。`.tts` 以点开头，`listAudioFiles()` 会跳过，所以 `qq_list_voices` / `send-voice.mjs list-voice` 都看不到它。
+- **失败语义**：`tts_unavailable` / `tts_timeout`（503）说明这台机器现在说不了话，**改发文字、不要重试第二次**；`verified=true` 才代表真发出去了。
+- **实现细节**：音频以 `audio: null` 交给发送层，即**原样发送、不做音量处理** —— 本机没装 ffmpeg 时这点很关键，否则会在发送前失败。
+
+## 七、安全边界：AI 只能取语音库里的文件
 
 - AI 通道只接受**语音库内的相对路径**；给绝对路径直接 400：`语音只能从语音库取文件（语音库目录：audio）；即使是绝对路径也必须位于语音库之内…`。
 - 库外的音频（比如临时下载的一段）只能用**操作者通道**发：独立工具、`scripts/send-voice.mjs`、控制台面板。
 - 原因：模型上下文里的内容是**不可信输入**，一旦允许任意绝对路径，prompt injection 就能把本机任意文件当语音发出去。
 - 顺手一条：语音库为空时的提示按通道区分 —— AI 看到「请让管理员先把音频放进语音库」，操作者看到带目录的完整提示；给 AI 的那份不吐绝对路径。
 
-## 七、排障
+## 八、排障
 
 | 现象 | 多半是 | 怎么办 |
 | --- | --- | --- |
@@ -73,20 +98,25 @@
 | `语音只能从语音库取文件…` | AI 给了库外路径 | 把音频放进 `audio/`，或用操作者通道 |
 | 发送超时但对方没收到 | 网关侧 `get_record` 只面向收到的语音缓存 | 用 `node scripts/send-voice.mjs send <音频> <目标> --dry-run` 先验参数，再真发 |
 | `send` 说白名单未命中 | 目标不在白名单 | 先在控制台加白名单；`--force` 也不会绕过桥接闸门 |
+| `qq_speak` 回 503 `tts_unavailable` | 本机没有可用的 edge-tts Python，SAPI 也起不来 | 配 `socialV2.tts.pythonPath`，或把 `engine` 设成 `sapi` 只用系统语音 |
+| `qq_speak` 回 400 `too_long` | 这句话超过 `maxChars`（或合成后超过 `maxSeconds`） | 说短一点，或者改发文字；不是故障，别重试 |
+| 手动跑 `python -m edge_tts …` 直接抛 `UnboundLocalError: cannot access local variable 'audio_file'` | 本机 edge-tts 的**命令行入口不可用**（7.3.1 实测），库 API `edge_tts.Communicate(...).save(...)` 却正常 | 别修也别换成 npm 包：`src/tts-core.js` 就是这么绕开的 —— 参数写进 job JSON，用 `python -c <脚本>` + 环境变量 `TTS_JOB` 调库，正文不进命令行 |
 
-## 八、实现落点（改代码时看这里）
+## 九、实现落点（改代码时看这里）
 
 | 文件 | 职责 |
 | --- | --- |
 | `src/voice-core.js` | 内核：格式判断、语音库命名、音量/响度、发送参数、回读探测 |
+| `src/tts-core.js` | TTS 内核（T-032）：文本清洗、切句、配置夹取、edge-tts（job JSON + `python -c` 调库）/ SAPI 合成（带超时与假 spawn 注入口） |
 | `src/send-voice-lib.js` | 纯转发 shim（`export … from './voice-core.js'`），防止出现两份实现 |
 | `scripts/send-voice.mjs` | 桥接 CLI：默认走 `/api/send/voice`，`--direct` 才是应急直连 |
-| `src/bridge.js` | 路由 `/api/voice/send`、`/api/send/voice`（操作者）、`/api/socialV2/send-voice`（AI）、`/api/voice/list`、`/api/socialV2/voices`；额度、审计、回读 |
-| `src/mcp-snowluma-safe.js` | 注册 `qq_send_voice` / `qq_list_voices`，映射到 `sendVoice` 开关 |
+| `src/bridge.js` | 路由 `/api/voice/send`、`/api/send/voice`（操作者）、`/api/socialV2/send-voice`、`/api/socialV2/speak`（AI）；额度、审计、回读；`speakV2()` 合成+发送 |
+| `src/mcp-snowluma-safe.js` | 注册 `qq_send_voice` / `qq_list_voices`（`sendVoice` 开关）、`qq_speak`（`speak` 开关） |
 | `public/console.html` | 「语音库与语音发送（调试）」面板 |
 | `scripts/test-voice*.mjs` | 自检：`voice` / `voice-edge` / `voice-gui` / `voice-preview` / `voice-volume` / `voice-system` |
+| `scripts/test-tts.mjs` | TTS 自检（T-032）：清洗/切句/夹取、音色白名单、路由闸门、失败回落、edge 走库 API（argv/env/job JSON）、成功路径、`.tts` 不被列出 |
 
-## 九、相关文档
+## 十、相关文档
 
 - [README.md](../../README.md)「已知限制」：收语音只显示占位文本、AI 发语音默认关闭。
 - [SOCIAL-AUTO.md](SOCIAL-AUTO.md)：社交自动化的开关与额度模型。

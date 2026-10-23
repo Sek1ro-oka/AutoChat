@@ -68,6 +68,7 @@ import { compactModelMessage } from './qq-model-view.js';
 import { safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
 import { AUDIO_EXTS, cleanupTemp, describeAudio, formatBytes, formatDuration, inspectAudio, listAudioFiles, parseTargetKey, processAudioVolume, resolveAudioProcessing, resolveAudioSource, safeJoinLibrary } from './send-voice-lib.js';
 import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken } from './snowluma-conn.js';
+import { TtsError, resolveTtsSettings, resolveTtsVoice, sanitizeSpeakText, synthesizeEdge, synthesizeSapi } from './tts-core.js';
 import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
@@ -1212,6 +1213,9 @@ function loadConfig() {
     collectSticker: true,
     getSelfImage: true,
     sendVoice: false,
+    // TTS（T-032）：把一句话合成语音条再发。默认**开**，但语音库总开关
+    // socialV2.voice.enabled 仍是关的 —— 两道闸门任一关掉都发不出去。
+    speak: true,
     ...(cfg.socialV2.tools ?? {})
   };
 
@@ -1277,6 +1281,21 @@ function loadConfig() {
     ffmpegPath: '',
     autoReadback: true,
     ...(cfg.socialV2?.voice ?? {})
+  };
+
+  // socialV2.tts（T-032）：AI 侧「把一句话说成语音条」的合成配置。
+  // 这里只补形状，**不做归一**：engine 认不认得出、数字夹取多少，全部交给
+  // speakV2() 里的 resolveTtsSettings —— 晚一步引用，桥接启动就不会因为
+  // tts-core 出问题（也不让 loadConfig 期依赖新模块）。
+  cfg.socialV2.tts = {
+    engine: 'auto',
+    voice: 'zh-CN-XiaoxiaoNeural',
+    rate: 0,
+    maxChars: 80,
+    timeoutMs: 15000,
+    pythonPath: '',
+    dir: '',
+    ...(cfg.socialV2?.tts ?? {})
   };
 
   // socialV2.sticker.collect 也需要深度合并，避免旧配置缺失 collect 子项时丢默认值。
@@ -3086,6 +3105,192 @@ async function main() {
     const wantVerify = verify === true || (verify !== false && vc.autoReadback);
     const verification = wantVerify ? await verifyVoiceMessageSent(sent.messageId) : null;
     return { ...sent, key, file: resolved.path, via: resolved.via, verification, readback: readbackText };
+  }
+
+  // ── AI 侧 TTS（T-032）：把一句话合成语音条发出去 ─────────────────────────
+  // 三步的顺序本身就是设计：
+  //   1. 先洗文本：洗不出人话/太长直接拒，不白跑一次合成；
+  //   2. **先查额度再合成**：额度用完了还去合成，等于白等 1~3 秒 + 白耗一次上游调用，
+  //      而且会让模型以为「再试一次就成功了」；
+  //   3. 音频只写 voice.dir/.tts/（点目录，listAudioFiles 会跳过，qq_list_voices 看不到），
+  //      发送走 sendVoiceForV2(..., { audio: null })：**本机没有 ffmpeg**，
+  //      一旦让它去归一音量就会在发送前失败，绝对不能传 normalize/volume。
+  const speakInFlight = new Map();
+
+  // 配置里写了白名单之外的音色：归一化时已经回落默认，这里只负责**把这件事说一次**
+  // （每条警告只在第一次撞见时记日志，免得每次 ttsCfg() 都刷屏）。
+  const ttsWarned = new Set();
+
+  function ttsCfg() {
+    const resolved = resolveTtsSettings(cfg.socialV2?.tts);
+    for (const warning of resolved.warnings ?? []) {
+      if (ttsWarned.has(warning)) continue;
+      ttsWarned.add(warning);
+      log(`[tts] 配置警告：${warning}`);
+    }
+    return resolved;
+  }
+
+  /**
+   * 找出装 edge-tts 的 Python：配置 → 环境变量 → 本机已知的 venv（存在才用）。
+   * 三个候选都不存在就抛 —— 调用方据此回落 SAPI。
+   */
+  function resolveTtsPython() {
+    const candidates = [
+      String(cfg.socialV2?.tts?.pythonPath ?? '').trim(),
+      String(process.env.EDGE_TTS_PYTHON ?? '').trim(),
+      'E:\\hxq\\ppt-master\\.venv\\Scripts\\python.exe'
+    ];
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      try { if (fs.statSync(candidate).isFile()) return candidate; } catch {}
+    }
+    throw new TtsError('tts_unavailable', '这台机器上没有装 edge-tts 的 Python，请配 socialV2.tts.pythonPath');
+  }
+
+  /** prompt 里的 speak 块：模型据此知道「现在能不能自己说成语音」。 */
+  function speakPromptBlockV2() {
+    const fallback = { ok: false, maxChars: 80, engine: 'auto', hint: 'TTS 配置读取失败：这轮先按文字发' };
+    try {
+      const tts = ttsCfg();
+      let python = '';
+      try { python = resolveTtsPython(); } catch {}
+      const edgeOk = tts.engine !== 'sapi' && Boolean(python);
+      const sapiOk = tts.engine !== 'edge';
+      const ok = voiceCfg().enabled && (edgeOk || sapiOk);
+      return {
+        ok,
+        maxChars: tts.maxChars,
+        engine: tts.engine,
+        voices: (tts.voices ?? []).map((item) => ({ id: item.id, label: item.label })),
+        tools: ok ? ['qq_speak'] : [],
+        hint: ok
+          ? `想说话的时候用 qq_speak 把一句（≤${tts.maxChars} 字）说成语音条：音色只有 ${tts.voicesText}，voice 传 mandarin / cantonese 即可（粤语没有离线兜底）；一次一句、别连着发；它失败了就改发文字，别重试第二次`
+          : '这台机器现在合成不了语音（没有可用的 TTS 引擎），改发文字'
+      };
+    } catch {
+      return fallback;
+    }
+  }
+
+  /**
+   * 合成 + 发送。返回 { engine, seconds, voice, messageId, verified }。
+   * 失败一律抛（路由按 error.code 挑状态码）；无论成败，临时音频都在 finally 里删掉。
+   */
+  async function speakV2(key, text, { voice = '', rate = null } = {}) {
+    const vc = voiceCfg();
+    if (!vc.enabled) throw new Error('语音功能已关闭（socialV2.voice.enabled=false）');
+    const scopeKey = String(key ?? '').trim();
+    if (!scopeKey) throw new Error('key 不能为空（格式 group:群号 或 private:QQ号）');
+    const tts = ttsCfg();
+    const clean = sanitizeSpeakText(text, { maxChars: tts.maxChars });
+    // 音色只认两支女声（普通话·晓晓 / 粤语·曉曼）：给别的 id 直接 bad_voice 拒绝，
+    // **绝不**悄悄换成普通话 —— 粤语请求被念成普通话，比报错更难发现。
+    const wantedVoice = String(voice ?? '').trim();
+    const pickedVoice = wantedVoice ? resolveTtsVoice(wantedVoice) : null;
+    if (wantedVoice && !pickedVoice) {
+      throw new TtsError(
+        'bad_voice',
+        `只支持 ${tts.voicesText}（也可以说 mandarin / cantonese / 普通话 / 粤语 / 广东话）；「${wantedVoice}」不在名单里`,
+        { allowed: (tts.voices ?? []).map((item) => item.id) }
+      );
+    }
+    if (speakInFlight.has(scopeKey)) throw new TtsError('busy', '上一句还在合成，稍等一下再发');
+    // 额度先查后合成（见上面的三步说明）：这里抛的是 voiceBudgetCheck 的原文。
+    voiceBudgetCheck(scopeKey, vc);
+    const dir = tts.dir ? path.resolve(ROOT, tts.dir) : path.join(vc.dir, '.tts');
+    fs.mkdirSync(dir, { recursive: true });
+    const synthVoice = pickedVoice ? pickedVoice.id : tts.voice;
+    const voiceLang = pickedVoice ? pickedVoice.lang : tts.lang;
+    const rateInput = rate === null || rate === undefined || rate === '' ? tts.rate : Number(rate);
+    const synthRate = Number.isFinite(rateInput) ? Math.max(-50, Math.min(50, Math.round(rateInput))) : tts.rate;
+    speakInFlight.set(scopeKey, Date.now());
+    let made = null;
+    try {
+      const attempt = async (engine) => {
+        const stamp = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        const file = path.join(dir, `tts-${stamp}.${engine === 'sapi' ? 'wav' : 'mp3'}`);
+        try {
+          if (engine === 'edge') {
+            await synthesizeEdge(clean, {
+              voice: synthVoice,
+              rate: synthRate,
+              outFile: file,
+              pythonPath: resolveTtsPython(),
+              timeoutMs: tts.timeoutMs
+            });
+          } else {
+            await synthesizeSapi(clean, { outFile: file, timeoutMs: tts.timeoutMs });
+          }
+          return { engine, file };
+        } catch (error) {
+          try { fs.rmSync(file, { force: true }); } catch {}
+          throw error;
+        }
+      };
+      if (voiceLang === 'cantonese') {
+        // 粤语只有在线合成：本机 SAPI 只有 zh-CN 女声，没有粤语音色。
+        // 所以**不允许**用普通话糊过去 —— 合成不了就如实失败，让模型改发文字。
+        if (tts.engine === 'sapi') {
+          throw new TtsError(
+            'tts_unavailable',
+            '粤语只有在线合成（edge-tts），本机 SAPI 没有粤语音色；这会儿没合成成，改发文字吧'
+          );
+        }
+        try {
+          made = await attempt('edge');
+        } catch (edgeError) {
+          throw new TtsError(
+            'tts_unavailable',
+            `粤语只有在线合成（edge-tts），这会儿没合成成（${edgeError?.message ?? edgeError}）；改发文字吧`
+          );
+        }
+      } else if (tts.engine === 'auto') {
+        try {
+          made = await attempt('edge');
+        } catch (edgeError) {
+          // auto 口径：edge-tts 是主路（音色好），失败就回落 SAPI（离线、不限额）。
+          log(`[tts] edge-tts 失败，回落 SAPI：${edgeError?.message ?? edgeError}`);
+          try {
+            made = await attempt('sapi');
+          } catch (sapiError) {
+            throw new TtsError(
+              'tts_unavailable',
+              `两个引擎都没合成出来：edge-tts ${edgeError?.message ?? edgeError}；SAPI ${sapiError?.message ?? sapiError}`
+            );
+          }
+        }
+      } else {
+        // 显式指定引擎时不回落：配了 sapi 就只用 sapi，配了 edge 失败就是失败。
+        made = await attempt(tts.engine);
+      }
+      // 时长/体积上限是**硬拒绝**（dev-doc §7）：超了就删文件让模型改短，绝不偷偷裁剪。
+      const probe = await inspectAudio(made.file, { maxBytes: vc.maxBytes, maxSeconds: vc.maxSeconds });
+      if (!probe.ok) {
+        try { fs.rmSync(made.file, { force: true }); } catch {}
+        const seconds = probe.duration != null && Number.isFinite(Number(probe.duration)) ? Number(probe.duration) : null;
+        const detail = seconds != null
+          ? `这句 ${Math.round(seconds)} 秒，超过上限 ${Math.round(vc.maxSeconds)} 秒：说短一点，或者改发文字`
+          : (probe.error || '合成出来的音频不合规');
+        throw new TtsError('too_long', detail, { seconds });
+      }
+      const seconds = probe.duration != null && Number.isFinite(Number(probe.duration)) ? Number(probe.duration) : null;
+      const rel = path.relative(vc.dir, made.file).split(path.sep).join('/');
+      // audio: null —— 原样发送，不经过 ffmpeg（本机没有）。
+      const sent = await sendVoiceForV2(scopeKey, rel, { label: 'tts', audio: null });
+      log(`[tts] 合成成功 engine=${made.engine} 时长 ${seconds != null ? seconds.toFixed(1) : '?'}s → ${scopeKey}`);
+      appendActivity(`${scopeKey} [tts] 合成语音条（${made.engine}，${seconds != null ? seconds.toFixed(1) : '?'}s）`);
+      return {
+        engine: made.engine,
+        seconds,
+        voice: synthVoice,
+        messageId: sent.messageId ?? null,
+        verified: sent.verification?.confirmed === true
+      };
+    } finally {
+      if (made?.file) { try { fs.rmSync(made.file, { force: true }); } catch {} }
+      speakInFlight.delete(scopeKey);
+    }
   }
 
   // 发送一个收藏表情（按 emoji_id/url/md5 解析，发图片段）。
@@ -8479,7 +8684,7 @@ async function main() {
             merged.autoReplyCheckMs = Number.isFinite(n) ? Math.max(1000, Math.round(n)) : (current.autoReplyCheckMs ?? 30000);
           }
           // tools：只接受布尔开关
-          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'sendVoice'];
+          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'speak', 'sendVoice'];
           if (body.tools && typeof body.tools === 'object') {
             merged.tools = { ...(current.tools ?? {}), ...body.tools };
             for (const k of toolFlags) {
@@ -8799,6 +9004,9 @@ async function main() {
             collectSticker: 'qq_collect_sticker',
             getSelfImage: 'qq_get_self_image',
             sendVoice: 'qq_send_voice / qq_list_voices',
+            // TTS（T-032）：合成语音条。总开关是 socialV2.voice.enabled（关掉时不列进
+            // enabledTools），单工具软开关是 socialV2.tools.speak。
+            speak: 'qq_speak',
             // 自我资料（T-014）：模型看自己的资料、改昵称/签名/群名片。总开关是
             // socialV2.profile.enabled，`socialV2.tools.<flag> === false` 只是单工具软开关。
             getProfile: 'qq_get_profile',
@@ -8878,6 +9086,13 @@ async function main() {
           const enabledTools = [];
           for (const [flag, name] of Object.entries(toolMap)) {
             if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled()) && !(profileToolFlags.has(flag) && !profileEnabled) && !(imageToolFlags.has(flag) && (!imagesEnabled || (flag === 'drawImage' && !drawEnabled))) && !(flag === 'recall' && !crossEnabled) && !(flag === 'lookup' && !identityEnabled) && !(flag === 'affectReport' && !affectEnabled) && !(heyboxToolFlags.has(flag) && !heyboxEnabled) && !(flag === 'heyboxComment' && hb?.allowComment !== true) && !(deviceToolFlags.has(flag) && !deviceGranted)) enabledTools.push(name);
+          }
+          // TTS（T-032）：语音总开关关掉时 qq_speak 也一起从清单里消失。
+          // 单独在这里过滤，而不是往上面那行条件下再挂一个 `&&` —— 那行是
+          // scripts/test-device-wiring.mjs 的字面量锚点，撑长了会把别人的测试弄红。
+          if (cfg.socialV2?.voice?.enabled === false) {
+            const speakAt = enabledTools.indexOf('qq_speak');
+            if (speakAt >= 0) enabledTools.splice(speakAt, 1);
           }
           sendJson({
             ok: true,
@@ -9127,7 +9342,10 @@ async function main() {
               total: voiceLibrary().length,
               names: voiceLibrary().slice(0, 12).map((v) => v.name),
               maxSeconds: voiceCfg().maxSeconds,
-              hint: '可用 qq_list_voices 查看语音库，再用 qq_send_voice 把其中一个当语音发出去'
+              hint: '可用 qq_list_voices 查看语音库，再用 qq_send_voice 把其中一个当语音发出去',
+              // TTS（T-032）：模型自己「把一句话说成语音」，比发语音库里的成品更自然。
+              // ok=false 时（没引擎 / 语音总开关关着）它就该老老实实发文字。
+              speak: speakPromptBlockV2()
             }
           });
           return;
@@ -10120,6 +10338,62 @@ async function main() {
           } catch (error) {
             // 额度只在真正发出后才记账（voiceBudgetCommit），所以失败路径无需回滚。
             sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+          }
+          return;
+        }
+
+        // ── AI 侧 TTS（T-032）：把一句话合成语音条发出去 ─────────────────────
+        // 闸门顺序与 /api/socialV2/send-voice **逐条对齐**：语音是「开口说话」的强表达，
+        // 不能因为「这次是合成的」就少一道口子。额度检查在 speakV2 内部、合成之前。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/speak') {
+          const body = await readBody();
+          const token = String(body.token ?? req.headers['x-agent-token'] ?? '').trim();
+          const key = String(body.key ?? body.target ?? '').trim();
+          const voice = voiceCfg();
+          if (!voice.enabled) { sendJson({ ok: false, error: '语音功能已关闭', reason: 'disabled' }, 403); return; }
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空（格式 group:群号 或 private:QQ号）', reason: 'bad_key' }, 400); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用', reason: 'mode' }, 403); return; }
+          if (!token) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token', reason: 'token' }, 403); return; }
+          if (!agentTokenCoversSend(key, token)) {
+            sendJson({ ok: false, error: 'agent token 无效，或目标会话不在同一互通编号（可在控制台「跨渠道互通」里改编号）', reason: 'token' }, 403);
+            return;
+          }
+          if (!v2ToolEnabled('speak')) { sendJson({ ok: false, error: '工具未启用：qq_speak', reason: 'tool' }, 403); return; }
+          if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内', reason: 'scope' }, 403); return; }
+          if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送', reason: 'silent' }, 403); return; }
+          const keyMatch = /^(group|private):(\d+)$/.exec(key);
+          if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号', reason: 'bad_key' }, 400); return; }
+          const kind = keyMatch[1];
+          const id = Number(keyMatch[2]);
+          if (!Number.isFinite(id) || id <= 0 || !modeAllowed(key, kind, id, cfg, currentMode)) {
+            sendJson({ ok: false, error: '目标不在当前模式允许范围内', reason: 'scope' }, 403);
+            return;
+          }
+          try {
+            const spoken = await speakV2(key, body.text ?? body.message ?? '', { voice: body.voice, rate: body.rate });
+            sendJson({
+              ok: true,
+              key,
+              engine: spoken.engine,
+              seconds: spoken.seconds,
+              voice: spoken.voice,
+              messageId: spoken.messageId,
+              // verified=true 表示已用 get_msg 回读到这条消息的 record 段
+              verified: spoken.verified
+            });
+          } catch (error) {
+            // 按错误类型给状态码：文本问题 400、额度 429、引擎问题 503（引擎失败不是
+            // 调用方写错了参数，回 400 会让模型以为改参数就能好）。
+            const code = error?.code;
+            const message = error?.message ?? String(error);
+            if (code === 'empty' || code === 'too_long' || code === 'bad_args' || code === 'busy' || code === 'bad_voice') {
+              sendJson({ ok: false, error: message, reason: code }, 400);
+              return;
+            }
+            if (/语音发送频率超限/.test(message)) { sendJson({ ok: false, error: message, reason: 'budget' }, 429); return; }
+            if (code === 'timeout') { sendJson({ ok: false, error: message, reason: 'tts_timeout' }, 503); return; }
+            if (code === 'tts_unavailable' || code === 'tts_failed') { sendJson({ ok: false, error: message, reason: 'tts_unavailable' }, 503); return; }
+            sendJson({ ok: false, error: message, reason: 'error' }, 500);
           }
           return;
         }
@@ -15655,7 +15929,7 @@ async function main() {
     // 张雪峰视角（T-033）：预设正文改完要重启 DSH 才进新会话，而这份提示词是每轮现拼的，
     // 所以触发条件也写这里 —— 用户明确要求先别重启。只对 allowKeys 里的会话出现。
     const zxLine = zxPerspectiveAllowedV2(key)
-      ? '【张雪峰视角】这个会话能调 zx_perspective：话题一落到志愿填报 / 专业选择 / 择校 / 就业方向 / 学历与阶层流动，就先调一次再回答（对方没提「张雪峰」也算）；它给的是角度，不是你换人格。纯闲聊、写代码、哄人不调。\n\n'
+      ? '【张雪峰视角】这个会话能调 zx_perspective：**只在对方真在问建议**（志愿填报 / 专业选择 / 择校 / 就业 / 学历与阶层流动这类事，且是在问「该怎么选 / 值不值 / 有什么打算」）时，调一次再答；只是顺口提一句、自己在讲自己的事、闲聊、写代码、哄人，都别调，拿不准就先按自己的判断聊。它给的是角度，不是你换人格。\n\n'
       : '';
     const lastAiMin = st.lastAiReplyAt ? Math.max(0, Math.round((Date.now() - Number(st.lastAiReplyAt)) / 60000)) : null;
     const statusBits = [`未读 ${(st.unread || []).length} 条`];

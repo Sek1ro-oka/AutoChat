@@ -232,7 +232,8 @@
       "stickerNote": true,
       "collectSticker": true,
       "getSelfImage": true,
-      "sendVoice": false
+      "sendVoice": false,
+      "speak": true
     },
     "wake": {
       "defaultMode": "diving",
@@ -321,6 +322,19 @@
       "loudness": "normal",
       "ffmpegPath": "",
       "autoReadback": true
+    },
+    "tts": {
+      "engine": "auto",
+      "voice": "zh-CN-XiaoxiaoNeural",
+      "voices": [
+        { "id": "zh-CN-XiaoxiaoNeural", "label": "普通话·晓晓" },
+        { "id": "zh-HK-HiuMaanNeural", "label": "粤语·曉曼" }
+      ],
+      "rate": 0,
+      "maxChars": 80,
+      "timeoutMs": 15000,
+      "pythonPath": "",
+      "dir": ""
     },
     "proactive": {
       "enabled": true,

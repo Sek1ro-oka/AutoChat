@@ -193,6 +193,10 @@ const tests = [
   // mtime 缓存/读不到即 unavailable/只读 SKILL.md；group:1131654608 之外一律 403、
   // allowKeys 为空时 fail-closed。全部打真实 HTTP 控制台，不读外部网络。
   'test-zx-perspective.mjs',
+  // 文本→语音条（T-032）：清洗/切句/配置夹取；路由闸门（voice.enabled、白名单、tools.speak、
+  // token、额度 429）；合成失败回落 SAPI 与超时 kill；成功路径走真实 sendVoiceForV2
+  // （record 段落在 <语音库>/.tts、audio 传 null）且发完即删。合成用假 spawn，不发 QQ 消息。
+  'test-tts.mjs',
 ];
 let failed = 0;
 for (const test of tests) {
