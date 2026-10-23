@@ -156,3 +156,7 @@ if (process.env.QQ_BRIDGE_TEST_LIVE === '1') {
 
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 if (fail > 0) process.exit(1);
+// 2026-10-23：用户要求「增强收藏与发表情包的积极性，收藏多少都行」。
+ok(buildStickerStrategyHint().includes('收藏没有次数上限'), '策略提示写明收藏无上限');
+ok(buildStickerStrategyHint().includes('两三条里来一张'), '策略提示把频率放宽到两三条一张');
+ok(buildStickerStrategyHint().includes('qq_collect_sticker'), '策略提示包含收藏工具');
