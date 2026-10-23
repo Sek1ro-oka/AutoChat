@@ -1289,7 +1289,7 @@ function loadConfig() {
   // tts-core 出问题（也不让 loadConfig 期依赖新模块）。
   cfg.socialV2.tts = {
     engine: 'auto',
-    voice: 'zh-CN-XiaoxiaoNeural',
+    voice: 'zh-CN-XiaoyiNeural',
     rate: 0,
     maxChars: 80,
     timeoutMs: 15000,
@@ -3165,7 +3165,7 @@ async function main() {
         voices: (tts.voices ?? []).map((item) => ({ id: item.id, label: item.label })),
         tools: ok ? ['qq_speak'] : [],
         hint: ok
-          ? `想说话的时候用 qq_speak 把一句（≤${tts.maxChars} 字）说成语音条：音色只有 ${tts.voicesText}，voice 传 mandarin / cantonese 即可（粤语没有离线兜底）；一次一句、别连着发；它失败了就改发文字，别重试第二次`
+          ? `想说话的时候用 qq_speak 把一句（≤${tts.maxChars} 字）说成语音条：音色只有 ${tts.voicesText}，voice 传 mandarin（默认·晓依）/ xiaoxiao（晓晓）/ cantonese（曉曼）即可（粤语没有离线兜底）；一次一句、别连着发；它失败了就改发文字，别重试第二次`
           : '这台机器现在合成不了语音（没有可用的 TTS 引擎），改发文字'
       };
     } catch {
@@ -3184,14 +3184,14 @@ async function main() {
     if (!scopeKey) throw new Error('key 不能为空（格式 group:群号 或 private:QQ号）');
     const tts = ttsCfg();
     const clean = sanitizeSpeakText(text, { maxChars: tts.maxChars });
-    // 音色只认两支女声（普通话·晓晓 / 粤语·曉曼）：给别的 id 直接 bad_voice 拒绝，
+    // 音色只认三支女声（普通话·晓依 / 普通话·晓晓 / 粤语·曉曼）：给别的 id 直接 bad_voice 拒绝，
     // **绝不**悄悄换成普通话 —— 粤语请求被念成普通话，比报错更难发现。
     const wantedVoice = String(voice ?? '').trim();
     const pickedVoice = wantedVoice ? resolveTtsVoice(wantedVoice) : null;
     if (wantedVoice && !pickedVoice) {
       throw new TtsError(
         'bad_voice',
-        `只支持 ${tts.voicesText}（也可以说 mandarin / cantonese / 普通话 / 粤语 / 广东话）；「${wantedVoice}」不在名单里`,
+        `只支持 ${tts.voicesText}（也可以说 mandarin / 普通话 / 晓依 / 晓晓 / cantonese / 粤语 / 广东话 / 曉曼）；「${wantedVoice}」不在名单里`,
         { allowed: (tts.voices ?? []).map((item) => item.id) }
       );
     }

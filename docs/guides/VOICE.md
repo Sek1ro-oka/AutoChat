@@ -41,8 +41,8 @@
 | `socialV2.voice.autoReadback` | `true` | 发送后自动回读一条确认 |
 | `socialV2.tools.speak` | `true` | 控制 `qq_speak` 是否注册给模型（关掉只影响「文本合成」，不影响发语音库里的成品） |
 | `socialV2.tts.engine` | `auto` | 合成引擎：`auto`（先 edge-tts，失败回落 SAPI）/ `edge` / `sapi` |
-| `socialV2.tts.voice` | `zh-CN-XiaoxiaoNeural` | 默认音色，**只能是下面 `voices` 里的两项之一**；配了别的值会在归一化时回落默认并记一条 warn 日志 |
-| `socialV2.tts.voices` | 见下 | 固定两支女声：`{id:'zh-CN-XiaoxiaoNeural', label:'普通话·晓晓'}`、`{id:'zh-HK-HiuMaanNeural', label:'粤语·曉曼'}`；这是给人看的镜像，真正的白名单在 `src/tts-core.js` 的 `TTS_VOICES`（**不许加男声**） |
+| `socialV2.tts.voice` | `zh-CN-XiaoyiNeural` | 默认音色（普通话·晓依），**只能是下面 `voices` 里的三项之一**（也可以写 `mandarin` / `普通话` / `晓依` / `xiaoxiao` / `晓晓` / `cantonese` / `粤语` / `曉曼` 这类别名）；配了别的值会在归一化时回落默认并记一条 warn 日志 |
+| `socialV2.tts.voices` | 见下 | 固定三支女声：`{id:'zh-CN-XiaoyiNeural', label:'普通话·晓依'}`、`{id:'zh-CN-XiaoxiaoNeural', label:'普通话·晓晓'}`、`{id:'zh-HK-HiuMaanNeural', label:'粤语·曉曼'}`；这是给人看的镜像，真正的白名单在 `src/tts-core.js` 的 `TTS_VOICES`（**不许加男声**） |
 | `socialV2.tts.rate` | `0` | 语速百分比，夹取 -50 ~ +50 |
 | `socialV2.tts.maxChars` | `80` | 一次最多合成多少字，夹取 10 ~ 120；超了**直接拒绝**，不悄悄截断 |
 | `socialV2.tts.timeoutMs` | `15000` | 单次合成超时，夹取 3000 ~ 30000 |
@@ -71,7 +71,7 @@
 
 模型想说一句话但不想打字时，可以调 `qq_speak`：桥接把它合成成音频 → 立刻当语音条发出去 → 删掉临时文件。走的是和 `qq_send_voice` **完全同一套**发送链路与闸门。
 
-- **两支女声，别的都不许**：`普通话·晓晓`（`zh-CN-XiaoxiaoNeural`）与 `粤语·曉曼`（`zh-HK-HiuMaanNeural`）。`qq_speak` 的 `voice` 只认三种写法：完整 id、`mandarin` / `普通话`、`cantonese` / `粤语` / `广东话`；其它任何值（含所有男声、外语）一律 400 `bad_voice` 并列出允许的两项 —— **绝不静默回落**：把用户要的粤语念成普通话，比报错更难发现。
+- **三支女声，别的都不许**：默认 `普通话·晓依`（`zh-CN-XiaoyiNeural`），备用 `普通话·晓晓`（`zh-CN-XiaoxiaoNeural`），粤语 `粤语·曉曼`（`zh-HK-HiuMaanNeural`）。`qq_speak` 的 `voice` 只认三类写法：完整 id、普通话别名（`mandarin` / `普通话` / `中文` / `晓依` / `xiaoxiao` / `晓晓`）、粤语别名（`cantonese` / `粤语` / `广东话` / `曉曼` / `晓曼`）；其它任何值（含所有男声、外语）一律 400 `bad_voice` 并列出允许的三项 —— **绝不静默回落**：把用户要的粤语念成普通话，比报错更难发现。
 - **粤语没有离线兜底**：本机 SAPI 只有 `Microsoft Huihui Desktop`（zh-CN 女声），没有粤语音色。所以请求粤语时只走 `edge-tts`，它失败就直接返回 `tts_unavailable`（「粤语只有在线合成，这会儿没合成成，改发文字吧」），**不会**用普通话糊过去；只有普通话请求在 `engine:'auto'` 下才会回落 SAPI。
 - **两个引擎**：`edge-tts`（Python 包，音质好、走微软端点，冷启动约 2.8 秒；**只走库 API** —— 参数写进 job JSON，用 `python -c <脚本>` + 环境变量 `TTS_JOB` 调 `edge_tts.Communicate(...).save(...)`，不用它的命令行入口，原因见排障表）与 **SAPI**（Windows 自带 `System.Speech`，离线、音色朴素，约 0.8 秒）。`engine: 'auto'` 时普通话先试 edge-tts，失败自动回落 SAPI；显式配成 `edge` 就不回落（失败就是失败）。
 - **隐私**：`edge-tts` 会把要念的**原文发到微软的 TTS 端点**。合成内容里别出现密码、密钥、本机路径、群友隐私。完全不想出网就把 `socialV2.tts.engine` 设成 `sapi`。

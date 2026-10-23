@@ -325,8 +325,9 @@
     },
     "tts": {
       "engine": "auto",
-      "voice": "zh-CN-XiaoxiaoNeural",
+      "voice": "zh-CN-XiaoyiNeural",
       "voices": [
+        { "id": "zh-CN-XiaoyiNeural", "label": "普通话·晓依" },
         { "id": "zh-CN-XiaoxiaoNeural", "label": "普通话·晓晓" },
         { "id": "zh-HK-HiuMaanNeural", "label": "粤语·曉曼" }
       ],

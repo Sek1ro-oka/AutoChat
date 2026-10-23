@@ -1747,12 +1747,12 @@ if (cfg.socialV2?.voice?.enabled !== false && cfg.socialV2?.tools?.sendVoice !==
 if (cfg.socialV2?.voice?.enabled !== false && cfg.socialV2?.tools?.speak !== false) {
   server.tool(
     'qq_speak',
-    '把一句话合成 QQ 语音条发出去（自己「开口说话」，不是发语音库里现成的音频）。注意：① 这句话的正文会发到**微软的 TTS 端点**（edge-tts）合成，别把密码/密钥/本机路径念出来，也别念群友的隐私；② 一次只说一句，长度上限见 prompt 的 voices.speak.maxChars（默认 80 字），超了会被拒（reason=too_long），删短再说，别硬试；③ 合成失败（reason=tts_unavailable / tts_timeout）说明这台机器现在说不了话，**改发文字，不要重试第二次**；④ 返回 verified=true 才代表语音真的发出去了，没 verified 就别对用户说你发了语音；⑤ 语音是强表达，别滥用，偶尔一条就够；⑥ 音色**只有两支女声**：普通话·晓晓（voice 传 mandarin / 普通话）与 粤语·曉曼（voice 传 cantonese / 粤语），别的音色一律被拒（reason=bad_voice）；粤语只有在线合成，合成不了就改发文字，**不会**用普通话顶替。',
+    '把一句话合成 QQ 语音条发出去（自己「开口说话」，不是发语音库里现成的音频）。注意：① 这句话的正文会发到**微软的 TTS 端点**（edge-tts）合成，别把密码/密钥/本机路径念出来，也别念群友的隐私；② 一次只说一句，长度上限见 prompt 的 voices.speak.maxChars（默认 80 字），超了会被拒（reason=too_long），删短再说，别硬试；③ 合成失败（reason=tts_unavailable / tts_timeout）说明这台机器现在说不了话，**改发文字，不要重试第二次**；④ 返回 verified=true 才代表语音真的发出去了，没 verified 就别对用户说你发了语音；⑤ 语音是强表达，别滥用，偶尔一条就够；⑥ 音色**只有三支女声**：普通话·晓依（默认，voice 传 mandarin / 普通话 / 晓依）、普通话·晓晓（备用，voice 传 xiaoxiao / 晓晓）、粤语·曉曼（voice 传 cantonese / 粤语 / 曉曼），别的音色一律被拒（reason=bad_voice）；粤语只有在线合成，合成不了就改发文字，**不会**用普通话顶替。',
     {
       key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
       token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
       text: z.string().describe('要念出来的那句话（一句，默认 ≤80 字；纯文本，不要带 Markdown/链接/emoji）'),
-      voice: z.string().optional().describe('可选音色，只支持两种写法：mandarin / 普通话（普通话·晓晓，默认）或 cantonese / 粤语 / 广东话（粤语·曉曼）；也可以直接给音色 id zh-CN-XiaoxiaoNeural / zh-HK-HiuMaanNeural。男声与其它语言会被拒（bad_voice）'),
+      voice: z.string().optional().describe('可选音色，只支持这几种写法：mandarin / 普通话 / 中文 / 晓依（普通话·晓依，默认）、xiaoxiao / 晓晓（普通话·晓晓，备用）、cantonese / 粤语 / 广东话 / 曉曼（粤语·曉曼）；也可以直接给音色 id zh-CN-XiaoyiNeural / zh-CN-XiaoxiaoNeural / zh-HK-HiuMaanNeural。男声与其它语言会被拒（bad_voice）'),
       rate: z.number().optional().describe('可选：语速百分比（-50 ~ +50，默认 0）')
     },
     async ({ key, token, text, voice, rate }) => {

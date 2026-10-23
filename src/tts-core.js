@@ -27,7 +27,7 @@ export class TtsError extends Error {
 // 配置缺省值：bridge 的 socialV2.tts 与 resolveTtsSettings 都吃这一份，别在两处写数字。
 export const TTS_DEFAULTS = Object.freeze({
   engine: 'auto',
-  voice: 'zh-CN-XiaoxiaoNeural',
+  voice: 'zh-CN-XiaoyiNeural',
   rate: 0,
   maxChars: 80,
   timeoutMs: 15000,
@@ -46,29 +46,40 @@ export const TTS_LIMITS = Object.freeze({
 const ENGINES = Object.freeze(['edge', 'sapi', 'auto']);
 export const TTS_ENGINES = ENGINES;
 
-// 只开两支女声（用户硬要求）：普通话·晓晓 与 粤语·曉曼。
-// 顺序即展示顺序；`lang` 决定「能不能用 SAPI 兜底」——本机 SAPI 只有 zh-CN 女声，
-// 粤语没有离线音色，所以粤语只能走 edge-tts，合成不了就是合成不了。
+// 只开三支女声（用户硬要求）：普通话·晓依（默认）、普通话·晓晓（备用）、粤语·曉曼。
+// 顺序即展示顺序，也是缺省值（第一条就是 TTS_DEFAULT_VOICE）；`lang` 决定「能不能用
+// SAPI 兜底」——本机 SAPI 只有 zh-CN 女声，粤语没有离线音色，所以粤语只能走 edge-tts，
+// 合成不了就是合成不了。
 // **不许往这张表里加任何 Male 音色**（Yunxi / Yunyang / Yunjian / Yunxia / WanLung …）。
 export const TTS_VOICES = Object.freeze([
+  Object.freeze({ id: 'zh-CN-XiaoyiNeural', label: '普通话·晓依', lang: 'mandarin' }),
   Object.freeze({ id: 'zh-CN-XiaoxiaoNeural', label: '普通话·晓晓', lang: 'mandarin' }),
   Object.freeze({ id: 'zh-HK-HiuMaanNeural', label: '粤语·曉曼', lang: 'cantonese' })
 ]);
 
-export const TTS_DEFAULT_VOICE = 'zh-CN-XiaoxiaoNeural';
+export const TTS_DEFAULT_VOICE = 'zh-CN-XiaoyiNeural';
 
-// 模型嘴上说的「普通话 / 粤语」映射到具体音色；不在这里的一律算 bad_voice。
+// 模型嘴上说的「普通话 / 晓依 / 晓晓 / 粤语」映射到具体音色；不在这里的一律算 bad_voice。
 const VOICE_ALIASES = new Map([
+  ['zh-cn-xiaoyineural', 'zh-CN-XiaoyiNeural'],
+  ['mandarin', 'zh-CN-XiaoyiNeural'],
+  ['普通话', 'zh-CN-XiaoyiNeural'],
+  ['中文', 'zh-CN-XiaoyiNeural'],
+  ['xiaoyi', 'zh-CN-XiaoyiNeural'],
+  ['晓依', 'zh-CN-XiaoyiNeural'],
   ['zh-cn-xiaoxiaoneural', 'zh-CN-XiaoxiaoNeural'],
-  ['mandarin', 'zh-CN-XiaoxiaoNeural'],
-  ['普通话', 'zh-CN-XiaoxiaoNeural'],
+  ['xiaoxiao', 'zh-CN-XiaoxiaoNeural'],
+  ['晓晓', 'zh-CN-XiaoxiaoNeural'],
   ['zh-hk-hiumaanneural', 'zh-HK-HiuMaanNeural'],
   ['cantonese', 'zh-HK-HiuMaanNeural'],
   ['粤语', 'zh-HK-HiuMaanNeural'],
-  ['广东话', 'zh-HK-HiuMaanNeural']
+  ['广东话', 'zh-HK-HiuMaanNeural'],
+  ['xiaoman', 'zh-HK-HiuMaanNeural'],
+  ['曉曼', 'zh-HK-HiuMaanNeural'],
+  ['晓曼', 'zh-HK-HiuMaanNeural']
 ]);
 
-/** 「普通话·晓晓 / 粤语·曉曼」——错误文案与 prompt 共用同一句人话。 */
+/** 「普通话·晓依 / 普通话·晓晓 / 粤语·曉曼」——错误文案与 prompt 共用同一句人话。 */
 export function ttsVoiceLabels() {
   return TTS_VOICES.map((voice) => voice.label).join(' / ');
 }

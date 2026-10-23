@@ -334,7 +334,7 @@ await check('切句：单句超长时先按逗号退步，实在不行才硬切�
 await check('配置：缺省值 / engine 归一 / maxChars、timeoutMs、rate 夹取', async () => {
   const d = resolveTtsSettings();
   assert.equal(d.engine, 'auto');
-  assert.equal(d.voice, 'zh-CN-XiaoxiaoNeural');
+  assert.equal(d.voice, 'zh-CN-XiaoyiNeural');
   assert.equal(d.lang, 'mandarin');
   assert.equal(d.rate, 0);
   assert.equal(d.maxChars, 80);
@@ -351,19 +351,19 @@ await check('配置：缺省值 / engine 归一 / maxChars、timeoutMs、rate �
   assert.equal(resolveTtsSettings({ timeoutMs: 999999 }).timeoutMs, 30000);
   assert.equal(resolveTtsSettings({ rate: 999 }).rate, 50);
   assert.equal(resolveTtsSettings({ rate: -999 }).rate, -50);
-  assert.equal(resolveTtsSettings({ voice: '   ' }).voice, 'zh-CN-XiaoxiaoNeural');
+  assert.equal(resolveTtsSettings({ voice: '   ' }).voice, 'zh-CN-XiaoyiNeural');
   assert.equal(resolveTtsSettings({ voice: '粤语' }).voice, 'zh-HK-HiuMaanNeural');
   assert.equal(resolveTtsSettings({ voice: 'Cantonese' }).lang, 'cantonese');
   // 白名单之外的音色**不静默接受**：回落默认，并给一条 warn（bridge 会记日志）。
   const male = resolveTtsSettings({ voice: 'zh-CN-YunxiNeural' });
-  assert.equal(male.voice, 'zh-CN-XiaoxiaoNeural');
+  assert.equal(male.voice, 'zh-CN-XiaoyiNeural');
   assert.equal(male.warnings.length, 1);
   assert.match(male.warnings[0], /不在白名单里/);
-  assert.match(male.warnings[0], /普通话·晓晓/);
+  assert.match(male.warnings[0], /普通话·晓依/);
   assert.equal(resolveTtsSettings({ dir: ' audio/tts ' }).dir, 'audio/tts');
 });
 
-await check('音色白名单：只有普通话·晓晓 / 粤语·曉曼两支女声，一个男声都没有', async () => {
+await check('音色白名单：普通话·晓依（默认）/ 普通话·晓晓（备用）/ 粤语·曉曼，一个男声都没有', async () => {
   // 静态断言：白名单表里不许出现任何 Male 音色 id（模型传进来会被 bad_voice 挡住，
   // 但配置里也不许有人把它们写进去当可选音色）。
   const core = fs.readFileSync(path.join(ROOT, 'src', 'tts-core.js'), 'utf8');
@@ -373,26 +373,41 @@ await check('音色白名单：只有普通话·晓晓 / 粤语·曉曼两支女
   const table = core.slice(start, end);
   const maleIds = ['Yunxi', 'Yunyang', 'Yunjian', 'Yunxia', 'Yunfeng', 'Yunhao', 'Yunze', 'Yunjie', 'Yunye', 'Yunqiu', 'WanLung'];
   for (const id of maleIds) assert.equal(table.includes(id), false, `白名单里不许出现男声 ${id}`);
-  assert.deepEqual(TTS_VOICES.map((voice) => voice.id), ['zh-CN-XiaoxiaoNeural', 'zh-HK-HiuMaanNeural']);
-  assert.deepEqual(TTS_VOICES.map((voice) => voice.label), ['普通话·晓晓', '粤语·曉曼']);
-  assert.deepEqual(TTS_VOICES.map((voice) => voice.lang), ['mandarin', 'cantonese']);
-  assert.equal(TTS_DEFAULT_VOICE, 'zh-CN-XiaoxiaoNeural');
-  assert.equal(ttsVoiceLabels(), '普通话·晓晓 / 粤语·曉曼');
+  assert.deepEqual(TTS_VOICES.map((voice) => voice.id), [
+    'zh-CN-XiaoyiNeural',
+    'zh-CN-XiaoxiaoNeural',
+    'zh-HK-HiuMaanNeural'
+  ]);
+  assert.deepEqual(TTS_VOICES.map((voice) => voice.label), ['普通话·晓依', '普通话·晓晓', '粤语·曉曼']);
+  assert.deepEqual(TTS_VOICES.map((voice) => voice.lang), ['mandarin', 'mandarin', 'cantonese']);
+  // 顺序即展示顺序、也是缺省：第一条必须是默认音色，两处不能各写各的。
+  assert.equal(TTS_VOICES[0].id, 'zh-CN-XiaoyiNeural');
+  assert.equal(TTS_DEFAULT_VOICE, 'zh-CN-XiaoyiNeural');
+  assert.equal(TTS_DEFAULT_VOICE, TTS_VOICES[0].id);
+  assert.equal(ttsVoiceLabels(), '普通话·晓依 / 普通话·晓晓 / 粤语·曉曼');
   // 别名只认这几种写法；男声 id 解析不出结果（→ 调用方报 bad_voice）。
-  for (const alias of ['mandarin', '普通话', 'zh-CN-XiaoxiaoNeural']) {
-    assert.equal(resolveTtsVoice(alias)?.id, 'zh-CN-XiaoxiaoNeural', `${alias} 应当解析成普通话`);
+  for (const alias of ['mandarin', '普通话', '中文', 'xiaoyi', '晓依', 'zh-CN-XiaoyiNeural', 'MANDARIN']) {
+    assert.equal(resolveTtsVoice(alias)?.id, 'zh-CN-XiaoyiNeural', `${alias} 应当解析成普通话·晓依`);
   }
-  for (const alias of ['cantonese', '粤语', '广东话', 'zh-HK-HiuMaanNeural']) {
+  for (const alias of ['xiaoxiao', '晓晓', 'zh-CN-XiaoxiaoNeural']) {
+    assert.equal(resolveTtsVoice(alias)?.id, 'zh-CN-XiaoxiaoNeural', `${alias} 应当解析成普通话·晓晓（备用）`);
+  }
+  for (const alias of ['cantonese', '粤语', '广东话', 'xiaoman', '曉曼', '晓曼', 'zh-HK-HiuMaanNeural']) {
     assert.equal(resolveTtsVoice(alias)?.id, 'zh-HK-HiuMaanNeural', `${alias} 应当解析成粤语`);
   }
-  for (const bad of ['zh-CN-YunxiNeural', 'en-US-AriaNeural', '随便', '']) {
+  for (const bad of ['zh-CN-YunxiNeural', 'en-US-AriaNeural', 'zh-CN-liaoning-XiaobeiNeural', '随便', '']) {
     assert.equal(resolveTtsVoice(bad), null, `${bad} 不该被解析成任何音色`);
   }
   // config.example.json 里那份镜像也要一致（出版物不能教人配男声）。
   const example = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.example.json'), 'utf8'));
   const tts = example.socialV2.tts;
-  assert.deepEqual(tts.voices.map((voice) => voice.id), ['zh-CN-XiaoxiaoNeural', 'zh-HK-HiuMaanNeural']);
-  assert.deepEqual(tts.voices.map((voice) => voice.label), ['普通话·晓晓', '粤语·曉曼']);
+  assert.deepEqual(tts.voices.map((voice) => voice.id), [
+    'zh-CN-XiaoyiNeural',
+    'zh-CN-XiaoxiaoNeural',
+    'zh-HK-HiuMaanNeural'
+  ]);
+  assert.deepEqual(tts.voices.map((voice) => voice.label), ['普通话·晓依', '普通话·晓晓', '粤语·曉曼']);
+  assert.equal(tts.voice, TTS_DEFAULT_VOICE, 'config.example.json 的默认音色要与代码一致');
   assert.equal(TTS_VOICES.some((voice) => voice.id === tts.voice), true, 'tts.voice 必须在白名单之内');
 });
 
@@ -477,11 +492,12 @@ await check('音色白名单：只有普通话·晓晓 / 粤语·曉曼两支女
       assert.equal(fake.calls.length, 0, '文本不合格时不应该合成');
     });
 
-    await check('闸门：男声 / 外语音色 → 400 bad_voice，并列出允许的两项', async () => {
+    await check('闸门：男声 / 外语音色 → 400 bad_voice，并列出允许的三项', async () => {
       for (const bad of ['zh-CN-YunxiNeural', 'en-US-AriaNeural']) {
         const res = await s.speak({ key: KEY, text: '你好', voice: bad }, s.token(KEY));
         assert.equal(res.status, 400, res.raw);
         assert.equal(res.json.reason, 'bad_voice');
+        assert.match(res.json.error, /普通话·晓依/);
         assert.match(res.json.error, /普通话·晓晓/);
         assert.match(res.json.error, /粤语·曉曼/);
       }
