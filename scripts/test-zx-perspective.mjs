@@ -522,6 +522,28 @@ function fixtureConfig(dir) {
   }
 }
 
+// T-033：唤醒提示词里也写死「话题命中就调张雪峰视角」，不用等 DSH 重启才进新会话。
+// 这份提示词是桥接每一轮现拼的，所以判定必须和端点一致（同一份 allowKeys + 同一个默认值）。
+{
+  const h = await bridgeHarness({ config: { allow: { private: ['123'], groups: ['1131654608', '119212385'] } } });
+  try {
+    await check('the wake prompt tells an allowed group when to consult, and stays quiet elsewhere', async () => {
+      const allowed = h.buildWakePromptV2(ZX_KEY, 'atMention');
+      assert.ok(allowed.includes('【张雪峰视角】'), '允许的群要把触发条件写进唤醒提示词（等不了 DSH 重启）');
+      assert.ok(allowed.includes('zx_perspective'), '要写清调哪个工具');
+      for (const topic of ['志愿填报', '专业选择', '择校', '就业方向']) {
+        assert.ok(allowed.includes(topic), `四个触发话题都要点到，缺 ${topic}`);
+      }
+      const other = h.buildWakePromptV2(OTHER_KEY, 'atMention');
+      assert.equal(other.includes('【张雪峰视角】'), false, '不在 allowKeys 的群不能看到这张小灶');
+      assert.equal(other.includes('zx_perspective'), false, '连工具名都不该出现');
+      // allowKeys: [] = 谁都不许：提示词不能因为「有默认值」又把它放出来（与端点同一份判定）。
+      h.cfg.socialV2.zx = { ...h.cfg.socialV2.zx, allowKeys: [] };
+      assert.equal(h.buildWakePromptV2(ZX_KEY, 'atMention').includes('【张雪峰视角】'), false, 'allowKeys: [] 时提示词也要闭嘴');
+    });
+  } finally { await h.close(); }
+}
+
 // 源码层断言：MCP 工具真的注册了，位置在 reach 之后、connect 之前；bridge 端点串没写歪。
 {
   await check('MCP：zx_perspective 已注册，描述写清 gating / 参考资料而非指令', async () => {
@@ -551,7 +573,7 @@ function fixtureConfig(dir) {
   await check('bridge：端点、允许列表默认值、4000 上限与 mtime 缓存都在', async () => {
     const src = fs.readFileSync(path.join(ROOT, 'src/bridge.js'), 'utf8');
     assert.ok(src.includes("'/api/socialV2/zx-perspective'"));
-    assert.ok(src.includes("const ZX_ALLOW_KEYS = ['group:1131654608'];"), '默认只允许一个群');
+    assert.ok(src.includes("const ZX_DEFAULT_ALLOW_KEYS = ['group:1131654608'];"), '默认只允许一个群');
     assert.ok(src.includes('const ZX_MAX_CHARS = 4000;'));
     assert.ok(src.includes('function readZxSkillText('), '要有按 mtime 的读取函数');
     assert.ok(src.includes('cached.mtimeMs === stat.mtimeMs'), '缓存键必须是 mtime');
@@ -569,6 +591,16 @@ function fixtureConfig(dir) {
     // Z-002：只服务 SKILL.md 这一份文件。
     assert.ok(src.includes("const ZX_SKILL_BASENAME = 'SKILL.md';"), '要有文件名白名单');
     assert.ok(src.includes('path.basename(file) !== ZX_SKILL_BASENAME'), 'readZxSkillText 要校验文件名');
+  });
+
+  await check('bridge：默认群号只留一个字面量（ZX_DEFAULT_ALLOW_KEYS），端点与唤醒提示词共用', async () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src/bridge.js'), 'utf8');
+    // 只认带引号的字面量（注释里提到群号不算「又抄了一份默认值」）。
+    const hits = src.split(/\r?\n/).filter((line) => line.includes("'group:1131654608'"));
+    assert.equal(hits.length, 1, `默认群号字面量应只在 ZX_DEFAULT_ALLOW_KEYS 那一行，实际 ${hits.length} 行：${hits.join(' | ')}`);
+    assert.ok(hits[0].includes('const ZX_DEFAULT_ALLOW_KEYS = '), `那一行必须是常量定义：${hits[0]}`);
+    // 唤醒提示词的判定必须复用端点那份归一（含默认值与 allowKeys: [] 的语义），不许另写一套。
+    assert.ok(src.includes('zxPerspectiveSettings(cfg).allowKeys.includes('), '唤醒提示词要复用 zxPerspectiveSettings 的判定');
   });
 
   await check('三个改动文件 node --check 通过', async () => {

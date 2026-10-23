@@ -2404,7 +2404,9 @@ function canonicalV2Key(key) {
 // 消息都读一遍 25KB，也能让运营改完 skill 文件立刻生效（mtime 一变缓存自然失效）。
 const ZX_SKILL_FILE = path.join(os.homedir(), '.agents', 'skills', 'zhangxuefeng-skill', 'SKILL.md');
 // 可用范围：默认只有这一个群。设计上就是个「只给某群开的小灶」，不是通用工具。
-const ZX_ALLOW_KEYS = ['group:1131654608'];
+// 这个默认值只有一个来源（T-033）：端点（zxPerspectiveSettings）和唤醒提示词
+// （zxPerspectiveAllowedV2）都读它，别在别处再抄一份群号。
+const ZX_DEFAULT_ALLOW_KEYS = ['group:1131654608'];
 const ZX_MAX_CHARS = 4000;
 // 允许读取的**唯一**文件名。`socialV2.zx.dir` 是操作者配置，理论上可以指向任何可读
 // 文件（比如私钥、日记），而它的内容会被原样喂给模型 —— 所以这里按「只能读那一份
@@ -2552,7 +2554,7 @@ function zxPerspectiveSettings(cfgLike) {
   const raw = cfgLike?.socialV2?.zx;
   const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
   const dir = String(source.dir ?? '').trim() || ZX_SKILL_FILE;
-  const allowKeys = (Array.isArray(source.allowKeys) ? source.allowKeys : ZX_ALLOW_KEYS)
+  const allowKeys = (Array.isArray(source.allowKeys) ? source.allowKeys : ZX_DEFAULT_ALLOW_KEYS)
     .map((k) => canonicalV2Key(String(k ?? '')))
     .filter(Boolean);
   return { dir, allowKeys };
@@ -15417,6 +15419,16 @@ async function main() {
     return wakePriorityV2(reason) >= 90;
   }
 
+  /**
+   * 张雪峰视角的可用范围（T-033）：和 /api/socialV2/zx-perspective 端点走**同一份**判定
+   * （zxPerspectiveSettings → canonicalV2Key 归一 + ZX_DEFAULT_ALLOW_KEYS 默认值），
+   * 免得提示词写着「能调」、端点却回 403。纯函数：只读 key 和 cfg，不改任何状态。
+   */
+  function zxPerspectiveAllowedV2(key) {
+    const zxKey = canonicalV2Key(key);
+    return zxKey ? zxPerspectiveSettings(cfg).allowKeys.includes(zxKey) : false;
+  }
+
   function replyTimingV2(key, st) {
     const minimum = Number(cfg.socialV2?.wait?.minQuietAfterNewMs);
     const slowFloorMs = Number.isFinite(minimum) ? Math.max(0, minimum) : 10000;
@@ -15640,6 +15652,11 @@ async function main() {
     const recallHintLine = diaryLine && /(记得|上次|之前|那天|当时|前几天|去年|小时候|说过|聊过|回忆|还欠)/.test(recallText)
       ? `【回忆线索】这条消息像是在问以前的事：「${recallText.slice(0, 40)}」。先用 qq_diary_list 看有没有那几天的日记，再用 qq_diary_read 读全文；查到就按记录说，查不到就说记不清。\n\n`
       : '';
+    // 张雪峰视角（T-033）：预设正文改完要重启 DSH 才进新会话，而这份提示词是每轮现拼的，
+    // 所以触发条件也写这里 —— 用户明确要求先别重启。只对 allowKeys 里的会话出现。
+    const zxLine = zxPerspectiveAllowedV2(key)
+      ? '【张雪峰视角】这个会话能调 zx_perspective：话题一落到志愿填报 / 专业选择 / 择校 / 就业方向 / 学历与阶层流动，就先调一次再回答（对方没提「张雪峰」也算）；它给的是角度，不是你换人格。纯闲聊、写代码、哄人不调。\n\n'
+      : '';
     const lastAiMin = st.lastAiReplyAt ? Math.max(0, Math.round((Date.now() - Number(st.lastAiReplyAt)) / 60000)) : null;
     const statusBits = [`未读 ${(st.unread || []).length} 条`];
     if (lastMsg) statusBits.push(`最近一条来自 ${String(lastMsg.sender || '未知')}：${String(lastMsg.text || lastMsg.plain || '').slice(0, 30)}`);
@@ -15670,7 +15687,7 @@ async function main() {
     // 后续唤醒不再带它 —— 那时它已经在这条 DSH 会话的上下文里了。
     const initialPromptText = reason === 'bootstrap' ? formatInitialPromptV2(key) : '';
     const initialPromptLine = initialPromptText ? `${initialPromptText}\n\n` : '';
-    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + diaryLine + recallHintLine + proactiveLine + stickerLine + replyLine + statusLine + crossLine + crossGroupLine + crossLedgerLine + wakeLine + memoryLine + participationLine + preSleepLine;
+    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + diaryLine + recallHintLine + zxLine + proactiveLine + stickerLine + replyLine + statusLine + crossLine + crossGroupLine + crossLedgerLine + wakeLine + memoryLine + participationLine + preSleepLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }
