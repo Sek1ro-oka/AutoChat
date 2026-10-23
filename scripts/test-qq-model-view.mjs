@@ -159,8 +159,11 @@ test('MCP validates/forwards read watermarks and wait purposes against an isolat
     // heybox-tools → heybox-core → qzone-post（auditContent），少一个都会让 fixture 起不来。
     // device-tools → device-core 是 T-023 的平板工具链（同理由 mcp-snowluma-safe.js 静态 import）；
     // device-grant 是 T-024 的授权闸门（device-tools 静态 import 它读授权文件），少一个 fixture 起不来。
+    // reach-tools → reach-core 是 T-027 的三平台只读检索（同理由 mcp-snowluma-safe.js 静态 import），
+    // 少一个 fixture 里的 server 在 import 阶段就退出，整条用例会以 Connection closed 失败。
     await Promise.all(['mcp-snowluma-safe.js', 'qq-model-view.js', 'sensitive.js', 'identity-core.js',
-      'heybox-tools.js', 'heybox-core.js', 'qzone-post.js', 'device-tools.js', 'device-core.js', 'device-grant.js'].map((name) =>
+      'heybox-tools.js', 'heybox-core.js', 'qzone-post.js', 'device-tools.js', 'device-core.js', 'device-grant.js',
+      'reach-tools.js', 'reach-core.js'].map((name) =>
       fs.copyFile(path.join(ROOT, 'src', name), path.join(fixture, 'src', name))));
     await fs.writeFile(path.join(fixture, 'config.json'), JSON.stringify({ consolePort: api.address().port }));
     const transport = new StdioClientTransport({

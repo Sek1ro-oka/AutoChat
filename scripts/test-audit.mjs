@@ -184,6 +184,11 @@ const tests = [
   // prompt 块、授权人集合与写盘、日记 key，MCP 侧的 import 与 try/catch 注册。
   // 只读源码。
   'test-device-wiring.mjs',
+  // 三平台只读检索（T-027）：平台别名/关键词归一/条数夹取/extractJson 容错、三个平台的
+  // 搜索与详情解析器、话术、reach_search/read 的参数校验与 unavailable 语义（失败绝不
+  // 冒充空结果）、reach_status 不发请求、以及 reach-tools.js 的只读源码断言。全部用桩，
+  // 不发真实请求。
+  'test-reach-tools.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

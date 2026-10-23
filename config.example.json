@@ -85,6 +85,14 @@
       "com.android.settings"
     ]
   },
+  "reach": {
+    "enabled": true,
+    "timeoutMs": 120000,
+    "maxResults": 8,
+    "biliBin": "",
+    "opencliBin": "",
+    "xiaoheiheBin": ""
+  },
   "ownerQQ": null,
   "sessionCwd": "",
   "agentPreset": "qq-chat",

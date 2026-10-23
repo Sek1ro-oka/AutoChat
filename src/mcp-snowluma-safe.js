@@ -28,6 +28,9 @@ import { registerHeyboxTools } from './heybox-tools.js';
 // 平板的 7 个 device_* 工具（T-023 第三步），理由同上：DSH 的 MCP server 清单启动时读死，
 // 新增独立 server 必须重启 DSH 才生效，所以日常挂在 snowluma 这个已有的 server 上。
 import { registerDeviceTools } from './device-tools.js';
+// 三平台只读检索的 3 个 reach_* 工具（T-027）：B站 / 小红书 / 小黑盒的统一入口。
+// 同样挂在 snowluma 上，`reach.enabled === false` 时整个不注册（见文件末尾）。
+import { registerReachTools } from './reach-tools.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -2367,6 +2370,16 @@ try {
   registerDeviceTools(server);
 } catch (err) {
   console.error('[device] 工具注册失败：' + (err?.message || err));
+}
+
+// 三平台只读检索（T-027）：B站 / 小红书 / 小黑盒。`reach.enabled === false` 时**三个工具都不注册**
+// ——「关掉」的意思是模型在工具清单里根本看不到它们，而不是调用时才拒绝（少一组工具比多一组
+// 会拒绝的工具更省 schema）。reach 段缺省 = 出厂默认（注册）。
+try {
+  const reachCfg = loadConfig().reach ?? {};
+  if (reachCfg.enabled !== false) registerReachTools(server);
+} catch (err) {
+  console.error('[reach] 工具注册失败：' + (err?.message || err));
 }
 
 await server.connect(new StdioServerTransport());
