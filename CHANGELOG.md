@@ -5,6 +5,26 @@
 
 ## [Unreleased]
 
+### 张雪峰视角：`zx_perspective` 只在指定会话可用（2026-10-23，T-030）
+
+- 新工具 `mcp__snowluma__zx_perspective(topic)`（`topic` ∈ `all` / `frameworks` / `heuristics` / `expression`，认中文别名），后端 `POST /api/socialV2/zx-perspective`；读的是外部 skill 目录里的 `SKILL.md`（默认 `C:\Users\MR\.agents\skills\zhangxuefeng-skill\SKILL.md`，`socialV2.zx.dir` 可改，不复制进仓库）。
+- **咨询模式，不是换人格**：只取「核心心智模型 / 决策启发式 / 表达 DNA」三节，`all` 也只拼这三节；「角色扮演规则」那一节与方法论头部**永不返回**（审查 Z-001：那节写着「直接以张雪峰的身份回应」，与「不换人格」冲突，已从 `ZX_SECTIONS` 移除，`rules`/`规则` 这类 topic 一律当认不出 → `all`）。
+- 只读 `SKILL.md`（审查 Z-002：`path.basename === 'SKILL.md'`、`stat.isFile()`）；`stripZxFramingLabel()` 只剥选中节首个「以角色扮演开头、冒号结尾」的标签行；4000 字封顶，超长截断并注明；`mtime + size` 缓存，缺字段就重读。
+- 准入：`x-agent-token` → `agentTokenOk` → `v2SessionAllowed` → `sessionKey ∈ cfg.socialV2.zx.allowKeys`（默认 `['group:1131654608']`），其余会话 403；`allowKeys: []` 时 fail-closed 全拒。读不到 skill 一律 `unavailable`，不编内容。
+- 预设新增【张雪峰视角】小节（只有明确问「用张雪峰的视角」才调、仍由自己说话、不复制具体数字）；`docs/guides/ZHANGXUEFENG.md` 新增；`docs/README.md` 索引补行。
+- 回归：`scripts/test-zx-perspective.mjs` **23 条**（含「规则节永不出现在返回里」「非 SKILL.md 文件被拒」），已登记进 `scripts/test-audit.mjs`；`test-audit` **70/71**（唯一红灯仍是既有 `test-token-economy`）。
+- 真实冒烟：`group:1131654608` → 200 / **3097 字**（返回里不含「角色扮演」字样），`group:119212385` → 403。
+
+### 小红书搜索坏了就去开网页抓：`reach_search` 四级降级（2026-10-23，T-029）
+
+- 小红书那条链改成 **CLI → 浏览器 → ask → unavailable**：`opencli xiaohongshu search` 站点侧稳定失败（`search_input_not_available`），先给这一次搜索压短预算（`reach.xhsCliTimeoutMs`，默认 12000ms、夹 3000–60000），失败就开浏览器（`opencli browser --window background open|wait|eval|close`）抓搜索页上的真实笔记卡片，返回 `mode:'browser'`；浏览器也被登录墙/改版挡住才退回 `ask`（`mode:'ask_fallback'`）。
+- 新增 `src/reach-browser.js`（`createReachBrowser({runBrowser})`、`xhsSearchPageUrl`、常量 `XHS_EXTRACT_SCRIPT`、`ReachBrowserError`）：`open → wait(选择器) → eval → close`（close 放 finally，任何一步失败都关窗口）。
+- 抓取细节：只认 `[class*="note-item"]` 且带 `a[href*="/explore/"]` 的卡片（把「大家都在搜」推荐词挡掉，30 个节点里正好 25 条笔记）；标题/作者/点赞按 `MM-DD` 行切；登录墙按正文判（不按标题，否则残留标题会误判）；eval 之后校验 `location.href` 含 `search_result`，否则报 `page_changed`。
+- 小黑盒：帖子搜索被验证码拦（`--type post` / `user`）时自动降级到 `--type topic` → `--type game`，`mode:'topic_fallback'`，正文首行写明「帖子搜索被验证码拦了，下面是话题/游戏结果（不是帖子）」；这两类端点不触发验证码。
+- 配置 `reach` 新增 5 个键：`xhsBrowserSearch` / `browserSession` / `browserWindow` / `browserTimeoutMs`（60000）/ `heyboxTypeFallback`，`config.example.json` 同步；`docs/guides/REACH.md` +151 行；预设第 6/7 条改写（`mode=browser` 要说明「这是从网页搜到的」、`topic_fallback` 别当帖子列表）。
+- 性能：P-001 之前一次 xhs 搜索要 **176.8 秒**（120 秒白等已坏的 CLI），修完实测 **23.4 秒**返回 5 条真实笔记（作者/点赞/链接齐全）；小黑盒降级 **5.2 秒** 3 条话题。
+- 回归：`test-reach-tools` 425 → **437 条**（含「CLI 超时后仍继续走浏览器」「浏览器失败降级 ask」「topic_fallback 首行文案」），`scripts/test-qq-model-view.mjs` fixture 白名单加 `reach-browser.js`；`test-audit` **70/71**。
+
 ### 小红书搜索坏了就改问 AI：`reach_search` 自动降级（2026-10-23，T-028）
 
 - 背景：小红书的站内搜索接口当前稳定失败（`COMMAND_EXEC / search_input_not_available`，站点侧改版；opencli 2.0.0 与 2.0.2 一致，登录态正常），而 `opencli xiaohongshu ask` 可用（返回 AI 汇总 + 出处）。

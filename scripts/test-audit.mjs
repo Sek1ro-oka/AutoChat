@@ -189,6 +189,10 @@ const tests = [
   // 冒充空结果）、reach_status 不发请求、以及 reach-tools.js 的只读源码断言。全部用桩，
   // 不发真实请求。
   'test-reach-tools.mjs',
+  // 张雪峰视角（T-030）：端点 topic 归一/四节切分（永不返回「角色扮演规则」）/4000 字截断/
+  // mtime 缓存/读不到即 unavailable/只读 SKILL.md；group:1131654608 之外一律 403、
+  // allowKeys 为空时 fail-closed。全部打真实 HTTP 控制台，不读外部网络。
+  'test-zx-perspective.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

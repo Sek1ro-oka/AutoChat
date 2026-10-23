@@ -66,6 +66,43 @@ export const XHS_ASK_PREFIX = '【小红书·AI 问答（站内搜索当前不�
 /** 降级结果里最多列几条来源：AI 回答本身已经很长，来源只用来给出处。 */
 export const ASK_SOURCES_MAX = 5;
 
+// ── 网页层兜底（T-029）─────────────────────────────────────────────────────
+/**
+ * 小红书网页搜索页（只用来**读**：打开一个搜索结果页，把页面上的卡片抓下来）。
+ *
+ * 为什么需要这条路：这台机器上 `opencli xiaohongshu search` 会稳定超时
+ * （`xiaohongshu/search timed out after 60s`），而网页搜索页在浏览器里是能开的。
+ * 抓的是页面已经渲染出来的卡片，不点、不输、不登录。
+ */
+export const XHS_SEARCH_PAGE_URL = 'https://www.xiaohongshu.com/search_result';
+
+/**
+ * 卡片选择器：**常量**，绝不拼用户输入（用户输入只进 URL，且过 encodeURIComponent）。
+ *
+ * 为什么是 `[class*="note-item"]` 而不是 `.note-item`：小红书的 class 带哈希后缀
+ * （`note-item_x1y2z`），精确类名每次发版都会变；`class*=` 只依赖固定前缀。
+ * 为什么要再套一层 `a[href*="/explore/"]`：实测 30 个 `[class*=note-item]` 里有约 5 个
+ * 是「大家都在搜」的推荐词块（没有 `/explore/` 链接），必须按链接把它们剔掉。
+ */
+export const XHS_CARD_SELECTOR = '[class*="note-item"] a[href*="/explore/"]';
+
+/** 网页兜底话术的固定首行（单测逐字断言）。 */
+export const XHS_BROWSER_PREFIX = '【小红书·网页抓取（站内搜索不可用，已降级到网页搜索页；下面是页面上的真实笔记卡片）】';
+
+/** 小黑盒话题/游戏兜底话术的固定首行（单测逐字断言）。 */
+export const HEYBOX_TYPE_PREFIX = '小黑盒帖子搜索被验证码拦了，下面是话题/游戏结果（不是帖子）：';
+
+/**
+ * 兜底链路上的失败原因（`reason`）。写成常量而不是字面量：
+ * `scripts/test-reach-tools.mjs` 会对 `src/reach-tools.js` 做「不出现 lg 那个单词」的
+ * 只读源码断言（贴子/评论那套写动作的字眼一律禁止），常量名放这里就不会撞上。
+ */
+export const XHS_BROWSER_WALL = 'login_required';
+export const XHS_BROWSER_PAGE_CHANGED = 'page_changed';
+export const XHS_BROWSER_UNAVAILABLE = 'browser_unavailable';
+export const BROWSER_TIMEOUT = 'timeout';
+export const HEYBOX_TYPE_EMPTY = 'type_fallback_empty';
+
 /**
  * 已知的「失败码」：上游把错误放在 `code` 里而**不带** `ok:false` 时靠它兜住。
  * 取自三个 CLI 的真实输出（opencli 的 TIMEOUT / COMMAND_EXEC / ARGUMENT 等）。
@@ -209,15 +246,44 @@ export function clampLimit(value, fallback = LIMIT_DEFAULT) {
   return Math.min(Math.max(Math.trunc(n), LIMIT_MIN), LIMIT_MAX);
 }
 
+/** 浏览器会话名：只允许字母数字与 `-`/`_`（它会进 opencli 的 `--session` 参数位）。 */
+const SESSION_RE = /[^0-9A-Za-z_-]/g;
+
+/** 网页兜底默认会话名：固定一个，方便用户自己也知道该关哪个标签。 */
+export const BROWSER_SESSION_DEFAULT = 'reach';
+
+/**
+ * 开关归一（T-029 新增的两个开关）：JSON 里写 `false` 最常见，但手改 `config.json` 时
+ * 写成 `"false"` / `"no"` / `"0"` 的情况也见过，一并按「关」处理；不认识的值仍按默认开。
+ */
+function flagOn(value) {
+  if (value === false) return false;
+  const text = textOf(value).trim().toLowerCase();
+  if (text === 'false' || text === 'no' || text === '0' || text === 'off') return false;
+  return true;
+}
+
 /** 配置段归一（config.json 的 `reach`）。缺省 = 出厂默认，`enabled` 只在显式 false 时关。 */
 export function normalizeReachConfig(raw) {
   const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const session = textOf(source.browserSession).replace(SESSION_RE, '').slice(0, 32);
   return {
     enabled: source.enabled !== false,
     timeoutMs: clampInt(source.timeoutMs, 120000, 5000, 300000),
     maxResults: clampLimit(source.maxResults, LIMIT_DEFAULT),
     // 小红书站内搜索坏掉时的降级开关：默认开，只有显式 false 才关（关掉后回到 T-027 的裸 unavailable）。
     xhsAskFallback: source.xhsAskFallback !== false,
+    // 小红书：站内搜索坏了先试**网页抓取**（T-029），再试 ask（T-028）。两个开关独立。
+    xhsBrowserSearch: flagOn(source.xhsBrowserSearch),
+    // 站内搜索这一站单独计时（P-001）：opencli 的 xiaohongshu search 现在会一路挂到 60 秒才回，
+    // 拿全局 120s 去等它就是白等两分钟。这里只给 12 秒，超了就换网页抓取。
+    xhsCliTimeoutMs: clampInt(source.xhsCliTimeoutMs, 12000, 3000, 60000),
+    browserSession: session !== '' ? session : BROWSER_SESSION_DEFAULT,
+    // 只允许两个值：其它取值一律回落到 background（后台标签，不抢用户的前台窗口）。
+    browserWindow: source.browserWindow === 'foreground' ? 'foreground' : 'background',
+    browserTimeoutMs: clampInt(source.browserTimeoutMs, 60000, 10000, 300000),
+    // 小黑盒：帖子搜索被验证码拦了时，改搜「话题 / 游戏」（T-029）。
+    heyboxTypeFallback: flagOn(source.heyboxTypeFallback),
     biliBin: textOf(source.biliBin).trim(),
     opencliBin: textOf(source.opencliBin).trim(),
     xiaoheiheBin: textOf(source.xiaoheiheBin).trim()
@@ -602,6 +668,144 @@ export function parseXhsSearch(json, limit = LIMIT_DEFAULT) {
 }
 
 /**
+ * 小红书网页层抓取结果的整形（T-029）。
+ *
+ * 输入是页面里跑完常量脚本拿到的 JSON（**可能是一层编码过的字符串**——opencli 的
+ * `eval` 把返回值又 JSON 编码了一次，实测 `data` 是 `"{\"title\":…}"`），形状：
+ *   `{title, url, total, cards:[{href, id, lines:[…]}], loginWall, bodyHead}`
+ *
+ * 卡片的 `innerText` 行序实测是 `[标题, 作者, MM-DD, 点赞数]`；但**有些卡片没有标题**
+ * （只有 3 行：`[作者, MM-DD, 点赞数]`）。所以不能按固定下标取，必须先找到日期行
+ * （`MM-DD`）来切分「标题/作者」，否则会把作者名当成标题发出去。
+ *
+ * 返回 `{ ok, title, url, wall, total, items, bodyHead }`：
+ * - `ok:false` = 形状认不出（上游改版/拿到的不是页面报告）→ 调用方报 page_changed；
+ * - `wall:true` = 页面明确要求先登录（正文出现「登录后查看」）→ 调用方报 login_required；
+ * - `items` 只留 `/explore/` 链接的真实笔记（推荐词块没有这个链接，必须剔掉）。
+ */
+export function parseXhsBrowserCards(raw, limit = LIMIT_MAX) {
+  let page = raw;
+  if (typeof page === 'string') {
+    try {
+      page = JSON.parse(page);
+    } catch {
+      return { ok: false, title: '', url: '', wall: false, total: 0, items: [], bodyHead: '', reason: 'not_json' };
+    }
+  }
+  if (!page || typeof page !== 'object') {
+    return { ok: false, title: '', url: '', wall: false, total: 0, items: [], bodyHead: '', reason: 'no_cards_field' };
+  }
+  // 登录墙先判：它比卡片形状更可靠（撞墙时页面根本没有卡片），
+  // 所以即使 cards 字段缺失/损坏，也要把 wall 报给上层，别降级成「结构变了」。
+  const bodyHead = squash(page.bodyHead, 200);
+  const wall = page.loginWall === true || bodyHead.includes('登录后查看') || bodyHead.includes('扫码登录');
+  if (!Array.isArray(page.cards)) {
+    return {
+      ok: false,
+      title: squash(page.title, 120),
+      url: truncateUrl(textOf(page.url)),
+      wall,
+      total: 0,
+      items: [],
+      bodyHead,
+      reason: 'no_cards_field'
+    };
+  }
+  const seen = new Set();
+  const items = [];
+  for (const card of page.cards) {
+    const href = textOf(card?.href);
+    const id = firstText(card?.id, (href.match(/\/explore\/([0-9A-Za-z]+)/) ?? [])[1]);
+    if (id === '' || seen.has(id)) continue;
+    seen.add(id);
+    const lines = (Array.isArray(card?.lines) ? card.lines : []).map((line) => squash(line, 120)).filter((line) => line !== '');
+    const cut = splitXhsCardLines(lines);
+    items.push({
+      platform: 'xhs',
+      id,
+      title: cut.title,
+      author: cut.author,
+      liked: parseLikedCount(cut.liked),
+      url: `https://www.xiaohongshu.com/explore/${id}`
+    });
+    if (items.length >= clampLimit(limit, LIMIT_MAX)) break;
+  }
+  return {
+    ok: true,
+    title: squash(page.title, 120),
+    url: truncateUrl(textOf(page.url)),
+    wall,
+    total: Number.isFinite(Number(page.total)) ? Number(page.total) : items.length,
+    items,
+    bodyHead
+  };
+}
+
+/** 把卡片行切成「标题 / 作者 / 点赞数」：日期行 `MM-DD` 是唯一稳定的分界。 */
+function splitXhsCardLines(lines) {
+  const dateAt = lines.findIndex((line) => /^\d{1,2}-\d{1,2}$/.test(line));
+  const head = dateAt === -1 ? lines : lines.slice(0, dateAt);
+  const title = head.length >= 2 ? head[0] : '';
+  const author = head.length >= 2 ? head[1] : (head[0] ?? '');
+  const tail = dateAt === -1 ? lines.slice(head.length) : lines.slice(dateAt + 1);
+  const likes = tail.find((line) => /^[\d.]+[万wW]?\+?$/.test(line)) ?? '';
+  return { title, author, liked: likes };
+}
+
+/**
+ * 页面上的点赞数是「222」/「1.2万」这种人读的写法，话术里的 `赞 N` 要的是数字。
+ * 认不出（或卡片上根本没给）就返回 `null`——宁可「无数据」，也不编一个数。
+ */
+function parseLikedCount(text) {
+  const raw = textOf(text).trim();
+  const match = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*([万wW亿])?\+?$/);
+  if (!match) return null;
+  const n = Number(match[1]);
+  if (!Number.isFinite(n)) return null;
+  if (match[2] === '亿') return Math.round(n * 1e8);
+  if (match[2]) return Math.round(n * 1e4);
+  return Math.round(n);
+}
+
+/**
+ * 小黑盒「话题 / 游戏」搜索的整形（T-029，帖子搜索被验证码拦了时的兜底）。
+ *
+ * 输入是 `xiaoheihe-cli -f json search <词> --type topic|game` 的原始 JSON：
+ *   topic → `{data:{result:{topics:[{name,topic_id,show_desc,hot:{raw_hot_value}}]}}}`
+ *   game  → `{data:{result:{games:[{name,appid,score,follow_num,release_date_desc}]}}}`
+ * 这两个端点实测不触发验证码，但**不是帖子**：只有话题/游戏条目，没有 linkId，
+ * 所以不编 id、不编 URL（`reach_read` 读的是帖子，这里给不了）。
+ * 形状认不出返回 `null`，由调用方如实报错，绝不冒充「没有结果」。
+ */
+export function parseHeyboxTypeSearch(json, { type = 'topic', limit = LIMIT_DEFAULT } = {}) {
+  const result = json?.data?.result ?? json?.result ?? null;
+  if (!result || typeof result !== 'object') return null;
+  const list = type === 'game' ? result.games : result.topics;
+  if (!Array.isArray(list)) return null;
+  const items = [];
+  for (const entry of list.slice(0, clampLimit(limit))) {
+    const name = squash(entry?.name, 80);
+    if (name === '') continue;
+    if (type === 'game') {
+      const parts = [];
+      const score = squash(entry?.score, 12);
+      if (score !== '') parts.push(`评分 ${score}`);
+      const followers = intOrNull(entry?.follow_num);
+      if (Number.isFinite(followers)) parts.push(`关注 ${countText(followers)}`);
+      const released = squash(entry?.release_date_desc, 20);
+      if (released !== '') parts.push(released);
+      items.push({ platform: 'heybox', kind: 'game', id: '', title: name, author: parts.join(' · '), url: '' });
+    } else {
+      const hot = squash(entry?.show_desc, 24) || (Number.isFinite(intOrNull(entry?.hot?.raw_hot_value))
+        ? `热度 ${countText(intOrNull(entry.hot.raw_hot_value))}`
+        : '');
+      items.push({ platform: 'heybox', kind: 'topic', id: '', title: name, author: hot, url: '' });
+    }
+  }
+  return items;
+}
+
+/**
  * 小黑盒搜索的整形：输入是 reach-tools 里 `createHeyboxTools().search()` 的**已瘦身结果**
  * （`{ok, query, count, items:[{linkId,title,summary,author,commentCount}]}`），
  * 不再碰原始 JSON——代理变量、验证码暂停那些坑都在 heybox-tools 里处理过了。
@@ -843,6 +1047,46 @@ export function formatSearchResult({ platform, query, items } = {}) {
       lines.push(`   ${label} id：${item.id}（看正文用 reach_read）`);
     }
   });
+  return lines.join('\n');
+}
+
+/**
+ * 小红书网页抓取降级话术（T-029）。
+ *
+ * 首行是固定的 `XHS_BROWSER_PREFIX`，然后是页面地址，再套一层普通搜索列表的形状
+ * （这样模型读到的仍然是「共 N 条 + 标题 + 链接」，和有站内搜索时一致）。
+ */
+export function formatBrowserResult({ query, items, pageUrl } = {}) {
+  const list = Array.isArray(items) ? items : [];
+  const lines = [XHS_BROWSER_PREFIX];
+  const url = truncateUrl(textOf(pageUrl));
+  if (url !== '') lines.push(`（页面：${url}）`);
+  lines.push('', formatSearchResult({ platform: 'xhs', query, items: list }));
+  return lines.join('\n');
+}
+
+/**
+ * 小黑盒话题/游戏降级话术（T-029）。
+ *
+ * 首行是固定的 `HEYBOX_TYPE_PREFIX`；每条前面标出是【话题】还是【游戏】——
+ * 因为这两种条目点不开成帖子，不能让模型以为拿到了帖子列表。
+ */
+export function formatHeyboxTypeResult({ query, items } = {}) {
+  const list = Array.isArray(items) ? items : [];
+  const word = textOf(query);
+  const lines = [HEYBOX_TYPE_PREFIX, ''];
+  if (list.length === 0) {
+    lines.push(`小黑盒 话题/游戏 搜索「${word}」没有结果`);
+  } else {
+    lines.push(`小黑盒 话题/游戏 搜索「${word}」共 ${list.length} 条`);
+    list.forEach((item, index) => {
+      const kind = item?.kind === 'game' ? '游戏' : '话题';
+      const title = textOf(item?.title) || '（没有标题）';
+      const extra = textOf(item?.author).trim();
+      lines.push(`${index + 1}. 【${kind}】${title}${extra !== '' ? ` — ${extra}` : ''}`);
+    });
+  }
+  lines.push('（这两个端点不触发验证码，但只给话题/游戏条目、没有帖子链接；要帖子正文得等验证码暂停结束。）');
   return lines.join('\n');
 }
 

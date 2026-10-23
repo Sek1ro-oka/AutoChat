@@ -90,6 +90,12 @@
     "timeoutMs": 120000,
     "maxResults": 8,
     "xhsAskFallback": true,
+    "xhsBrowserSearch": true,
+    "xhsCliTimeoutMs": 12000,
+    "browserSession": "reach",
+    "browserWindow": "background",
+    "browserTimeoutMs": 60000,
+    "heyboxTypeFallback": true,
     "biliBin": "",
     "opencliBin": "",
     "xiaoheiheBin": ""

@@ -27,15 +27,20 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { createHeyboxTools, defaultReadConfig, defaultRunCli as defaultHeyboxRunCli } from './heybox-tools.js';
+import { ReachBrowserError, createReachBrowser } from './reach-browser.js';
 import {
+  HEYBOX_TYPE_EMPTY,
   LIMIT_DEFAULT,
   PLATFORM_CHOICES,
   QUERY_MAX,
   READ_MAX_CHARS,
+  XHS_BROWSER_UNAVAILABLE,
   cleanQuery,
   clampLimit,
   extractJson,
   failureOf,
+  formatBrowserResult,
+  formatHeyboxTypeResult,
   formatReadResult,
   formatSearchResult,
   formatXhsAsk,
@@ -47,6 +52,7 @@ import {
   parseBiliVideo,
   parseHeyboxPost,
   parseHeyboxSearch,
+  parseHeyboxTypeSearch,
   parseXhsAsk,
   parseXhsNote,
   parseXhsSearch,
@@ -253,11 +259,29 @@ export function childEnv(base = process.env) {
   return env;
 }
 
-function isWindowsScript(bin) {
-  return process.platform === 'win32' && /\.(cmd|bat)$/i.test(textOf(bin));
+/**
+ * 跑 `xiaoheihe-cli` 的**话题/游戏**端点时必须用这份环境：清掉所有代理变量。
+ *
+ * 为什么（实测）：本机 `NO_PROXY` 里带着 `[::1]` 这种写法，xiaoheihe-cli 里的 httpx
+ * 解析端口时直接 `ValueError: invalid literal for int()`，整个进程 Traceback——
+ * `src/heybox-tools.js` 早就踩过这个坑并这样处理了（复制 env → 删 `/proxy/i` →
+ * 最后把 `NO_PROXY` 钉成 `localhost,127.0.0.1`，顺序不能反）。
+ * reach 自己 spawn 这两个端点时必须做同样的清理，否则话题/游戏兜底一上来就崩。
+ */
+export function heyboxTypeEnv(base = process.env) {
+  const filtered = childEnv(base);
+  const env = {};
+  for (const [name, value] of Object.entries(filtered)) {
+    if (/proxy/i.test(name)) continue;
+    env[name] = value;
+  }
+  env.NO_PROXY = 'localhost,127.0.0.1';
+  return env;
 }
 
-// npm 生成的 `.cmd` 包装里真正执行的 JS 入口（按 bin 路径缓存，省得每次都读文件）。
+function isWindowsScript(bin) {
+  return process.platform === 'win32' && /\.(cmd|bat)$/i.test(textOf(bin));
+}// npm 生成的 `.cmd` 包装里真正执行的 JS 入口（按 bin 路径缓存，省得每次都读文件）。
 const shimScriptCache = new Map();
 
 /**
@@ -354,8 +378,11 @@ export function cmdUnsafeArgvError(argv, bin = '') {
 /**
  * 跑一次上游 CLI，返回 `{ stdout, stderr, code }`。起不来 / 超时 / 输出超限 → reject。
  * 非 0 退出码**不** reject：上游会把结构化错误打在 stdout 上，那是可解析的信息。
+ *
+ * `env` 可以整份替换子进程环境（默认走 `childEnv()`）：小黑盒的话题/游戏端点必须
+ * 清掉代理变量才跑得起来，见 `heyboxTypeEnv()`。
  */
-export async function defaultRunCli(bin, argv, { timeoutMs = 120000 } = {}) {
+export async function defaultRunCli(bin, argv, { timeoutMs = 120000, env = null } = {}) {
   const timeoutRaw = Number(timeoutMs);
   const timeout = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? Math.trunc(timeoutRaw) : 120000;
   const target = spawnTarget(bin, argv);
@@ -368,7 +395,7 @@ export async function defaultRunCli(bin, argv, { timeoutMs = 120000 } = {}) {
   return await new Promise((resolve, reject) => {
     let child;
     try {
-      child = spawn(command, args, { env: childEnv(), windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawn(command, args, { env: env ?? childEnv(), windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (error) {
       reject(new Error(`无法启动 ${path.basename(textOf(bin)) || '上游命令'}：${error?.message ?? error}`));
       return;
@@ -424,9 +451,12 @@ export async function defaultRunCli(bin, argv, { timeoutMs = 120000 } = {}) {
  * @param {() => object} [deps.readConfig]
  * @param {() => number} [deps.now]
  * @param {(p: string) => boolean} [deps.exists] 二进制探测（单测注入，免得测到本机装没装）
+ * @param {(bin: string, argv: string[], options?: object) => Promise<{stdout:string,stderr:string,code:number}>} [deps.runBrowser]
+ *   跑 `opencli browser …` 的那一层（T-029 的网页抓取；单测注入桩，默认复用 runCli 的 spawn 逻辑）
  */
 export function createReachTools({
   runCli = defaultRunCli,
+  runBrowser = null,
   heybox = null,
   readConfig = defaultReadConfig,
   now = () => Date.now(),
@@ -460,6 +490,14 @@ export function createReachTools({
       const reachCfg = normalizeReachConfig(safeReadConfig().reach);
       return defaultHeyboxRunCli(argv, { ...options, timeoutMs: reachCfg.timeoutMs });
     }
+  });
+
+  // 网页抓取层（T-029）：只读 DOM，进程启动仍走同一套 spawn（默认 defaultRunCli）。
+  // 单独留一个注入点，是为了单测能在 CLI 桩之外独立模拟「浏览器」的行为，
+  // 也让 reach-browser 里完全不出现 spawn / cmd / 超时那套东西。
+  const runBrowserImpl = typeof runBrowser === 'function' ? runBrowser : runCli;
+  const reachBrowser = createReachBrowser({
+    runBrowser: (bin, argv, options = {}) => runBrowserImpl(bin, argv, options)
   });
 
   function currentConfig() {
@@ -582,22 +620,25 @@ export function createReachTools({
     const cfg = currentConfig();
     const count = clampLimit(limit, cfg.maxResults);
     try {
-      // 三个平台正常都回 `{ mode:'search', items }`；小红书站点侧不可用时可能回
-      // `{ mode:'ask_fallback', text, sources, sourceCount }`（T-028）。
+      // 三个平台正常都回 `{ mode:'search', items }`；降级回来的形态有三种：
+      //   · 小红书网页抓取 → `{ mode:'browser', items, text }`（T-029）
+      //   · 小红书 AI 问答 → `{ mode:'ask_fallback', text, sources, sourceCount }`（T-028）
+      //   · 小黑盒话题/游戏 → `{ mode:'topic_fallback', items, text }`（T-029）
       const outcome = key === 'bili'
         ? { mode: 'search', items: await searchBili(cfg, word, count) }
         : key === 'xhs'
           ? await searchXhs(cfg, word, count)
-          : { mode: 'search', items: await searchHeybox(cfg, word, count) };
+          : await searchHeybox(cfg, word, count);
       const items = Array.isArray(outcome.items) ? outcome.items : [];
-      const asked = outcome.mode === 'ask_fallback';
+      const mode = textOf(outcome.mode) || 'search';
+      const asked = mode === 'ask_fallback';
       const base = {
         ok: true,
         platform: key,
         label: (key === 'bili' ? 'B站' : key === 'xhs' ? '小红书' : '小黑盒'),
         query: word,
-        mode: asked ? 'ask_fallback' : 'search',
-        // 降级结果是 AI 汇总，不是笔记列表：count 固定 0，也不给 items（免得被当成列表继续用）。
+        mode,
+        // ask 降级的结果是 AI 汇总，不是笔记列表：count 固定 0，也不给 items（免得被当成列表继续用）。
         count: asked ? 0 : items.length
       };
       if (asked) {
@@ -611,7 +652,8 @@ export function createReachTools({
       return {
         ...base,
         items,
-        text: formatSearchResult({ platform: key, query: word, items })
+        // 降级结果自带首行说明（网页抓取 / 话题游戏），别用普通搜索列表把它盖掉。
+        text: textOf(outcome.text) || formatSearchResult({ platform: key, query: word, items })
       };
     } catch (error) {
       return {
@@ -656,7 +698,7 @@ export function createReachTools({
       const searchArgs = word.startsWith('-')
         ? ['xiaohongshu', 'search', '--limit', String(requestCount), '-f', 'json', '--', word]
         : ['xiaohongshu', 'search', word, '--limit', String(requestCount), '-f', 'json'];
-      const result = await runCli(bin, searchArgs, { timeoutMs: cfg.timeoutMs });
+      const result = await runCli(bin, searchArgs, { timeoutMs: cfg.xhsCliTimeoutMs });
       // §7.3 条件 2：data 为空 + message 精确包含 search_input_not_available。
       // 这条独立于 failureOf（成功码 veto 时 failureOf 会是 false），但降级仍要触发；
       // 非空 data 时 helper 直接 false，真结果绝不会被丢掉。
@@ -670,8 +712,39 @@ export function createReachTools({
     }
 
     // 失败不是「搜不到」：只有站点侧不可用才值得降级；参数错误（bad_query）在上面就抛了。
-    if (!cfg.xhsAskFallback || !fallbackEligible(searchError)) throw searchError;
-    const searchReason = textOf(searchError?.message) || '未知原因';
+    const eligible = fallbackEligible(searchError);
+    const rawReason = textOf(searchError?.message) || '未知原因';
+    // P-001：站内搜索这一站只等 xhsCliTimeoutMs（默认 12s）。超时要说清是「限时到了」而不是
+    // 含糊的 unavailable；原文照样带上，排查时还能看出是哪个命令超的、当时给的多少毫秒。
+    const cliSeconds = Math.max(1, Math.round(Number(cfg.xhsCliTimeoutMs) / 1000));
+    const searchReason = /超时（\d+ms）/.test(rawReason)
+      ? `站内搜索超时（${cliSeconds}s）：${rawReason}`
+      : rawReason;
+
+    // 降级链第一站：**网页抓取**（T-029）。站内搜索坏了照样能开搜索页，抓页面上的真实卡片。
+    let browserReason = '';
+    let browserFailureReason = '';
+    if (eligible && cfg.xhsBrowserSearch) {
+      try {
+        return await searchXhsBrowser(cfg, word, count);
+      } catch (error) {
+        browserReason = textOf(error?.message) || '未知原因';
+        browserFailureReason = textOf(error?.reason);
+      }
+    }
+
+    // 降级链第二站：AI 问答（T-028）。
+    if (!cfg.xhsAskFallback || !eligible) {
+      const message = browserReason !== ''
+        ? `${searchReason}；网页抓取也失败：${browserReason}`
+        : searchReason;
+      // 只有网页抓取这一级也失败时，`reason` 才用浏览器那级的原因（要登录 / 页面改版 / 起不来 / 超时）
+      // ——那才是「为什么没拿到列表」的直接答案；否则沿用站内搜索的原因。
+      const reason = browserFailureReason !== '' ? browserFailureReason : textOf(searchError?.reason);
+      throw new ReachError(searchError instanceof ReachError ? searchError.code : 'unavailable', message, {
+        ...(reason !== '' ? { reason } : {})
+      });
+    }
     try {
       // 注意：ask **不接受** --limit（会 commander.unknownOption），所以这里绝不带条数。
       const askArgs = word.startsWith('-')
@@ -694,9 +767,48 @@ export function createReachTools({
       const askReason = textOf(askError?.message) || '未知原因';
       throw new ReachError(
         'unavailable',
-        `小红书 搜索失败：${searchReason}；AI 问答也失败：${askReason}`,
+        `小红书 搜索失败：${searchReason}${browserReason !== '' ? `；网页抓取也失败：${browserReason}` : ''}；AI 问答也失败：${askReason}`,
         { reason: 'ask_fallback_failed' }
       );
+    }
+  }
+
+  /**
+   * 网页抓取（T-029）：打开搜索页 → 等卡片 → 读 DOM 报告。只读，不点、不输、不登录。
+   *
+   * 失败一律转成 `unavailable` + `reason`（`browser_unavailable` / `page_changed` /
+   * 需要登录 / `timeout`）——**绝不返回空列表冒充成功**。
+   */
+  async function searchXhsBrowser(cfg, word, count) {
+    const bin = bins(cfg).opencli;
+    if (!binAvailable(bin, exists)) {
+      throw new ReachError(
+        'unavailable',
+        '找不到 opencli 可执行文件（reach.opencliBin 未配且 PATH 里没有 opencli）。装法：npm i -g @jackwener/opencli',
+        { reason: XHS_BROWSER_UNAVAILABLE }
+      );
+    }
+    // 万一 .cmd 解析不出 node 入口、只能落到 cmd.exe：搜索词里的元字符就是注入面，先拒。
+    assertCmdArgvSafe(bin, word, 'bad_query');
+    try {
+      const shot = await reachBrowser.searchXhs({
+        bin,
+        query: word,
+        limit: count,
+        session: cfg.browserSession,
+        windowMode: cfg.browserWindow,
+        timeoutMs: cfg.browserTimeoutMs
+      });
+      return {
+        mode: 'browser',
+        items: shot.items,
+        text: formatBrowserResult({ query: word, items: shot.items, pageUrl: shot.pageUrl })
+      };
+    } catch (error) {
+      const reason = error instanceof ReachBrowserError && textOf(error.reason) !== ''
+        ? error.reason
+        : XHS_BROWSER_UNAVAILABLE;
+      throw new ReachError('unavailable', `小红书 网页抓取失败：${excerpt(error?.message ?? error, 300)}`, { reason });
     }
   }
 
@@ -723,7 +835,33 @@ export function createReachTools({
       const code = textOf(called?.code) || 'error';
       const reason = textOf(called?.reason) || '小黑盒没有返回原因';
       const extra = textOf(called?.pauseRemainingText) !== '' ? `；${called.pauseRemainingText}后自动恢复` : '';
-      throw new ReachError('unavailable', `小黑盒暂时不可用（${code}）：${reason}${extra}`);
+      // 验证码（captcha）与它引出来的暂停窗口（paused）都算「帖子通道被拦」：
+      // 这两种情况下话题/游戏端点仍然是通的，所以继续走兜底，而不是直接回 unavailable。
+      const blocked = code === 'captcha' || code === 'paused';
+      if (blocked && cfg.heyboxTypeFallback) {
+        const notes = [];
+        for (const type of ['topic', 'game']) {
+          try {
+            const items = await heyboxTypeSearch(cfg, word, count, type);
+            if (items.length > 0) {
+              return { mode: 'topic_fallback', items, text: formatHeyboxTypeResult({ query: word, items }) };
+            }
+            notes.push(type === 'game' ? '游戏也没搜到' : '话题没搜到');
+          } catch (error) {
+            notes.push(`${type === 'game' ? '游戏' : '话题'}失败：${excerpt(error?.message ?? error, 120)}`);
+          }
+        }
+        throw new ReachError(
+          'unavailable',
+          `小黑盒帖子搜索被验证码拦了（${code}）：${reason}${extra}；话题/游戏兜底也没拿到结果（${notes.join('；')}）`,
+          { reason: HEYBOX_TYPE_EMPTY }
+        );
+      }
+      // 非验证码类的失败（登录态问题、上游 5xx…）：把上游的 code 原样当 reason 交出去，
+      // 让调用方能区分「验证码」与「别的坏了」，别用一句话术盖住不同原因。
+      throw new ReachError('unavailable', `小黑盒暂时不可用（${code}）：${reason}${extra}`, {
+        reason: textOf(code) || 'unavailable'
+      });
     }
     // `{ok:true}` 但 items 缺失/不是数组：这是上游坏了，不是「没有结果」。
     // 不能 parseHeyboxSearch 静默回空数组——那会把一次坏形状冒充成「平台没这个话题」。
@@ -731,7 +869,29 @@ export function createReachTools({
       const raw = excerpt(JSON.stringify(called ?? null), 300);
       throw new ReachError('unavailable', `小黑盒搜索返回了意料之外的形状（unexpected_shape）：${raw}`, { reason: 'unexpected_shape' });
     }
-    return parseHeyboxSearch(called, count);
+    return { mode: 'search', items: parseHeyboxSearch(called, count) };
+  }
+
+  /**
+   * 小黑盒「话题 / 游戏」搜索（T-029）：帖子搜索被验证码拦了时的兜底。
+   *
+   * 为什么 reach 自己 spawn 而不经 heybox-tools：那个工具的 `search` 只有帖子一种口径
+   * （`--type post`），没有 `--type topic/game` 的入口；这两个端点实测不触发验证码。
+   * 它的 argv 形状与 heybox-tools 一致（`-f json search <词> --type <t> --limit <n>`），
+   * 环境变量也必须清代理（见 heyboxTypeEnv）。
+   */
+  async function heyboxTypeSearch(cfg, word, count, type) {
+    const bin = bins(cfg).heybox;
+    const label = type === 'game' ? '游戏' : '话题';
+    const args = ['-f', 'json', 'search', word, '--type', type, '--limit', String(count)];
+    const result = await runCli(bin, args, { timeoutMs: cfg.timeoutMs, env: heyboxTypeEnv() });
+    const json = extractJson(textOf(result?.stdout));
+    const items = parseHeyboxTypeSearch(json, { type, limit: count });
+    if (items === null) {
+      const raw = excerpt(textOf(result?.stdout) || textOf(result?.stderr), 200);
+      throw new ReachError('unavailable', `小黑盒${label}搜索回答不了（unexpected_shape）：${raw || '（没有输出）'}`, { reason: 'unexpected_shape' });
+    }
+    return items;
   }
 
   // ③ 读一条

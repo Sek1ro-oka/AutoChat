@@ -21,9 +21,13 @@ import {
   clampLimit,
   extractJson,
   failureOf,
+  formatBrowserResult,
+  formatHeyboxTypeResult,
   formatReadResult,
   formatSearchResult,
   formatXhsAsk,
+  HEYBOX_TYPE_EMPTY,
+  HEYBOX_TYPE_PREFIX,
   normalizeBiliTarget,
   normalizeHeyboxTarget,
   normalizePlatform,
@@ -34,19 +38,25 @@ import {
   parseBiliVideo,
   parseHeyboxPost,
   parseHeyboxSearch,
+  parseHeyboxTypeSearch,
   parseXhsAsk,
+  parseXhsBrowserCards,
   parseXhsNote,
   parseXhsSearch,
   PLATFORM_CHOICES,
   searchShape,
   upstreamErrorText,
-  XHS_ASK_PREFIX
+  XHS_ASK_PREFIX,
+  XHS_BROWSER_PREFIX,
+  XHS_BROWSER_WALL
 } from '../src/reach-core.js';
+import { XHS_EXTRACT_SCRIPT, createReachBrowser, xhsSearchPageUrl } from '../src/reach-browser.js';
 import {
   childEnv,
   cmdUnsafeArgvError,
   createReachTools,
   defaultRunCli,
+  heyboxTypeEnv,
   registerReachTools
 } from '../src/reach-tools.js';
 
@@ -205,9 +215,61 @@ function sequenceRecorder(responses) {
   return runCli;
 }
 
-function makeTools({ runCli, heybox, reachConfig = {}, exists = () => true } = {}) {
+/**
+ * 浏览器桩（T-029）：按 argv 里的动作（open / wait / eval）返回不同的 opencli 外壳。
+ * 真实 opencli 的返回是 `{ok:true, data:…}`，`data` 可能是对象，也可能是**一层编码的
+ * JSON 字符串**（`eval` 实测就是这样），两种都要能跑通。
+ */
+function browserStub({ open, wait, evalJs } = {}) {
+  const calls = [];
+  const runBrowser = async (bin, argv = [], options = {}) => {
+    calls.push({ bin, argv, options });
+    const action = argv.find((part) => part === 'open' || part === 'wait' || part === 'eval');
+    const payload = action === 'open' ? open : action === 'wait' ? wait : action === 'eval' ? evalJs : null;
+    const value = typeof payload === 'function' ? await payload(argv, options) : payload;
+    if (value === undefined) return { stdout: JSON.stringify({ ok: true, data: null }), stderr: '', code: 0 };
+    return { stdout: typeof value === 'string' ? value : JSON.stringify(value), stderr: '', code: 0 };
+  };
+  runBrowser.calls = calls;
+  return runBrowser;
+}
+
+/** 页面报告（模拟浏览器里跑完常量脚本的返回值）。 */
+function xhsPageReport(overrides = {}) {
+  return {
+    title: '咖啡 - 小红书搜索',
+    url: 'https://www.xiaohongshu.com/search_result?keyword=%E5%92%96%E5%95%A1&type=51',
+    total: 3,
+    cards: [
+      { href: '/explore/6a0be5010000000035033c33', id: '6a0be5010000000035033c33', lines: ['6种常见咖啡终于分清了😭小白必存！', 'Peanut Papa', '05-19', '222'] },
+      { href: '/explore/66f1aa2b000000001d01c6a7', id: '66f1aa2b000000001d01c6a7', lines: ['手冲咖啡入门：从磨豆开始', '咖啡老张', '06-02', '1.2万'] },
+      // 没有标题的卡片（实测 3 行）：作者 / 日期 / 点赞
+      { href: '/explore/6512c3d4000000001f00b41e', id: '6512c3d4000000001f00b41e', lines: ['周周周', '08-01', '133'] }
+    ],
+    loginWall: false,
+    bodyHead: '首页\n点点\nRED\n直播\n陈记\n咖啡 - 小红书搜索\n' + '笔记 1\n6种常见咖啡终于分清了',
+    ...overrides
+  };
+}
+
+/**
+ * 默认浏览器桩：模拟「本机浏览器起不来」。
+ * T-027/T-028 的老用例只关心 CLI 通道，不能被网页抓取多出来的调用打乱调用次数断言。
+ */
+function blockedBrowser() {
+  const calls = [];
+  const runBrowser = async (bin, argv, options) => {
+    calls.push({ bin, argv, options });
+    throw new Error('没有可用的浏览器会话（测试桩）');
+  };
+  runBrowser.calls = calls;
+  return runBrowser;
+}
+
+function makeTools({ runCli, runBrowser, heybox, reachConfig = {}, exists = () => true } = {}) {
   return createReachTools({
     runCli: runCli ?? recorder(''),
+    runBrowser: runBrowser ?? blockedBrowser(),
     heybox: heybox ?? fakeHeybox(),
     readConfig: () => ({ reach: { enabled: true, ...reachConfig }, heybox: { cliPath: 'xiaoheihe-cli' } }),
     now: () => Date.parse('2026-10-23T12:00:00+08:00'),
@@ -1067,10 +1129,530 @@ console.log('## ㉖ failureOf 决策表 v1.1 / §7.4 矩阵');
     `mode=${codeSite.mode}, calls=${codeSiteRun.calls.length}`);
 }
 
+// ── ㉘ 小红书网页抓取（T-029 dev-doc §7 组 1 / 2 / 3 / 5 / 7） ───────────────
+console.log('## ㉘ 小红书网页抓取：成功 / 登录墙 / 结构变化 / 关闭开关 / 不缓存');
+{
+  const pageUrl = xhsSearchPageUrl('咖啡');
+
+  /** 一份健康的浏览器桩：open → wait 命中 → eval 拿到报告。 */
+  const healthyBrowser = () => browserStub({
+    open: { ok: true, data: { url: pageUrl, page: 'page-1' } },
+    wait: { ok: true, data: 'matched' },
+    evalJs: { ok: true, data: JSON.stringify(xhsPageReport()) }
+  });
+  /** 等待卡片选择器超时 + 页面报告「需要登录」。 */
+  const wallBrowser = () => browserStub({
+    open: { ok: true, data: { url: pageUrl, page: 'page-1' } },
+    wait: { ok: false, error: { code: 'UNKNOWN', message: `Error: Selector not found: ${'[class*="note-item"] a[href*="/explore/"]'}` } },
+    evalJs: {
+      ok: true,
+      data: JSON.stringify(xhsPageReport({
+        total: 0,
+        cards: [],
+        loginWall: true,
+        bodyHead: '登录后查看搜索结果\n手机号登录\n+86\n输入手机号\n获取验证码'
+      }))
+    }
+  });
+  /** 等待超时 + 0 卡片 + 标题正常、没有登录痕迹 → DOM 变了（page_changed）。 */
+  const changedBrowser = () => browserStub({
+    open: { ok: true, data: { url: pageUrl, page: 'page-1' } },
+    wait: { ok: false, error: { code: 'UNKNOWN', message: 'Error: Selector not found: x' } },
+    evalJs: {
+      ok: true,
+      data: JSON.stringify(xhsPageReport({ total: 0, cards: [], loginWall: false, bodyHead: '首页\n咖啡 - 小红书搜索' }))
+    }
+  });
+
+  // ① 站内搜索失败 → 网页抓取成功
+  const okRun = recorder(XHS_SEARCH_FAIL);
+  const okBrowser = healthyBrowser();
+  const okRes = await makeTools({ runCli: okRun, runBrowser: okBrowser }).search({ platform: 'xhs', query: '咖啡', limit: 5 });
+  ok(okRes.ok === true && okRes.mode === 'browser', 'CLI 搜索失败 + 网页抓取成功 → ok:true、mode:browser',
+    `ok=${okRes.ok}, mode=${okRes.mode}`);
+  ok(okRes.count === 3, '返回 3 条真实卡片', `count=${okRes.count}`);
+  ok(okRes.items[0]?.title === '6种常见咖啡终于分清了😭小白必存！', '第 1 条标题取卡片首行',
+    `title=${okRes.items[0]?.title}`);
+  ok(okRes.items[0]?.url === 'https://www.xiaohongshu.com/explore/6a0be5010000000035033c33',
+    '/explore/<id> 还原成可点的完整地址', `url=${okRes.items[0]?.url}`);
+  ok(okRes.items[0]?.author === 'Peanut Papa' && okRes.items[0]?.liked === 222,
+    '作者 / 点赞数按行位解析（点赞转成数字，话术里才能写「赞 222」）',
+    `author=${okRes.items[0]?.author}, liked=${okRes.items[0]?.liked}`);
+  ok(okRes.items[1]?.liked === 12000, '「1.2万」这种写法换算成 12000', `liked=${okRes.items[1]?.liked}`);
+  ok(String(okRes.text).includes('赞 222'), '话术里带点赞数（不再是「无数据」）', String(okRes.text).split('\n')[3]);
+  ok(okRes.items[2]?.title === '' && okRes.items[2]?.author === '周周周',
+    '只有 3 行的卡片（缺标题）不串行：title 空、author 正确',
+    `title=${JSON.stringify(okRes.items[2]?.title)}, author=${okRes.items[2]?.author}`);
+  ok(String(okRes.text).startsWith(XHS_BROWSER_PREFIX), '首行是网页抓取的降级文案',
+    String(okRes.text).split('\n')[0]?.slice(0, 46));
+  ok(String(okRes.text).includes(pageUrl) && String(okRes.text).includes('共 3 条'),
+    '话术带页面地址与条数（能核对是不是这次的页面）', '');
+  ok(okRun.calls.length === 1, '网页抓取成功后不再问 AI（CLI 只跑搜索这 1 次）', `calls=${okRun.calls.length}`);
+
+  const openCall = okBrowser.calls.find((call) => call.argv.includes('open'));
+  ok(openCall && openCall.argv.join(' ') === `browser --session reach --window background open ${pageUrl}`,
+    'argv 形状：browser --session reach --window background open <搜索页>',
+    openCall?.argv.join(' '));
+  const waitCall = okBrowser.calls.find((call) => call.argv.includes('wait'));
+  ok(waitCall && waitCall.argv.includes('[class*="note-item"] a[href*="/explore/"]'),
+    'open 之后先 wait 卡片选择器（避开首屏水合空壳）', waitCall?.argv.join(' '));
+  const evalCall = okBrowser.calls.find((call) => call.argv.includes('eval'));
+  ok(evalCall && evalCall.argv[evalCall.argv.length - 1] === XHS_EXTRACT_SCRIPT,
+    'eval 传的就是常量脚本本身（不含任何用户输入）', '');
+
+  // ② eval 的 data 是对象而不是 JSON 字符串，也要能跑
+  const objRes = await makeTools({
+    runCli: recorder(XHS_SEARCH_FAIL),
+    runBrowser: browserStub({
+      open: { ok: true, data: { url: pageUrl } },
+      wait: { ok: true, data: 'ok' },
+      evalJs: { ok: true, data: xhsPageReport() }
+    })
+  }).search({ platform: 'xhs', query: '咖啡' });
+  ok(objRes.mode === 'browser' && objRes.count === 3, 'eval 返回对象（非字符串）也能解析',
+    `mode=${objRes.mode}, count=${objRes.count}`);
+
+  // ③ 登录墙 → 仍降级到 ask；关掉 ask 时必须是 unavailable
+  const wallRun = sequenceRecorder([
+    { stdout: XHS_SEARCH_FAIL, stderr: '', code: 0 },
+    { stdout: XHS_ASK_STDOUT, stderr: '', code: 0 }
+  ]);
+  const wallRes = await makeTools({ runCli: wallRun, runBrowser: wallBrowser() }).search({ platform: 'xhs', query: '咖啡' });
+  ok(wallRes.ok === true && wallRes.mode === 'ask_fallback',
+    '撞登录墙 → 仍然降级到 AI 问答（登录墙不拦 ask）', `mode=${wallRes.mode}`);
+  ok(wallRun.calls.length === 2, '登录墙后确实又调了一次 ask', `calls=${wallRun.calls.length}`);
+
+  const wallOff = await makeTools({
+    runCli: recorder(XHS_SEARCH_FAIL),
+    runBrowser: wallBrowser(),
+    reachConfig: { xhsAskFallback: false }
+  }).search({ platform: 'xhs', query: '咖啡' });
+  ok(wallOff.ok === false && wallOff.code === 'unavailable',
+    '登录墙 + 关闭 ask → unavailable（绝不返回空列表冒充成功）',
+    `ok=${wallOff.ok}, code=${wallOff.code}`);
+  ok(String(wallOff.error).includes('登录'), 'error 说清是「要登录」', String(wallOff.error).slice(0, 90));
+  ok(wallOff.items === undefined, '失败时没有 items 字段', `items=${JSON.stringify(wallOff.items)}`);
+  ok(wallOff.reason === XHS_BROWSER_WALL, '登录墙 + 关闭 ask → reason 取浏览器那一级（login_required）',
+    `reason=${wallOff.reason}`);
+
+  // 直接问 reach-browser 的失败原因（reason 是给调用方看的机器码）
+  const reasonOf = async (stub) => {
+    try {
+      await createReachBrowser({ runBrowser: stub }).searchXhs({
+        bin: 'opencli.cmd', query: '咖啡', limit: 5, session: 'reach', windowMode: 'background', timeoutMs: 60000
+      });
+      return 'no-throw';
+    } catch (error) {
+      return error?.reason;
+    }
+  };
+  ok(await reasonOf(wallBrowser()) === XHS_BROWSER_WALL, '登录墙 → reason = login_required', await reasonOf(wallBrowser()));
+
+  // ④ 0 卡片 + 标题正常 → page_changed → 继续 ask
+  const changedRun = sequenceRecorder([
+    { stdout: XHS_SEARCH_FAIL, stderr: '', code: 0 },
+    { stdout: XHS_ASK_STDOUT, stderr: '', code: 0 }
+  ]);
+  const changedRes = await makeTools({ runCli: changedRun, runBrowser: changedBrowser() }).search({ platform: 'xhs', query: '咖啡' });
+  ok(changedRes.mode === 'ask_fallback', '0 卡片（结构变了）→ 继续 ask 降级', `mode=${changedRes.mode}`);
+  ok(await reasonOf(changedBrowser()) === 'page_changed', '0 卡片 → reason = page_changed', await reasonOf(changedBrowser()));
+
+  // ⑤ 开关关掉：一次浏览器都不开
+  const skipBrowser = healthyBrowser();
+  const skipRun = sequenceRecorder([
+    { stdout: XHS_SEARCH_FAIL, stderr: '', code: 0 },
+    { stdout: XHS_ASK_STDOUT, stderr: '', code: 0 }
+  ]);
+  const skipRes = await makeTools({ runCli: skipRun, runBrowser: skipBrowser, reachConfig: { xhsBrowserSearch: false } })
+    .search({ platform: 'xhs', query: '咖啡' });
+  ok(skipRes.mode === 'ask_fallback' && skipBrowser.calls.length === 0,
+    'xhsBrowserSearch:false → 不碰浏览器，直接问 AI',
+    `mode=${skipRes.mode}, browserCalls=${skipBrowser.calls.length}`);
+
+  // ⑥ 三段全失败 → 一次性说清三条原因
+  const allFailRun = sequenceRecorder([
+    { stdout: XHS_SEARCH_FAIL, stderr: '', code: 0 },
+    { stdout: XHS_ASK_FAIL, stderr: '', code: 0 }
+  ]);
+  const allFail = await makeTools({ runCli: allFailRun, runBrowser: wallBrowser() }).search({ platform: 'xhs', query: '咖啡' });
+  const allFailText = String(allFail.error);
+  ok(allFail.ok === false && allFail.code === 'unavailable' && allFail.reason === 'ask_fallback_failed',
+    '搜索 / 网页 / 问答都失败 → unavailable + reason ask_fallback_failed',
+    `code=${allFail.code}, reason=${allFail.reason}`);
+  ok(allFailText.includes('小红书 搜索失败：') && allFailText.includes('网页抓取也失败：') && allFailText.includes('AI 问答也失败：'),
+    'error 同时交代三段原因，便于排查是哪一段坏了', allFailText.slice(0, 120));
+
+  // ⑦ 不缓存：同参数连续两次 → 真的执行两遍
+  const twiceRun = recorder(XHS_SEARCH_FAIL);
+  const twiceBrowser = healthyBrowser();
+  const twiceTools = makeTools({ runCli: twiceRun, runBrowser: twiceBrowser });
+  const firstCall = await twiceTools.search({ platform: 'xhs', query: '咖啡' });
+  const secondCall = await twiceTools.search({ platform: 'xhs', query: '咖啡' });
+  ok(twiceBrowser.calls.length === 8, '同参数连续两次 → 浏览器跑了两遍（open/wait/eval/close × 2）',
+    `browserCalls=${twiceBrowser.calls.length}`);
+  ok(twiceBrowser.calls.filter((call) => call.argv.includes('close')).length === 2,
+    '每次抓完都还标签租约（残留租约会拖垮下一次调用）',
+    `closeCalls=${twiceBrowser.calls.filter((call) => call.argv.includes('close')).length}`);
+  ok(twiceRun.calls.length === 2, '站内搜索也跑了两遍（没有结果缓存）', `cliCalls=${twiceRun.calls.length}`);
+  ok(firstCall.count === 3 && secondCall.count === 3 && firstCall.text === secondCall.text,
+    '两次都拿到完整结果', `count=${firstCall.count}/${secondCall.count}`);
+
+  // ⑦b 失败也要还租约；还租约本身失败不许影响结果
+  const wallCalls = wallBrowser();
+  await makeTools({ runCli: recorder(XHS_SEARCH_FAIL), runBrowser: wallCalls, reachConfig: { xhsAskFallback: false } })
+    .search({ platform: 'xhs', query: '咖啡' });
+  ok(wallCalls.calls.some((call) => call.argv.includes('close')),
+    '撞登录墙失败后也还标签租约（别把租约留给下一次）', '');
+  const healthyInner = healthyBrowser();
+  const closeThrows = async (bin, argv, options) => {
+    if (argv.includes('close')) throw new Error('close failed');
+    return healthyInner(bin, argv, options);
+  };
+  const closeFailRes = await makeTools({ runCli: recorder(XHS_SEARCH_FAIL), runBrowser: closeThrows })
+    .search({ platform: 'xhs', query: '咖啡', limit: 5 });
+  ok(closeFailRes.ok === true && closeFailRes.count === 3,
+    '还租约失败不影响本次成功结果', `ok=${closeFailRes.ok}, count=${closeFailRes.count}`);
+
+  // ⑧ 参数错误不进入降级链
+  const badBrowse = healthyBrowser();
+  const badRes = await makeTools({ runCli: recorder(XHS_SEARCH_FAIL), runBrowser: badBrowse }).search({ platform: 'xhs', query: '   ' });
+  ok(badRes.ok === false && badRes.code === 'bad_query' && badBrowse.calls.length === 0,
+    '空关键词 → bad_query，不碰浏览器、不问 AI', `code=${badRes.code}, browserCalls=${badBrowse.calls.length}`);
+
+  // ⑨ open 这一步就失败（比如 profile 没连上）
+  const downRes = await makeTools({
+    runCli: recorder(XHS_SEARCH_FAIL),
+    runBrowser: browserStub({ open: { ok: false, error: { code: 'BROWSER_CONNECT', message: 'Browser profile "Profile 2" is not connected' } } }),
+    reachConfig: { xhsAskFallback: false }
+  }).search({ platform: 'xhs', query: '咖啡' });
+  ok(downRes.ok === false && downRes.code === 'unavailable' && /BROWSER_CONNECT|Profile 2/.test(String(downRes.error)),
+    'open 失败 → unavailable，并带上游原文', String(downRes.error).slice(0, 90));
+
+  // ⑩ 进程起不来 / 导航慢：两种语义分开
+  //    起不来（ENOENT / 没有 JSON）→ browser_unavailable；
+  //    导航慢（open 超时）**不算**失败：页面往往已经在，接着等卡片 + 读 DOM，
+  //    这里默认桩的 eval 返回 null → 页面报告认不出 → page_changed（而不是笼统的 timeout）。
+  const spawnFailStub = browserStub({ open: () => { throw new Error('spawn opencli.cmd ENOENT'); } });
+  const slowOpenStub = browserStub({ open: () => { throw new Error('opencli 超时（20000ms）'); } });
+  ok(await reasonOf(spawnFailStub) === 'browser_unavailable', '起不来 → reason = browser_unavailable', await reasonOf(spawnFailStub));
+  ok(await reasonOf(slowOpenStub) === 'page_changed', 'open 超时但页面读不出 → page_changed（不是 timeout）', await reasonOf(slowOpenStub));
+
+  // ⑫ open 超时、但页面其实已经渲染好（实测：撞登录墙时 open 会挂到调用方超时）→ 照样成功
+  const slowButFine = browserStub({
+    open: () => { throw new Error('opencli 超时（20000ms）'); },
+    wait: { ok: true, data: 'matched' },
+    evalJs: { ok: true, data: JSON.stringify(xhsPageReport()) }
+  });
+  const slowRes = await makeTools({ runCli: recorder(XHS_SEARCH_FAIL), runBrowser: slowButFine })
+    .search({ platform: 'xhs', query: '咖啡', limit: 5 });
+  ok(slowRes.ok === true && slowRes.mode === 'browser' && slowRes.count === 3,
+    'open 超时 + 页面正常 → 仍然 mode:browser、3 条', `ok=${slowRes.ok}, mode=${slowRes.mode}, count=${slowRes.count}`);
+
+  // ⑬ open 的超时预算被压到 15s，别把整个 budget 都耗在导航上
+  const openBudget = slowButFine.calls.find((call) => call.argv.includes('open'))?.options?.timeoutMs;
+  ok(openBudget === 15000, 'open 只给 15s（导航慢不等于失败）', `timeoutMs=${openBudget}`);
+
+  // ⑬' 每一步都只拿自己那一份预算：wait / eval 不许拿 60s 的整段预算去挂
+  const stepWaitCall = slowButFine.calls.find((call) => call.argv.includes('wait'));
+  const stepEvalCall = slowButFine.calls.find((call) => call.argv.includes('eval'));
+  ok(stepWaitCall.options.timeoutMs <= 20000, 'wait 的进程超时不超过 20s（选择器自己的 --timeout 另算）', `timeoutMs=${stepWaitCall.options.timeoutMs}`);
+  ok(stepEvalCall.options.timeoutMs <= 20000, 'eval 的进程超时不超过 20s', `timeoutMs=${stepEvalCall.options.timeoutMs}`);
+  ok(Number(stepWaitCall.argv[stepWaitCall.argv.indexOf('--timeout') + 1]) <= 15000,
+    'wait 的选择器预算不超过 15s（等不到就交给 eval 判定）',
+    `--timeout=${stepWaitCall.argv[stepWaitCall.argv.indexOf('--timeout') + 1]}`);
+
+  // ⑪ 用户输入只进 URL，不进脚本
+  const injBrowser = healthyBrowser();
+  await makeTools({ runCli: recorder(XHS_SEARCH_FAIL), runBrowser: injBrowser }).search({ platform: 'xhs', query: '咖啡<script>' });
+  const injOpen = injBrowser.calls.find((call) => call.argv.includes('open'))?.argv ?? [];
+  const injEval = injBrowser.calls.find((call) => call.argv.includes('eval'))?.argv ?? [];
+  ok(injOpen[injOpen.length - 1] === xhsSearchPageUrl('咖啡<script>'), '关键词整段 encodeURIComponent 进 URL', injOpen[injOpen.length - 1]);
+  ok(!injOpen[injOpen.length - 1].includes('<script>'), 'URL 里没有原样出现的标签', '');
+  ok(injEval[injEval.length - 1] === XHS_EXTRACT_SCRIPT, 'eval 的脚本逐字节不变（常量字符串）', '');
+  const browserArgv = injBrowser.calls[0]?.argv ?? [];
+  ok(browserArgv[0] === 'browser' && browserArgv.includes('--session') && browserArgv.includes('--window')
+    && browserArgv.includes('--window') && browserArgv[browserArgv.indexOf('--window') + 1] === 'background',
+    '命令固定形如 browser --session <s> --window background …（后台窗口）', browserArgv.slice(0, 6).join(' '));
+}
+
+// ── ㉙ 小黑盒话题 / 游戏兜底（T-029 dev-doc §7 组 6） ───────────────────────
+console.log('## ㉙ 小黑盒：验证码 / 暂停 → 话题 / 游戏兜底');
+{
+  const HEYBOX_CAPTCHA = {
+    ok: false,
+    code: 'captcha',
+    reason: '小黑盒要求验证码，先暂停一下',
+    pausedUntil: 1792758394389,
+    pauseRemainingText: '还剩 30 分钟'
+  };
+  const HEYBOX_PAUSED = {
+    ok: false,
+    code: 'paused',
+    reason: '小黑盒在验证码暂停期内',
+    pausedReason: 'captcha',
+    pauseRemainingText: '还剩 25 分钟'
+  };
+  const TOPIC_STDOUT = JSON.stringify({
+    ok: true,
+    data: {
+      result: {
+        topics: [
+          { name: '黑神话：悟空', topic_id: 568547, show_desc: '热度: 203.2万' },
+          { name: '黑神话悟空 二周目', topic_id: 570001, show_desc: '热度: 12.1万' }
+        ]
+      }
+    }
+  });
+  const GAME_STDOUT = JSON.stringify({
+    ok: true,
+    data: {
+      result: {
+        games: [{
+          name: '黑神话：悟空',
+          appid: 2358720,
+          steam_appid: 2358720,
+          score: '9.8',
+          follow_num: 1865556,
+          release_date_desc: '2024年08月20日'
+        }]
+      }
+    }
+  });
+  const TYPE_EMPTY_STDOUT = JSON.stringify({ ok: true, data: { result: { topics: [], games: [] } } });
+  const SHAPE_BAD_STDOUT = JSON.stringify({ ok: true, data: {} });
+
+  // ① 验证码 → 话题有结果
+  const t1Run = recorder(TOPIC_STDOUT);
+  const t1 = await makeTools({ runCli: t1Run, heybox: fakeHeybox({ search: async () => HEYBOX_CAPTCHA }) })
+    .search({ platform: 'heybox', query: '黑神话', limit: 3 });
+  ok(t1.ok === true && t1.mode === 'topic_fallback', '帖子搜索被验证码拦 → 话题兜底成功（mode:topic_fallback）',
+    `ok=${t1.ok}, mode=${t1.mode}`);
+  ok(String(t1.text).split('\n')[0] === HEYBOX_TYPE_PREFIX, '首行就是约定的降级文案原文',
+    String(t1.text).split('\n')[0]);
+  ok(t1.count === 2 && t1.items[0]?.title === '黑神话：悟空' && t1.items[0]?.kind === 'topic',
+    '话题条目按 name/show_desc 返回', `count=${t1.count}, title=${t1.items[0]?.title}`);
+  ok(String(t1.text).includes('【话题】'), '话术标出「这是话题、不是帖子」', '');
+  ok(t1Run.calls.length === 1 && t1Run.calls[0].argv.join(' ') === '-f json search 黑神话 --type topic --limit 3',
+    '兜底调 CLI 的形状：-f json search <词> --type topic --limit N',
+    t1Run.calls[0]?.argv.join(' '));
+  const t1Env = t1Run.calls[0]?.options?.env ?? {};
+  ok(t1Env.NO_PROXY === 'localhost,127.0.0.1' && !Object.keys(t1Env).some((name) => /proxy/i.test(name) && name !== 'NO_PROXY'),
+    '兜底 env 清掉代理（否则 httpx normalize_port 直接崩）',
+    Object.keys(t1Env).filter((name) => /proxy/i.test(name)).join(','));
+  ok(!Object.keys(t1Env).some((name) => /^DEEPSEEK_/i.test(name)), 'env 仍然过滤掉 DEEPSEEK_* 之类变量', '');
+
+  // ② 话题没结果 → 接着试游戏
+  const t2Run = sequenceRecorder([
+    { stdout: TYPE_EMPTY_STDOUT, stderr: '', code: 0 },
+    { stdout: GAME_STDOUT, stderr: '', code: 0 }
+  ]);
+  const t2 = await makeTools({ runCli: t2Run, heybox: fakeHeybox({ search: async () => HEYBOX_CAPTCHA }) })
+    .search({ platform: 'heybox', query: '黑神话', limit: 3 });
+  ok(t2.mode === 'topic_fallback' && t2.items[0]?.kind === 'game', '话题没结果 → 自动再试游戏',
+    `mode=${t2.mode}, kind=${t2.items[0]?.kind}`);
+  ok(t2Run.calls.length === 2 && t2Run.calls[1].argv.includes('game'),
+    '第二次调用换成 --type game', t2Run.calls[1]?.argv.join(' '));
+  ok(String(t2.text).includes('【游戏】') && String(t2.text).includes('9.8'),
+    '游戏条目带评分等字段', String(t2.text).split('\n')[2]);
+
+  // ③ paused 也触发兜底（验证码暂停期内 code 会变成 paused）
+  const t3 = await makeTools({ runCli: recorder(TOPIC_STDOUT), heybox: fakeHeybox({ search: async () => HEYBOX_PAUSED }) })
+    .search({ platform: 'heybox', query: '黑神话' });
+  ok(t3.mode === 'topic_fallback', 'code=paused 同样走话题兜底', `mode=${t3.mode}`);
+
+  // ④ 兜底也没结果 → unavailable（不得空列表）
+  const t4Run = recorder(TYPE_EMPTY_STDOUT);
+  const t4 = await makeTools({ runCli: t4Run, heybox: fakeHeybox({ search: async () => HEYBOX_CAPTCHA }) })
+    .search({ platform: 'heybox', query: '黑神话' });
+  ok(t4.ok === false && t4.code === 'unavailable' && t4.reason === 'type_fallback_empty',
+    '兜底也空 → unavailable + reason type_fallback_empty',
+    `code=${t4.code}, reason=${t4.reason}`);
+  ok(/验证码/.test(String(t4.error)) && /话题/.test(String(t4.error)),
+    'error 说清是验证码拦的、话题/游戏也没拿到', String(t4.error).slice(0, 110));
+  ok(t4.items === undefined, '失败时没有 items 字段', '');
+
+  // ⑤ 开关关掉 → 不兜底、不烧调用
+  const t5Run = recorder(TOPIC_STDOUT);
+  const t5 = await makeTools({
+    runCli: t5Run,
+    heybox: fakeHeybox({ search: async () => HEYBOX_CAPTCHA }),
+    reachConfig: { heyboxTypeFallback: false }
+  }).search({ platform: 'heybox', query: '黑神话' });
+  ok(t5.ok === false && t5.code === 'unavailable' && t5.reason === 'captcha' && t5Run.calls.length === 0,
+    'heyboxTypeFallback:false → 保留原文案、一次 CLI 都不跑',
+    `reason=${t5.reason}, calls=${t5Run.calls.length}`);
+
+  // ⑥ 不是验证码的失败（比如登录态问题）不兜底
+  const t6Run = recorder(TOPIC_STDOUT);
+  const t6 = await makeTools({
+    runCli: t6Run,
+    heybox: fakeHeybox({ search: async () => ({ ok: false, code: 'auth', reason: '登录态过期' }) })
+  }).search({ platform: 'heybox', query: '黑神话' });
+  ok(t6.reason === 'auth' && t6Run.calls.length === 0, '非验证码失败不兜底（避免把别的问题盖住）',
+    `reason=${t6.reason}, calls=${t6Run.calls.length}`);
+
+  // ⑦ 话题返回坏形状 → 认不出就继续试游戏
+  const t7Run = sequenceRecorder([
+    { stdout: SHAPE_BAD_STDOUT, stderr: '', code: 0 },
+    { stdout: GAME_STDOUT, stderr: '', code: 0 }
+  ]);
+  const t7 = await makeTools({ runCli: t7Run, heybox: fakeHeybox({ search: async () => HEYBOX_CAPTCHA }) })
+    .search({ platform: 'heybox', query: '黑神话' });
+  ok(t7.mode === 'topic_fallback' && t7.items[0]?.kind === 'game',
+    '话题结果形状认不出 → 继续试游戏', `kind=${t7.items[0]?.kind}`);
+}
+
+// ── ㉚ 新配置项与话术（T-029 dev-doc §6） ───────────────────────────────────
+console.log('## ㉚ 新配置项（浏览器/兜底）与降级话术');
+{
+  const defaults = normalizeReachConfig({});
+  ok(defaults.xhsBrowserSearch === true && defaults.heyboxTypeFallback === true,
+    '默认开网页抓取、默认开话题兜底',
+    `xhsBrowserSearch=${defaults.xhsBrowserSearch}, heyboxTypeFallback=${defaults.heyboxTypeFallback}`);
+  ok(defaults.browserSession === 'reach' && defaults.browserWindow === 'background' && defaults.browserTimeoutMs === 60000,
+    '默认 session=reach、window=background、browserTimeoutMs=60000',
+    `session=${defaults.browserSession}, window=${defaults.browserWindow}, timeout=${defaults.browserTimeoutMs}`);
+
+  const custom = normalizeReachConfig({
+    xhsBrowserSearch: false,
+    heyboxTypeFallback: 'no',
+    browserSession: 't 029!!',
+    browserWindow: 'foreground',
+    browserTimeoutMs: 5000
+  });
+  ok(custom.xhsBrowserSearch === false && custom.heyboxTypeFallback === false,
+    '显式 false 生效', `xhsBrowserSearch=${custom.xhsBrowserSearch}`);
+  ok(custom.browserSession === 't029', 'session 名里的非法字符被清掉（argv 安全）', custom.browserSession);
+  ok(custom.browserWindow === 'foreground', 'browserWindow 只认 foreground / background', custom.browserWindow);
+  ok(custom.browserTimeoutMs === 10000, 'browserTimeoutMs 下限夹到 10000', custom.browserTimeoutMs);
+
+  const edge = normalizeReachConfig({ browserSession: '', browserWindow: 'weird', browserTimeoutMs: 999999 });
+  ok(edge.browserSession === 'reach' && edge.browserWindow === 'background' && edge.browserTimeoutMs === 300000,
+    '空 session 回落到 reach、未知窗口回落到 background、上限夹到 300000',
+    `session=${edge.browserSession}, window=${edge.browserWindow}, timeout=${edge.browserTimeoutMs}`);
+
+  ok(xhsSearchPageUrl('咖啡') === 'https://www.xiaohongshu.com/search_result?keyword=%E5%92%96%E5%95%A1',
+    '搜索页 URL 与实测一致（keyword 走 encodeURIComponent）', xhsSearchPageUrl('咖啡'));
+  ok(xhsSearchPageUrl('a b&c') === 'https://www.xiaohongshu.com/search_result?keyword=a%20b%26c',
+    '空格与 & 都被编码', xhsSearchPageUrl('a b&c'));
+
+  const parsed = parseXhsBrowserCards(xhsPageReport());
+  ok(parsed.ok === true && parsed.wall === false && parsed.items.length === 3,
+    'parseXhsBrowserCards：报告对象 → 3 条、wall=false',
+    `ok=${parsed.ok}, wall=${parsed.wall}, items=${parsed.items.length}`);
+  const parsedString = parseXhsBrowserCards(JSON.stringify(xhsPageReport()));
+  ok(parsedString.items.length === 3, 'parseXhsBrowserCards：JSON 字符串也吃', `items=${parsedString.items.length}`);
+  ok(parseXhsBrowserCards({ loginWall: true, bodyHead: '登录后查看搜索结果' }).wall === true,
+    'loginWall 标记或正文「登录后查看」都算登录墙', '');
+  ok(parseXhsBrowserCards('这不是 JSON').ok === false, '坏输入不抛异常、只返回 ok:false', '');
+
+  const browserText = formatBrowserResult({ query: '咖啡', items: parsed.items, pageUrl: pageUrlOf() });
+  ok(String(browserText).startsWith(XHS_BROWSER_PREFIX), 'formatBrowserResult 首行是网页抓取文案', '');
+  ok(String(browserText).includes('共 3 条') && String(browserText).includes('xiaohongshu.com/explore/'),
+    'formatBrowserResult 带条数与可点链接', '');
+  function pageUrlOf() {
+    return xhsSearchPageUrl('咖啡');
+  }
+
+  const typeItems = [
+    { platform: 'heybox', kind: 'topic', id: '', title: '黑神话：悟空', author: '热度: 203.2万', url: '' },
+    { platform: 'heybox', kind: 'game', id: '', title: '黑神话：悟空', author: '评分 9.8 · 关注 186.6万', url: '' }
+  ];
+  const typeText = formatHeyboxTypeResult({ query: '黑神话', items: typeItems });
+  ok(String(typeText).startsWith(HEYBOX_TYPE_PREFIX), 'formatHeyboxTypeResult 首行是降级文案', '');
+  ok(String(typeText).includes('【话题】') && String(typeText).includes('【游戏】'),
+    '话题 / 游戏两种条目分别标注', '');
+  const typeEmptyText = formatHeyboxTypeResult({ query: '黑神话', items: [] });
+  ok(/没有结果|没搜到/.test(String(typeEmptyText)), '空结果也有话说', String(typeEmptyText).split('\n')[1]);
+
+  ok(parseHeyboxTypeSearch(extractJson(JSON.stringify({ ok: true, data: { result: { topics: [{ name: 'A', topic_id: 1 }] } } })), { type: 'topic', limit: 8 })?.length === 1,
+    'parseHeyboxTypeSearch 读 data.result.topics', '');
+  ok(parseHeyboxTypeSearch(extractJson(JSON.stringify({ ok: true, data: { result: { games: [{ name: 'B', appid: 2 }] } } })), { type: 'game', limit: 8 })?.[0]?.kind === 'game',
+    'parseHeyboxTypeSearch 读 data.result.games', '');
+  ok(parseHeyboxTypeSearch(extractJson(JSON.stringify({ ok: true, data: {} })), { type: 'topic', limit: 8 }) === null,
+    '认不出的形状返回 null（交给上层换下一个端点）', '');
+}
+
+// ── ㉛ 只读边界与常量脚本（T-029） ─────────────────────────────────────────
+console.log('## ㉛ 只读边界：常量脚本、不点击、env 过滤');
+{
+  const browserSource = fs.readFileSync(path.join(ROOT, 'src/reach-browser.js'), 'utf8');
+  ok(!/--execute/.test(browserSource), 'reach-browser.js 不用 --execute（不往页面塞任意命令）', '');
+  ok(!/\.click\s*\(/.test(browserSource), 'reach-browser.js 不点击任何元素', '');
+  ok(!/\$\{/.test(XHS_EXTRACT_SCRIPT), '提取脚本里没有任何模板插值（常量字符串）', '');
+  ok(XHS_EXTRACT_SCRIPT.includes('[class*="note-item"]') && XHS_EXTRACT_SCRIPT.includes('/explore/'),
+    '提取脚本用的选择器与实测一致', '');
+  ok(XHS_EXTRACT_SCRIPT.includes('登录后查看'), '登录墙判定写在脚本里（正文短语，不看标题）', '');
+  ok(!/publish|comment|dm|follow/i.test(XHS_EXTRACT_SCRIPT), '提取脚本只读页面文本', '');
+
+  // Windows 上**不能** spawn `opencli.cmd`：cmd.exe 会把 JS 里的 `| ( ) "` 吃掉（实测被拆成多条命令）。
+  // 入口转换统一由 reach-tools 的 spawnTarget / resolveShimScript 做（转成 `node <main.js>`），
+  // reach-browser.js 自己不许再起一个 cmd.exe 或 shell:true。
+  ok(!/cmd\.exe|shell\s*:\s*true/i.test(browserSource),
+    'reach-browser.js 自己不起 cmd.exe / shell:true（入口交给 reach-tools 的 spawnTarget）', '');
+  const toolsSource = fs.readFileSync(path.join(ROOT, 'src/reach-tools.js'), 'utf8');
+  ok(/function spawnTarget\(/.test(toolsSource) && toolsSource.includes('process.execPath'),
+    'reach-tools 仍用 spawnTarget 把 .cmd 解析成 node <入口>（浏览器与 CLI 走同一条 spawn 路）', '');
+  ok(/createReachBrowser\(\{\s*runBrowser:/.test(toolsSource),
+    '浏览器阶段复用同一个 runBrowser 注入点（不新开一条 spawn 路）', '');
+
+  const typeEnv = heyboxTypeEnv({ PATH: 'C:/x', HTTP_PROXY: 'http://127.0.0.1:7890', HTTPS_PROXY: 'http://127.0.0.1:7890', ALL_PROXY: 'socks5://127.0.0.1:7890', NO_PROXY: 'example.com', DEEPSEEK_API_KEY: 'sk-test' });
+  ok(typeEnv.PATH === 'C:/x', 'heyboxTypeEnv 保留 PATH 之类的必要变量', typeEnv.PATH);
+  ok(!Object.keys(typeEnv).some((name) => /proxy/i.test(name) && name !== 'NO_PROXY'),
+    'heyboxTypeEnv 把 HTTP(S)_PROXY / ALL_PROXY 全清掉', Object.keys(typeEnv).join(','));
+  ok(typeEnv.NO_PROXY === 'localhost,127.0.0.1', 'heyboxTypeEnv 固定 NO_PROXY=localhost,127.0.0.1', typeEnv.NO_PROXY);
+  ok(typeEnv.DEEPSEEK_API_KEY === undefined, 'heyboxTypeEnv 不把 DSH 的模型密钥带出去', '');
+}
+
+// ── ㉜ 站内搜索的短预算（P-001） ────────────────────────────────────────────
+console.log('## ㉜ 站内搜索短预算：xhsCliTimeoutMs');
+{
+  const defaults = normalizeReachConfig({});
+  ok(defaults.xhsCliTimeoutMs === 12000, '默认 xhsCliTimeoutMs=12000（12 秒，不是全局 120000）', defaults.xhsCliTimeoutMs);
+  ok(normalizeReachConfig({ xhsCliTimeoutMs: 1000 }).xhsCliTimeoutMs === 3000,
+    'xhsCliTimeoutMs 下限夹到 3000', normalizeReachConfig({ xhsCliTimeoutMs: 1000 }).xhsCliTimeoutMs);
+  ok(normalizeReachConfig({ xhsCliTimeoutMs: 999999 }).xhsCliTimeoutMs === 60000,
+    'xhsCliTimeoutMs 上限夹到 60000', normalizeReachConfig({ xhsCliTimeoutMs: 999999 }).xhsCliTimeoutMs);
+
+  // 真正跑一次：站内搜索那一次用的必须是 xhsCliTimeoutMs，ask 仍用全局 timeoutMs。
+  const budgets = [];
+  const slowCli = async (bin, argv, options = {}) => {
+    if (argv[0] === 'xiaohongshu' && argv[1] === 'search') {
+      budgets.push({ step: 'search', timeoutMs: options.timeoutMs });
+      throw new Error(`opencli 超时（${options.timeoutMs}ms）`);
+    }
+    budgets.push({ step: 'ask', timeoutMs: options.timeoutMs });
+    return { stdout: XHS_ASK_STDOUT, stderr: '', code: 0 };
+  };
+  const slow = await makeTools({ runCli: slowCli }).search({ platform: 'xhs', query: '咖啡' });
+  const searchBudget = budgets.find((entry) => entry.step === 'search');
+  const askBudget = budgets.find((entry) => entry.step === 'ask');
+  ok(searchBudget?.timeoutMs === 12000,
+    'xhs 站内搜索传的是 xhsCliTimeoutMs（12000），不是 120000', JSON.stringify(searchBudget));
+  ok(askBudget?.timeoutMs === 120000, 'ask 仍用全局 timeoutMs（互不影响）', JSON.stringify(askBudget));
+  ok(slow.ok === true && slow.mode === 'ask_fallback',
+    '站内搜索超时后照样往下降级（不白等两分钟）', `mode=${slow.mode}`);
+
+  // 文案要可判读：说清是「站内搜索限时到了」，原文（含毫秒）照样带上。
+  const noAsk = await makeTools({
+    runCli: slowCli,
+    reachConfig: { xhsAskFallback: false, xhsBrowserSearch: false }
+  }).search({ platform: 'xhs', query: '咖啡' });
+  ok(noAsk.ok === false && String(noAsk.error).includes('站内搜索超时（12s）'),
+    '超时文案写明「站内搜索超时（12s）」', String(noAsk.error));
+  ok(String(noAsk.error).includes('12000ms'), '原文（毫秒数）不被吞掉，便于排查', String(noAsk.error));
+
+  const custom = await makeTools({
+    runCli: slowCli,
+    reachConfig: { xhsAskFallback: false, xhsBrowserSearch: false, xhsCliTimeoutMs: 3000 }
+  }).search({ platform: 'xhs', query: '咖啡' });
+  ok(String(custom.error).includes('站内搜索超时（3s）'), '自定义 3000ms 时文案是「站内搜索超时（3s）」', String(custom.error));
+}
+
 // ── ㉗ node --check ─────────────────────────────────────────────────────────
 console.log('## ㉗ node --check 新增源文件');
 {
-  for (const file of ['src/reach-core.js', 'src/reach-tools.js']) {
+  for (const file of ['src/reach-core.js', 'src/reach-tools.js', 'src/reach-browser.js']) {
     const result = spawnSync(process.execPath, ['--check', path.join(ROOT, file)], { cwd: ROOT, encoding: 'utf8' });
     ok(result.status === 0, `${file} 语法通过`, String(result.stderr ?? '').slice(0, 120));
   }

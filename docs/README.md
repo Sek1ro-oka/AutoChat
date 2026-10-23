@@ -26,6 +26,7 @@
 | [guides/HEYBOX.md](guides/HEYBOX.md) | 小黑盒：看帖 / 搜索 / 自主评论；四道闸门、验证码命中后四入口一起停 30 分钟、`messageId` 三级取值 | ✅ 2026-10-21 新增（T-022） |
 | [guides/DEVICE.md](guides/DEVICE.md) | 安卓平板：截图 / 点击 / 滑动 / 输入 / 按键 / 开应用 / 列应用；预算闸门 + 黑名单前台硬闸门 + `home` 逃生口 | ✅ 2026-10-21 新增（T-023） |
 | [guides/REACH.md](guides/REACH.md) | 三平台只读检索（`reach_status` / `reach_search` / `reach_read`）：B站 / 小红书 / 小黑盒一个入口；错误语义、Windows 上 `opencli.cmd` 的 spawn 细节与三个上游的实测状态 | ✅ 2026-10-23 新增（T-027） |
+| [guides/ZHANGXUEFENG.md](guides/ZHANGXUEFENG.md) | `zx_perspective`：把「张雪峰视角」skill 当作参考资料取用（咨询模式，不换人格）；只在 `group:1131654608` 可用、只读外部 SKILL.md、4000 字上限与失败语义 | ✅ 2026-10-23 新增（T-030） |
 
 ## design/ —— 设计与规划（读设计意图用）
 

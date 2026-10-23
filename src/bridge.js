@@ -2393,6 +2393,171 @@ function canonicalV2Key(key) {
   return `${m[1]}:${id}`;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 张雪峰视角（T-030）：外部 skill 的运行时读取
+// ═══════════════════════════════════════════════════════════════════════════
+// 形态是**咨询模式**：小鲸鱼还是小鲸鱼，只是借这份 skill 的思维框架 / 决策启发式 /
+// 表达方式去组织答案，不切换人格，也不在回答开头标注来源。
+//
+// 正文**不进仓库**：这是第三方 skill（MIT，Copyright 2026 Huashu 花叔），仓库里只放
+// 读取逻辑。每次请求 stat 一次文件，mtime 没变就复用上次读到的正文 —— 既不用每个群
+// 消息都读一遍 25KB，也能让运营改完 skill 文件立刻生效（mtime 一变缓存自然失效）。
+const ZX_SKILL_FILE = path.join(os.homedir(), '.agents', 'skills', 'zhangxuefeng-skill', 'SKILL.md');
+// 可用范围：默认只有这一个群。设计上就是个「只给某群开的小灶」，不是通用工具。
+const ZX_ALLOW_KEYS = ['group:1131654608'];
+const ZX_MAX_CHARS = 4000;
+// 允许读取的**唯一**文件名。`socialV2.zx.dir` 是操作者配置，理论上可以指向任何可读
+// 文件（比如私钥、日记），而它的内容会被原样喂给模型 —— 所以这里按「只能读那一份
+// SKILL.md」做最小校验：不是这个文件名就不服务，别把它变成任意文件读取器。
+const ZX_SKILL_BASENAME = 'SKILL.md';
+// 取用的小节（**只有三节**）+ 各自在正文里的标题前缀。正文标题带后缀（例如「## 核心心智模型」），
+// 所以按前缀匹配，不要求整行相等；改 skill 时只要前缀还在，切分就不会碎。
+//
+// 为什么**不取**「## 角色扮演规则」：那一节写的是「此Skill激活后，直接以张雪峰的身份回应」，
+// 是给「角色扮演」场景的**指令**。用户要的是咨询模式 —— 说话的必须还是小鲸鱼，只是借这套
+// 分析框架；把那一节塞进返回体，等于给模型发一条「切换人格」的命令，产品口径会当场自相矛盾。
+// 所以它既不进 all，也不接受 topic:'rules' 显式点名（见 ZX_TOPIC_ALIASES 的说明）。
+const ZX_SECTIONS = [
+  { key: 'frameworks', heading: '## 核心心智模型' },
+  { key: 'heuristics', heading: '## 决策启发式' },
+  { key: 'expression', heading: '## 表达DNA' }
+];
+const ZX_TOPIC_ALIASES = new Map([
+  ['frameworks', 'frameworks'], ['framework', 'frameworks'], ['models', 'frameworks'],
+  ['mentalmodels', 'frameworks'], ['coreframeworks', 'frameworks'],
+  ['心智模型', 'frameworks'], ['核心心智模型', 'frameworks'],
+  ['heuristics', 'heuristics'], ['heuristic', 'heuristics'], ['启发式', 'heuristics'], ['决策启发式', 'heuristics'],
+  ['expression', 'expression'], ['dna', 'expression'], ['表达', 'expression'],
+  ['表达dna', 'expression'], ['表达方式', 'expression'],
+  ['all', 'all'], ['全部', 'all']
+]);
+// 注意：这里**故意没有** 'rules' / 'rule' / '规则' / '角色扮演规则' 的映射。
+// 传这些词会走「认不出 → all」的兜底，于是返回的是三节框架，而不是那一节人格指令。
+// 这是 Z-001 的产品口径：这个端点只给「参考资料」，不给「角色扮演命令」。
+/**
+ * topic 归一。认不出的值一律退回 all —— 工具描述里已经写了枚举，模型手滑（大小写、
+ * 中文别名、拼错）不该让整次调用 400；它要的是「给我点参考」，不是参数校验报告。
+ */
+function normalizeZxTopic(topic) {
+  const norm = String(topic ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+  return ZX_TOPIC_ALIASES.get(norm) ?? 'all';
+}
+/** 对外只露「zhangxuefeng-skill/SKILL.md」这种相对标签，不回绝对路径（与语音库同一口径）。 */
+function zxSourceLabel(file) {
+  const abs = String(file ?? '').trim();
+  return abs ? `${path.basename(path.dirname(abs))}/${path.basename(abs)}` : '';
+}
+/** 读不到/读不出正文时统一用这个错误，端点据此回 {ok:false, code:'unavailable'}。 */
+function zxUnavailable(detail) {
+  const err = new Error(detail);
+  err.code = 'unavailable';
+  return err;
+}
+const zxSkillCache = new Map();
+/**
+ * 读 skill 正文（按 mtime 缓存）。
+ * @param {string} dir SKILL.md 的绝对路径（可被 config.socialV2.zx.dir 覆盖）
+ * @returns {{text:string, mtimeMs:number}}
+ * @throws {Error & {code:'unavailable'}} 文件名不对 / 文件不存在 / 不是普通文件 / 读不出 / 空文件
+ */
+function readZxSkillText(dir) {
+  const file = String(dir ?? '').trim() || ZX_SKILL_FILE;
+  const label = zxSourceLabel(file);
+  // 只服务 SKILL.md 这一份文件（见 ZX_SKILL_BASENAME 的说明）：配置指到别处一律不读，
+  // 免得这个「读外部 skill」的入口变成「按配置读任意文件再回给模型」。
+  if (path.basename(file) !== ZX_SKILL_BASENAME) {
+    throw zxUnavailable(`${label} 不是 ${ZX_SKILL_BASENAME}：张雪峰视角只读取 skill 目录里的 ${ZX_SKILL_BASENAME}`);
+  }
+  let stat = null;
+  try { stat = fs.statSync(file); } catch { throw zxUnavailable(`${label} 不存在或无法访问`); }
+  if (!stat.isFile()) throw zxUnavailable(`${label} 不是普通文件`);
+  const cached = zxSkillCache.get(file);
+  if (cached && cached.mtimeMs === stat.mtimeMs) return cached;
+  let text = '';
+  try { text = fs.readFileSync(file, 'utf8'); } catch { throw zxUnavailable(`${label} 读取失败`); }
+  if (!text.trim()) throw zxUnavailable(`${label} 是空文件`);
+  const entry = { text, mtimeMs: stat.mtimeMs };
+  zxSkillCache.set(file, entry);
+  return entry;
+}
+/** 截一个 `## ` 小节：从标题行到下一个 `## ` 之前；末尾的空行与 `---` 分隔线丢掉。 */
+function extractZxSection(md, heading) {
+  const lines = String(md ?? '').split(/\r?\n/);
+  const start = lines.findIndex((line) => line.startsWith(heading));
+  if (start < 0) return '';
+  const body = [lines[start]];
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (/^##\s/.test(lines[i])) break;
+    body.push(lines[i]);
+  }
+  while (body.length > 1 && (!body[body.length - 1].trim() || body[body.length - 1].trim() === '---')) body.pop();
+  return body.join('\n').trim();
+}
+/**
+ * 去掉小节开头的「角色扮演」框架标签行。
+ *
+ * 真实 SKILL.md 的 `## 表达DNA` 第一行是「角色扮演时必须遵循的风格规则：」——它只是个
+ * 引导标签，后面的句式/词汇/节奏才是我们要的表达方式。但这句话会原样喂给模型，等于顺手
+ * 告诉它「你在角色扮演」，与咨询模式冲突。所以只删这一种**标签行**（整行以「角色扮演」
+ * 开头、以冒号结尾），正文一个字不动；skill 作者改掉这句时，过滤器自然失效、原文原样透传。
+ */
+function stripZxFramingLabel(chunk) {
+  const lines = String(chunk ?? '').split(/\r?\n/);
+  // 第一行是 `## 表达DNA` 这个标题本身，跳过它再看紧跟其后的第一行正文。
+  let i = lines.length > 0 && lines[0].trim().startsWith('## ') ? 1 : 0;
+  while (i < lines.length && !lines[i].trim()) i += 1;
+  if (i < lines.length && /^角色扮演[^。]{0,12}[：:]\s*$/.test(lines[i].trim())) {
+    lines.splice(i, 1);
+    while (i < lines.length && !lines[i].trim()) lines.splice(i, 1);
+  }
+  return lines.join('\n');
+}
+/**
+ * 组装一次返回。
+ * @param {{dir?:string, topic?:string}} input
+ * @returns {{topic:string, source:string, mtime:string, chars:number, truncated:boolean, missing:string[], text:string}}
+ */
+function buildZxPerspective(input = {}) {
+  const topic = normalizeZxTopic(input.topic);
+  const file = readZxSkillText(input.dir);
+  const picked = topic === 'all' ? ZX_SECTIONS : ZX_SECTIONS.filter((s) => s.key === topic);
+  const chunks = [];
+  const missing = [];
+  for (const section of picked) {
+    const chunk = stripZxFramingLabel(extractZxSection(file.text, section.heading));
+    if (chunk) chunks.push(chunk);
+    else missing.push(section.heading.replace(/^##\s*/, ''));
+  }
+  if (chunks.length === 0) throw zxUnavailable(`SKILL.md 里找不到小节：${picked.map((s) => s.heading).join(' / ')}`);
+  let text = chunks.join('\n\n');
+  let truncated = false;
+  if (text.length > ZX_MAX_CHARS) {
+    // 标注也算在 4000 字预算里：先给标注留位置，再截正文，保证 chars 永远 ≤ 上限。
+    const note = `\n\n（已截断：原文共 ${text.length} 字，超过 ${ZX_MAX_CHARS} 字上限，末尾已省略。换 topic 可以单独取某一节。）`;
+    text = text.slice(0, Math.max(0, ZX_MAX_CHARS - note.length)) + note;
+    truncated = true;
+  }
+  return {
+    topic,
+    source: zxSourceLabel(input.dir || ZX_SKILL_FILE),
+    mtime: new Date(file.mtimeMs).toISOString(),
+    chars: text.length,
+    truncated,
+    missing,
+    text
+  };
+}
+/** 配置归一：`socialV2.zx`（可选）。allowKeys 显式给空数组 = 谁都不许（不被默认值悄悄覆盖）。 */
+function zxPerspectiveSettings(cfgLike) {
+  const raw = cfgLike?.socialV2?.zx;
+  const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const dir = String(source.dir ?? '').trim() || ZX_SKILL_FILE;
+  const allowKeys = (Array.isArray(source.allowKeys) ? source.allowKeys : ZX_ALLOW_KEYS)
+    .map((k) => canonicalV2Key(String(k ?? '')))
+    .filter(Boolean);
+  return { dir, allowKeys };
+}
+
 const APPROVE_WORDS = new Set(['通过', '同意', '允许', '批准', 'yes', 'y', 'approve', 'ok']);
 const REJECT_WORDS = new Set(['拒绝', '不同意', '不允许', '驳回', 'no', 'n', 'reject', 'deny']);
 
@@ -11093,6 +11258,37 @@ async function main() {
             sendJson(data);
           } catch (error) {
             sendJson({ ok: false, error: String(error?.message ?? error) }, 400);
+          }
+          return;
+        }
+        // ── 张雪峰视角（T-030）：咨询模式 ─────────────────────────────────
+        // 模型仍以小鲸鱼身份说话，只是取这份外部 skill 的思维框架 / 决策启发式 / 表达方式
+        // 来组织答案；不切换人格，也不在回答开头标注来源。
+        // 硬闸门：只认 cfg.socialV2.zx.allowKeys（默认 group:1131654608），其它会话一律
+        // 403 —— 哪怕对方手里有别的群的合法 agentToken，这里也不给过。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/zx-perspective') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const token = String(req.headers['x-agent-token'] ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          // 与 diary / 表情那些读接口不同，这里**必须**带令牌：它不是「AI 可选的加强读」，
+          // 而是只给一个群开的小灶，没有第二种合法调用方，缺令牌就没有放行的理由。
+          if (!token) { sendJson({ ok: false, error: 'agent token 不能为空' }, 403); return; }
+          if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          const zx = zxPerspectiveSettings(cfg);
+          const zxKey = canonicalV2Key(key) ?? key;
+          if (!zx.allowKeys.includes(zxKey)) {
+            sendJson({ ok: false, code: 'forbidden', error: `张雪峰视角只在指定群可用（${zx.allowKeys.join(' / ')}）` }, 403);
+            return;
+          }
+          try {
+            const data = buildZxPerspective({ dir: zx.dir, topic: body.topic });
+            log(`[zx] 张雪峰视角 ${zxKey} topic=${data.topic} ${data.chars} 字${data.truncated ? '（已截断）' : ''}`);
+            sendJson({ ok: true, ...data });
+          } catch (error) {
+            log(`[zx] 张雪峰视角读取失败 ${zxKey}: ${error?.message ?? error}`);
+            sendJson({ ok: false, code: 'unavailable', error: String(error?.message ?? error) }, 500);
           }
           return;
         }
