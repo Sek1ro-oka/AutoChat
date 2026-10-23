@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+### 发表情包加额度：每会话一小时最多 30 张（2026-10-23）
+
+- 新配置 `socialV2.sticker.send.maxPerHour`（默认 **30**，`0` = 不限）：按**会话**滚动 1 小时计数，超了返回 429 + `retryAfterMs`（文案说清「约 N 分钟后能再发」）。
+- `stickerSendQuotaV2(st, now)`：从 `st.stickerSendTimes`（落盘 social-v2.json）里只数最近 1 小时；发送成功才记一条，**发送失败会把预占的那条退回去**（一次失败不该白烧一张额度）。
+- 只约束 `qq_send_sticker` 这一条通道；文字发送仍走 `socialV2.send` 的 `maxSendPerMinute/maxSendPerHour`，两套额度互不影响。
+- 唤醒提示词新增一行【表情包额度】：「这一小时已发 N 张，还剩 M 张（上限 30）」——模型自己看得到余量，别一口气刷完；`/api/socialV2/prompt` 的 `stickers.send` 也回 `{ cap, used, remaining, retryAfterMs }`。
+- 顺带修掉快车道话术的一个毛刺：`lastIncomingAt` 为 0 时会打印「最后一条消息已经过去 1792738451 秒」，现在没有来信时间就整句省略。
+- 回归：`scripts/test-reply-wait.mjs` 33 → **35** 条（滚动窗口拒绝第 4 张、超窗口的不计数、`0` = 不限、提示词里的额度行）。
+
+
 ### 表情包更积极：收藏取消次数限制，发言频率放宽（2026-10-23）
 
 - 用户要求：「增强 bot 收藏表情包和发表情包的积极性，想收藏多少就多少个」。

@@ -215,6 +215,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     // 互通组「不是串线」（2026-10-22）：跨会话发送的出处 + 提示词里的说明行。
     // crossSendSourceV2 定义在 startConsoleServer 内部，导出不到 main 作用域，故不列。
     buildCrossGroupLineV2, buildCrossLedgerLineV2, crossSessionLabelV2,
+    // 表情包发送额度（2026-10-23）：按会话滚动 1 小时。
+    stickerSendQuotaV2,
     // 回复即已读（2026-10-22）：只推进会到「展示过」的水位。
     acknowledgeShownUnreadV2, readThroughSeqV2,
     settingFromDshNamespace, selfIdentityTextV2, buildWakeReminderPromptV2,

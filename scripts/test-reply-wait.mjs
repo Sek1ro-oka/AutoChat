@@ -466,3 +466,35 @@ test('the fast lane tells the model not to spend a step looking first', () => fi
   const slow = h.buildWakePromptV2(key, 'anyMessage');
   assert.doesNotMatch(slow, /【行动前·快车道】/);
 }));
+// 发表情包额度（2026-10-23 用户要求「一小时最多 30 张」）：按会话滚动 1 小时。
+test('sticker sends are capped per rolling hour, and 0 means no cap', () => fixture(async ({ h, key, st }) => {
+  h.cfg.socialV2.sticker.send = { maxPerHour: 3 };
+  const now = Date.now();
+  assert.equal(h.stickerSendQuotaV2(st, now).ok, true);
+
+  st.stickerSendTimes = [now - 1000, now - 2000, now - 3000];
+  const blocked = h.stickerSendQuotaV2(st, now);
+  assert.equal(blocked.ok, false, 'the fourth sticker inside one hour must be refused');
+  assert.equal(blocked.used, 3);
+  assert.equal(blocked.remaining, 0);
+  assert.ok(blocked.retryAfterMs > 0 && blocked.retryAfterMs <= 3600000, `retryAfterMs looks wrong: ${blocked.retryAfterMs}`);
+
+  // 时间滑出窗口的不算数：一小时零一分钟前那张不占额度。
+  st.stickerSendTimes = [now - 3660000, now - 1000];
+  const afterWindow = h.stickerSendQuotaV2(st, now);
+  assert.equal(afterWindow.ok, true);
+  assert.equal(afterWindow.used, 1);
+
+  h.cfg.socialV2.sticker.send = { maxPerHour: 0 };
+  st.stickerSendTimes = Array.from({ length: 100 }, (_, i) => now - i * 1000);
+  assert.equal(h.stickerSendQuotaV2(st, now).ok, true, '0 must mean unlimited');
+}));
+
+test('the wake prompt shows how many stickers are left this hour', () => fixture(async ({ h, key, st }) => {
+  h.cfg.socialV2.sticker.enabled = true;
+  h.cfg.socialV2.sticker.includeInPrompt = true;
+  h.cfg.socialV2.sticker.send = { maxPerHour: 30 };
+  st.stickerSendTimes = [Date.now() - 60000];
+  const prompt = h.buildWakePromptV2(key, 'question');
+  assert.match(prompt, /【表情包额度】这一小时已发 1 张，还剩 29 张（上限 30/);
+}));

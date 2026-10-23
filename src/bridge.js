@@ -1129,9 +1129,14 @@ function loadConfig() {
         promptMaxStickers: 8,      // 提示里最多列出的常用表情数
         collect: {
           enabled: true,           // AI 收藏他人表情总开关
-          maxPerMinute: 2,         // 每分钟最多收藏次数
-          maxPerHour: 10,          // 每小时最多收藏次数
+          maxPerMinute: 2,         // 每分钟最多收藏次数（0 = 不限）
+          maxPerHour: 10,          // 每小时最多收藏次数（0 = 不限）
           maxRemarkChars: 20       // 收藏时备注最大长度
+        },
+        // 发表情包的额度（2026-10-23 用户要求「一小时最多 30 张」）：按会话滚动 1 小时计。
+        // 只限制 qq_send_sticker 这一条通道，文本发送仍走 socialV2.send 那套配额。
+        send: {
+          maxPerHour: 30
         }
       },
       proactive: {
@@ -3074,6 +3079,27 @@ async function main() {
     stickerEntries = updated.entries;
     saveStickerStoreSafe();
     return stickerEntries.find((e) => e.id === entry.id) || null;
+  }
+
+  /**
+   * 表情包发送额度（2026-10-23 用户要求「一小时最多 30 张」）。
+   *
+   * 按**会话**滚动 1 小时计：`stickerSendTimes` 是每会话的发图时间戳（落盘在
+   * social-v2.json）。上限取 `socialV2.sticker.send.maxPerHour`，0 = 不限。
+   * 只约束 `qq_send_sticker` 这一条通道；文字发送仍走 `socialV2.send` 的配额。
+   */
+  function stickerSendQuotaV2(st, now = Date.now()) {
+    const cap = Math.max(0, Number(cfg.socialV2?.sticker?.send?.maxPerHour) || 0);
+    const times = (Array.isArray(st?.stickerSendTimes) ? st.stickerSendTimes : [])
+      .filter((t) => Number.isFinite(Number(t)) && now - Number(t) < 3600000)
+      .map(Number);
+    const used = times.length;
+    if (cap <= 0) return { ok: true, cap: 0, used, remaining: -1, retryAfterMs: 0, times };
+    if (used >= cap) {
+      const oldest = times.length ? Math.min(...times) : now;
+      return { ok: false, cap, used, remaining: 0, retryAfterMs: Math.max(1000, oldest + 3600000 - now), times };
+    }
+    return { ok: true, cap, used, remaining: cap - used, retryAfterMs: 0, times };
   }
 
   // 收藏聊天里的一张表情（add_custom_face），并按 AI 看到的含义写简短备注（modify_custom_face）。
@@ -8379,6 +8405,14 @@ async function main() {
                 }
               }
             }
+            if (body.sticker.send && typeof body.sticker.send === 'object') {
+              merged.sticker.send = { ...(current.sticker?.send ?? {}), ...body.sticker.send };
+              if (merged.sticker.send.maxPerHour !== undefined) {
+                const n = Number(merged.sticker.send.maxPerHour);
+                // 0 = 不限；上限 500 张/小时足够任何真人节奏。
+                merged.sticker.send.maxPerHour = Number.isFinite(n) ? Math.min(500, Math.max(0, Math.round(n))) : current.sticker?.send?.maxPerHour ?? 30;
+              }
+            }
           }
           // feedback：数值/布尔归一化
           if (body.feedback && typeof body.feedback === 'object') {
@@ -8915,7 +8949,10 @@ async function main() {
               enabled: cfg.socialV2?.sticker?.enabled !== false,
               total: stickerEntries.length,
               context: cfg.socialV2?.sticker?.includeInPrompt !== false ? buildStickerContext(stickerEntries, cfg.socialV2?.sticker?.promptMaxStickers ?? 8) : '',
-              strategy: cfg.socialV2?.sticker?.includeInPrompt !== false ? buildStickerStrategyHint() : ''
+              strategy: cfg.socialV2?.sticker?.includeInPrompt !== false ? buildStickerStrategyHint() : '',
+              // 发表情包的额度（2026-10-23：一小时最多 30 张，0 = 不限）：模型看得到还剩几张，
+              // 别把一小时的额度一口气刷完。
+              send: stickerSendQuotaV2(st)
             },
             // 语音库摘要：让 AI 一开始就知道有哪些语音可发（真发之前用 qq_list_voices 看详情）。
             voices: cfg.socialV2?.voice?.enabled === false ? { enabled: false } : {
@@ -9983,6 +10020,21 @@ async function main() {
             }
             st.sendTimes.push(now);
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
+            // 表情包自己的额度（2026-10-23 用户要求「一小时 30 张」）：按会话滚动 1 小时。
+            const stickerQuota = stickerSendQuotaV2(st, now);
+            if (!stickerQuota.ok) {
+              const minutes = Math.max(1, Math.ceil(stickerQuota.retryAfterMs / 60000));
+              sendJson({
+                ok: false,
+                error: `表情包额度用完了：一小时最多 ${stickerQuota.cap} 张，约 ${minutes} 分钟后能再发`,
+                reason: 'sticker_quota',
+                retryAfterMs: stickerQuota.retryAfterMs,
+                used: stickerQuota.used,
+                cap: stickerQuota.cap
+              }, 429);
+              return;
+            }
+            st.stickerSendTimes = [...stickerQuota.times, now].slice(-500);
             const sent = await sendStickerV2(key, stickerId, {
               replyToMessageId: actualReplyToMessageId,
               atUserId
@@ -10024,6 +10076,9 @@ async function main() {
             const idx = st.sendTimes.indexOf(now);
             if (idx >= 0) st.sendTimes.splice(idx, 1);
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
+            // 发送失败不占表情额度（预占的那一条要退回去，否则一次失败白烧一张）。
+            const sIdx = (st.stickerSendTimes || []).indexOf(now);
+            if (sIdx >= 0) st.stickerSendTimes.splice(sIdx, 1);
             saveSocialV2State();
             log(`[sticker] 工具发送表情失败 ${key}: ${error?.message ?? error}`);
             sendJson({ ok: false, error: `发送表情失败：${error?.message ?? error}` }, 500);
@@ -12635,6 +12690,7 @@ async function main() {
         wakeTimes: [],
         sendTimes: [],
         stickerCollectTimes: [],
+    stickerSendTimes: [],
         pendingWakeTimer: null,
         sleepTimer: null,
         replyCheckTimer: null,
@@ -12709,6 +12765,7 @@ async function main() {
             wakeTimes: Array.isArray(val.wakeTimes) ? val.wakeTimes : [],
             sendTimes: Array.isArray(val.sendTimes) ? val.sendTimes : [],
             stickerCollectTimes: Array.isArray(val.stickerCollectTimes) ? val.stickerCollectTimes : [],
+      stickerSendTimes: Array.isArray(val.stickerSendTimes) ? val.stickerSendTimes : [],
             pendingWakeTimer: null,
             sleepTimer: null,
             replyCheckTimer: null,
@@ -12805,6 +12862,7 @@ async function main() {
           wakeTimes: st.wakeTimes.slice(-200),
           sendTimes: st.sendTimes.slice(-500),
           stickerCollectTimes: Array.isArray(st.stickerCollectTimes) ? st.stickerCollectTimes.slice(-500) : [],
+      stickerSendTimes: Array.isArray(st.stickerSendTimes) ? st.stickerSendTimes.slice(-500) : [],
           lastIncomingAt: st.lastIncomingAt || 0,
           preSleepWaitSatisfiedAt: st.preSleepWaitSatisfiedAt || 0,
           preSleepWaitObservedAt: st.preSleepWaitObservedAt || 0,
@@ -15362,8 +15420,13 @@ async function main() {
       ? '【日记】你的日记按天存在自己的日记本里（只有你看得到）。想写的时候先 qq_diary_list 看一眼今天写过没有，别同一天把同一件事写两遍；有人问起以前的事、或你自己想回忆某段对话，就 qq_diary_list 找到那天、再用 qq_diary_read 读全文，照着记下来的说；确实没有记录就说记不清，不要编。\n\n'
       : '';
     const stickerCfg = cfg.socialV2?.sticker ?? {};
+    // 额度一行：模型每次唤醒都知道「这一小时还能发几张」，不用去翻配置。
+    const stickerQuota = stickerSendQuotaV2(st);
+    const stickerQuotaLine = stickerQuota.cap > 0
+      ? `【表情包额度】这一小时已发 ${stickerQuota.used} 张，还剩 ${stickerQuota.remaining} 张（上限 ${stickerQuota.cap}；用完了等最早那张滑出窗口，别硬发）。\n`
+      : '';
     const stickerLine = stickerCfg.enabled !== false && stickerCfg.includeInPrompt !== false
-      ? `${buildStickerStrategyHint()}\n${buildStickerContext(stickerEntries, stickerCfg.promptMaxStickers ?? 8)}\n\n`
+      ? `${buildStickerStrategyHint()}\n${stickerQuotaLine}${buildStickerContext(stickerEntries, stickerCfg.promptMaxStickers ?? 8)}\n\n`
       : '';
     const preSleepMs = Math.max(0, Number(cfg.socialV2?.wake?.preSleepWaitMs) || 300000);
     const proactiveLine = '【积极性】不要习惯性潜水：群里有你能接的话题就主动参与，偶尔插一句别人的话题也很正常；只有确实没话可说、对方已明确结束、或长时间没人说话时才潜水。\n\n';
@@ -15371,7 +15434,7 @@ async function main() {
     // 快车道：对方在直接找我们，目标是「尽快出声」。这里把「已经够静了就直接发」
     // 说清楚——模型少调一次 wait 就少一整步（实测一步约 2 秒），比把静默调到 0 更有用。
     const replyLine = replyTiming.fastLane
-      ? `【首回复节奏·快车道】对方在直接找你（私聊 / 点名 / 引用），先出声再补充：最后一条消息已经过去 ${Math.ceil((Date.now() - Number(st.lastIncomingAt || 0)) / 1000)} 秒，正常情况下直接 qq_send_message 回复，**不要再调 qq_wait_for_messages**；只有对方明显话没说完（例如刚发来半句）时才用 qq_wait_for_messages(purpose="reply", quietMs=${replyTiming.quietMs})。想分多条说完就直接多发几条，但第一条要快。\n\n`
+      ? `【首回复节奏·快车道】对方在直接找你（私聊 / 点名 / 引用），先出声再补充：${Number(st.lastIncomingAt) > 0 ? `最后一条消息已经过去 ${Math.ceil((Date.now() - Number(st.lastIncomingAt)) / 1000)} 秒，` : ''}正常情况下直接 qq_send_message 回复，**不要再调 qq_wait_for_messages**；只有对方明显话没说完（例如刚发来半句）时才用 qq_wait_for_messages(purpose="reply", quietMs=${replyTiming.quietMs})。想分多条说完就直接多发几条，但第一条要快。\n\n`
       : `【首回复节奏】先处理已有消息，完整的问题及时回答。需要确认对方是否继续补充时，用 qq_wait_for_messages(purpose="reply", quietMs=${replyTiming.quietMs})；从最后来信计时，合批和读提示词的耗时也算，目前还差约 ${Math.ceil(replyTiming.remainingQuietMs / 1000)} 秒静默。已安静够久可直接回，工具也会立即返回并补上思考期间的新消息。只有明确没说完、你确实要等下文时，才用普通 messages 长等待。\n\n`;
     const preSleepLine = `【沉睡前强制等待】这是决定潜水收尾时的步骤，不是首回复的前置条件。除非对方明确说“不聊了/晚安/下了/拜拜”等结束语，否则每次设置潜水/下一次唤醒前，必须先调用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成一次沉睡前观察；回复前 purpose="reply" 的短静默不能代替这次完整观察。若 ${Math.round(preSleepMs / 60000)} 分钟内没人说话，返回 preSleepWaitSatisfied=true，可以设置下一次唤醒并沉睡；若期间有人发新消息，先查看返回的 newMessages——判断不需要你参与就可以直接沉睡，若你选择参与回复，则下次想睡时需要重新等待观察窗口。如果返回里带 preSleepWaitRemainingMs，就按剩余时间继续等待。\n\n`;
     const lastMsg = [...(Array.isArray(st.recentMessages) ? st.recentMessages : [])].reverse().find((m) => m && !m.isSelf);
