@@ -26,9 +26,13 @@ import {
   TtsError,
   __setSpawnForTest,
   resolveTtsSettings,
+  resolveTtsTone,
   resolveTtsVoice,
+  ttsToneLabels,
   ttsVoiceLabels,
+  TTS_TONES,
   TTS_VOICES,
+  TTS_DEFAULT_TONE,
   TTS_DEFAULT_VOICE,
   sanitizeSpeakText,
   splitBySentences,
@@ -86,6 +90,13 @@ function silentWav(seconds = 1, sampleRate = 16000) {
 /** 这次调用走的是哪个引擎：edge 是 `python -c <脚本>`，SAPI 是 `pwsh -EncodedCommand`。 */
 function engineOf(call) {
   return (call?.args ?? []).some((arg) => String(arg).includes('edge_tts')) ? 'edge' : 'sapi';
+}
+
+/** SAPI 的脚本被 base64(UTF-16LE) 包着：解出来才能断言它到底设了什么。 */
+function sapiScript(call) {
+  const at = (call?.args ?? []).indexOf('-EncodedCommand');
+  if (at < 0) return '';
+  return Buffer.from(String(call.args[at + 1] ?? ''), 'base64').toString('utf16le');
 }
 
 /** 边缘合成的参数全在 job JSON 里（环境变量 TTS_JOB 指过去）。 */
@@ -200,6 +211,7 @@ function bridgeGlobals(audioCalls) {
   return {
     TtsError,
     resolveTtsSettings,
+    resolveTtsTone,
     resolveTtsVoice,
     sanitizeSpeakText,
     synthesizeEdge,
@@ -337,6 +349,9 @@ await check('配置：缺省值 / engine 归一 / maxChars、timeoutMs、rate �
   assert.equal(d.voice, 'zh-CN-XiaoyiNeural');
   assert.equal(d.lang, 'mandarin');
   assert.equal(d.rate, 0);
+  assert.equal(d.tone, 'neutral');
+  assert.equal(d.pitch, 0);
+  assert.equal(d.volume, 0);
   assert.equal(d.maxChars, 80);
   assert.equal(d.timeoutMs, 15000);
   assert.equal(d.pythonPath, '');
@@ -349,8 +364,12 @@ await check('配置：缺省值 / engine 归一 / maxChars、timeoutMs、rate �
   assert.equal(resolveTtsSettings({ maxChars: 'abc' }).maxChars, 80);
   assert.equal(resolveTtsSettings({ timeoutMs: 10 }).timeoutMs, 3000);
   assert.equal(resolveTtsSettings({ timeoutMs: 999999 }).timeoutMs, 30000);
-  assert.equal(resolveTtsSettings({ rate: 999 }).rate, 50);
-  assert.equal(resolveTtsSettings({ rate: -999 }).rate, -50);
+  assert.equal(resolveTtsSettings({ rate: 999 }).rate, 30);
+  assert.equal(resolveTtsSettings({ rate: -999 }).rate, -30);
+  assert.equal(resolveTtsSettings({ pitch: 999 }).pitch, 30);
+  assert.equal(resolveTtsSettings({ pitch: -999 }).pitch, -30);
+  assert.equal(resolveTtsSettings({ volume: 999 }).volume, 50);
+  assert.equal(resolveTtsSettings({ volume: -999 }).volume, -50);
   assert.equal(resolveTtsSettings({ voice: '   ' }).voice, 'zh-CN-XiaoyiNeural');
   assert.equal(resolveTtsSettings({ voice: '粤语' }).voice, 'zh-HK-HiuMaanNeural');
   assert.equal(resolveTtsSettings({ voice: 'Cantonese' }).lang, 'cantonese');
@@ -361,6 +380,15 @@ await check('配置：缺省值 / engine 归一 / maxChars、timeoutMs、rate �
   assert.match(male.warnings[0], /不在白名单里/);
   assert.match(male.warnings[0], /普通话·晓依/);
   assert.equal(resolveTtsSettings({ dir: ' audio/tts ' }).dir, 'audio/tts');
+  // 语气（T-034）：认得出的归一成档位 id，认不出的回落默认 + 一条 warn（不静默换成别的语气）。
+  assert.equal(resolveTtsSettings({ tone: ' 高兴 ' }).tone, 'happy');
+  assert.equal(resolveTtsSettings({ tone: '温柔' }).tone, 'gentle');
+  assert.equal(resolveTtsSettings({ tone: '认真' }).tone, 'serious');
+  const badTone = resolveTtsSettings({ tone: '笑嘻嘻' });
+  assert.equal(badTone.tone, 'neutral');
+  assert.equal(badTone.warnings.length, 1);
+  assert.match(badTone.warnings[0], /tone「笑嘻嘻」/);
+  assert.match(badTone.warnings[0], /平淡/);
 });
 
 await check('音色白名单：普通话·晓依（默认）/ 普通话·晓晓（备用）/ 粤语·曉曼，一个男声都没有', async () => {
@@ -409,6 +437,41 @@ await check('音色白名单：普通话·晓依（默认）/ 普通话·晓晓�
   assert.deepEqual(tts.voices.map((voice) => voice.label), ['普通话·晓依', '普通话·晓晓', '粤语·曉曼']);
   assert.equal(tts.voice, TTS_DEFAULT_VOICE, 'config.example.json 的默认音色要与代码一致');
   assert.equal(TTS_VOICES.some((voice) => voice.id === tts.voice), true, 'tts.voice 必须在白名单之内');
+});
+
+await check('语气档位：五档顺序与数值（平淡/高兴/温和/冷淡/认真），缺省平淡', async () => {
+  assert.deepEqual(TTS_TONES.map((tone) => tone.id), ['neutral', 'happy', 'gentle', 'cold', 'serious']);
+  assert.deepEqual(TTS_TONES.map((tone) => tone.label), ['平淡', '高兴', '温和', '冷淡', '认真']);
+  // 每一档的声学参数就是 dev-doc §2 那张表；改数字要先改文档。
+  assert.deepEqual(
+    TTS_TONES.map((tone) => [tone.rate, tone.pitch, tone.volume]),
+    [[0, 0, 0], [8, 6, 3], [-6, -2, 0], [4, -6, -10], [-10, 0, 5]]
+  );
+  assert.equal(TTS_DEFAULT_TONE, 'neutral');
+  assert.equal(TTS_TONES[0].id, TTS_DEFAULT_TONE);
+  assert.equal(ttsToneLabels(), '平淡 / 高兴 / 温和 / 冷淡 / 认真');
+  // 别名（大小写不敏感），中英文都认。
+  const aliases = {
+    neutral: ['neutral', '平淡', '默认', '正常', 'NEUTRAL'],
+    happy: ['happy', '高兴', '开心', '兴奋', '愉快'],
+    gentle: ['gentle', '温和', '温柔', '关心', '耐心'],
+    cold: ['cold', '冷淡', '冷漠', '敷衍', '平静', '不耐烦'],
+    serious: ['serious', '认真', '郑重', '强调', '严肃']
+  };
+  for (const [id, list] of Object.entries(aliases)) {
+    for (const alias of list) assert.equal(resolveTtsTone(alias)?.id, id, `${alias} 应当解析成 ${id}`);
+  }
+  // 认不出来就是 null（→ 桥接抛 bad_tone），绝不悄悄换成平淡。
+  for (const bad of ['笑嘻嘻', 'angry', '凶', '']) {
+    assert.equal(resolveTtsTone(bad), null, `${bad} 不该被解析成任何语气`);
+  }
+  // config.example.json 的镜像与默认值。
+  const example = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.example.json'), 'utf8'));
+  const tts = example.socialV2.tts;
+  assert.deepEqual(tts.tones.map((tone) => tone.id), ['neutral', 'happy', 'gentle', 'cold', 'serious']);
+  assert.equal(tts.tone, TTS_DEFAULT_TONE);
+  assert.equal(tts.pitch, 0);
+  assert.equal(tts.volume, 0);
 });
 
 // ── 4. 路由闸门 ─────────────────────────────────────────────────────────────
@@ -631,14 +694,128 @@ await check('集成：edge 传 -c 脚本 + TTS_JOB，job 参数齐全，用完�
     assert.equal(call.args.join(' ').includes('这句话要走库 API'), false, '正文不许出现在 argv 里');
     assert.ok(call.env.TTS_JOB, '必须用 TTS_JOB 把 job 路径传进去');
     assert.deepEqual(
-      { text: call.job?.text, voice: call.job?.voice, rate: call.job?.rate, out: call.job?.out },
-      { text: '这句话要走库 API', voice: 'zh-CN-XiaoxiaoNeural', rate: 25, out: outFile }
+      { text: call.job?.text, voice: call.job?.voice, rate: call.job?.rate, pitch: call.job?.pitch, volume: call.job?.volume, out: call.job?.out },
+      { text: '这句话要走库 API', voice: 'zh-CN-XiaoxiaoNeural', rate: 25, pitch: 0, volume: 0, out: outFile }
     );
     assert.equal(fs.existsSync(call.env.TTS_JOB), false, 'job JSON 用完必须删掉');
     assert.equal(fs.existsSync(outFile), true);
   } finally {
     fake.restore();
     fs.rmSync(outFile, { force: true });
+  }
+});
+
+// ── 5.2 语气档位（T-034）：tone 落成 rate/pitch/volume ──────────────────────
+await check('静态：edge job 带 pitch/volume，0 时不传给引擎（"%+dHz" / "%+d%%"）', async () => {
+  const src = fs.readFileSync(path.join(ROOT, 'src', 'tts-core.js'), 'utf8');
+  assert.match(src, /if pitch:/);
+  assert.match(src, /kwargs\["pitch"\] = "%\+dHz" % pitch/);
+  assert.match(src, /if volume:/);
+  assert.match(src, /kwargs\["volume"\] = "%\+d%%" % volume/);
+});
+
+await check('闸门：认不出的语气 → 400 bad_tone，并列出五档（不静默换成平淡）', async () => {
+  const fake = installFakeSpawn();
+  const s = await startHarness(baseConfig(), []);
+  try {
+    const res = await s.speak({ key: KEY, text: '你好', tone: '笑嘻嘻' }, s.token(KEY));
+    assert.equal(res.status, 400, res.raw);
+    assert.equal(res.json.ok, false);
+    assert.equal(res.json.reason, 'bad_tone');
+    for (const label of ['平淡', '高兴', '温和', '冷淡', '认真']) {
+      assert.match(res.json.error, new RegExp(label), res.json.error);
+    }
+    assert.equal(fake.calls.length, 0, '语气不对时不应该合成（更不许悄悄换成平淡）');
+  } finally {
+    fake.restore();
+    await s.stop();
+  }
+});
+
+await check('成功：tone=高兴 → 语速 +8% / 音高 +6Hz / 音量 +3%，响应回报实际生效值', async () => {
+  const fake = installFakeSpawn();
+  const s = await startHarness(baseConfig({ tts: { engine: 'edge' } }), []);
+  try {
+    const res = await s.speak({ key: KEY, text: '今天真开心！', tone: '高兴' }, s.token(KEY));
+    assert.equal(res.status, 200, res.raw);
+    assert.equal(res.json.tone, 'happy');
+    assert.equal(res.json.toneApplied, true);
+    assert.equal(res.json.rate, 8);
+    assert.equal(res.json.pitch, 6);
+    assert.equal(res.json.volume, 3);
+    const edgeCall = fake.calls.find((call) => engineOf(call) === 'edge');
+    assert.deepEqual(
+      { rate: edgeCall.job?.rate, pitch: edgeCall.job?.pitch, volume: edgeCall.job?.volume },
+      { rate: 8, pitch: 6, volume: 3 }
+    );
+  } finally {
+    fake.restore();
+    await s.stop();
+  }
+});
+
+await check('成功：显式 pitch 压过 tone（优先级 显式参数 > tone > 配置）', async () => {
+  const fake = installFakeSpawn();
+  const s = await startHarness(baseConfig({ tts: { engine: 'edge' } }), []);
+  try {
+    const res = await s.speak({ key: KEY, text: '今天真开心！', tone: 'happy', pitch: -10 }, s.token(KEY));
+    assert.equal(res.status, 200, res.raw);
+    assert.equal(res.json.tone, 'happy');
+    assert.equal(res.json.pitch, -10, '显式参数应当压过 tone 的 +6Hz');
+    assert.equal(res.json.rate, 8, '没显式给的 rate 仍然吃 tone 的值');
+    assert.equal(res.json.volume, 3);
+    const edgeCall = fake.calls.find((call) => engineOf(call) === 'edge');
+    assert.equal(edgeCall.job?.pitch, -10);
+  } finally {
+    fake.restore();
+    await s.stop();
+  }
+});
+
+await check('成功：tone 优先级——配置 tone=neutral 时基础值生效，显式「平淡」压过基础值', async () => {
+  const fake = installFakeSpawn();
+  const s = await startHarness(baseConfig({ tts: { engine: 'edge', rate: 5, pitch: 2 } }), []);
+  try {
+    // 没传 tone：用配置里的 neutral 当「没有语气」，配置的基础语速/音高照常生效。
+    const plain = await s.speak({ key: KEY, text: '就这样吧' }, s.token(KEY));
+    assert.equal(plain.status, 200, plain.raw);
+    assert.equal(plain.json.tone, 'neutral');
+    assert.equal(plain.json.rate, 5);
+    assert.equal(plain.json.pitch, 2);
+    assert.equal(plain.json.volume, 0);
+    // 显式要「平淡」= 明确要求不调整，tone 值（0）优先于配置的基础值。
+    const flat = await s.speak({ key: KEY, text: '就这样吧', tone: '平淡' }, s.token(KEY));
+    assert.equal(flat.status, 200, flat.raw);
+    assert.equal(flat.json.tone, 'neutral');
+    assert.equal(flat.json.toneApplied, true);
+    assert.equal(flat.json.rate, 0);
+    assert.equal(flat.json.pitch, 0);
+    assert.equal(flat.json.volume, 0);
+  } finally {
+    fake.restore();
+    await s.stop();
+  }
+});
+
+await check('兜底 SAPI：tone 只能落成语速，toneApplied=false（不假装语气生效）', async () => {
+  const fake = installFakeSpawn();
+  const s = await startHarness(baseConfig({ tts: { engine: 'sapi' } }), []);
+  try {
+    const res = await s.speak({ key: KEY, text: '今天真开心！', tone: '高兴', pitch: 20 }, s.token(KEY));
+    assert.equal(res.status, 200, res.raw);
+    assert.equal(res.json.engine, 'sapi');
+    assert.equal(res.json.tone, 'happy');
+    assert.equal(res.json.toneApplied, false, 'SAPI 做不出音高/音量，必须如实回报');
+    assert.equal(res.json.pitch, 0);
+    assert.equal(res.json.volume, 0);
+    assert.equal(res.json.rate, 10, '+8% 落到 SAPI 的 1 档（10%）');
+    const sapiCall = fake.calls.find((call) => engineOf(call) === 'sapi');
+    const script = sapiScript(sapiCall);
+    assert.match(script, /\$synth\.Rate = 1/);
+    assert.equal(/Pitch|Volume/.test(script), false, 'SAPI 脚本里不该出现音高/音量控制');
+  } finally {
+    fake.restore();
+    await s.stop();
   }
 });
 

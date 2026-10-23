@@ -332,6 +332,16 @@
         { "id": "zh-HK-HiuMaanNeural", "label": "粤语·曉曼" }
       ],
       "rate": 0,
+      "tone": "neutral",
+      "tones": [
+        { "id": "neutral", "label": "平淡" },
+        { "id": "happy", "label": "高兴" },
+        { "id": "gentle", "label": "温和" },
+        { "id": "cold", "label": "冷淡" },
+        { "id": "serious", "label": "认真" }
+      ],
+      "pitch": 0,
+      "volume": 0,
       "maxChars": 80,
       "timeoutMs": 15000,
       "pythonPath": "",

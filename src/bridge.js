@@ -68,7 +68,7 @@ import { compactModelMessage } from './qq-model-view.js';
 import { safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
 import { AUDIO_EXTS, cleanupTemp, describeAudio, formatBytes, formatDuration, inspectAudio, listAudioFiles, parseTargetKey, processAudioVolume, resolveAudioProcessing, resolveAudioSource, safeJoinLibrary } from './send-voice-lib.js';
 import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken } from './snowluma-conn.js';
-import { TtsError, resolveTtsSettings, resolveTtsVoice, sanitizeSpeakText, synthesizeEdge, synthesizeSapi } from './tts-core.js';
+import { TtsError, resolveTtsSettings, resolveTtsTone, resolveTtsVoice, sanitizeSpeakText, synthesizeEdge, synthesizeSapi } from './tts-core.js';
 import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
@@ -1290,7 +1290,10 @@ function loadConfig() {
   cfg.socialV2.tts = {
     engine: 'auto',
     voice: 'zh-CN-XiaoyiNeural',
+    tone: 'neutral',
     rate: 0,
+    pitch: 0,
+    volume: 0,
     maxChars: 80,
     timeoutMs: 15000,
     pythonPath: '',
@@ -3163,9 +3166,11 @@ async function main() {
         maxChars: tts.maxChars,
         engine: tts.engine,
         voices: (tts.voices ?? []).map((item) => ({ id: item.id, label: item.label })),
+        tones: (tts.tones ?? []).map((item) => ({ id: item.id, label: item.label })),
+        toneText: tts.tonesText,
         tools: ok ? ['qq_speak'] : [],
         hint: ok
-          ? `想说话的时候用 qq_speak 把一句（≤${tts.maxChars} 字）说成语音条：音色只有 ${tts.voicesText}，voice 传 mandarin（默认·晓依）/ xiaoxiao（晓晓）/ cantonese（曉曼）即可（粤语没有离线兜底）；一次一句、别连着发；它失败了就改发文字，别重试第二次`
+          ? `想说话的时候用 qq_speak 把一句（≤${tts.maxChars} 字）说成语音条：音色只有 ${tts.voicesText}，voice 传 mandarin（默认·晓依）/ xiaoxiao（晓晓）/ cantonese（曉曼）即可（粤语没有离线兜底）；一次一句、别连着发；它失败了就改发文字，别重试第二次；语气想表达情绪就用 tone：平淡/高兴/温和/冷淡/认真；语音文本把标点写足（问句带问号、拖长用省略号、感叹别省），TTS 全靠标点断句和停顿`
           : '这台机器现在合成不了语音（没有可用的 TTS 引擎），改发文字'
       };
     } catch {
@@ -3177,7 +3182,7 @@ async function main() {
    * 合成 + 发送。返回 { engine, seconds, voice, messageId, verified }。
    * 失败一律抛（路由按 error.code 挑状态码）；无论成败，临时音频都在 finally 里删掉。
    */
-  async function speakV2(key, text, { voice = '', rate = null } = {}) {
+  async function speakV2(key, text, { voice = '', rate = null, tone = '', pitch = null, volume = null } = {}) {
     const vc = voiceCfg();
     if (!vc.enabled) throw new Error('语音功能已关闭（socialV2.voice.enabled=false）');
     const scopeKey = String(key ?? '').trim();
@@ -3202,8 +3207,30 @@ async function main() {
     fs.mkdirSync(dir, { recursive: true });
     const synthVoice = pickedVoice ? pickedVoice.id : tts.voice;
     const voiceLang = pickedVoice ? pickedVoice.lang : tts.lang;
-    const rateInput = rate === null || rate === undefined || rate === '' ? tts.rate : Number(rate);
-    const synthRate = Number.isFinite(rateInput) ? Math.max(-50, Math.min(50, Math.round(rateInput))) : tts.rate;
+    // 语气档位（T-034）：显式 tone > 配置默认 tone；认不出的 tone 直接拒绝（与 bad_voice 同口径）。
+    const wantedTone = String(tone ?? '').trim();
+    const pickedTone = wantedTone ? resolveTtsTone(wantedTone) : null;
+    if (wantedTone && !pickedTone) {
+      throw new TtsError(
+        'bad_tone',
+        `语气只支持 ${tts.tonesText}（也可以说 neutral / happy / gentle / cold / serious 这类英文别名）；「${wantedTone}」认不出来`,
+        { allowed: (tts.tones ?? []).map((item) => item.id) }
+      );
+    }
+    const cfgTone = resolveTtsTone(tts.tone) ?? resolveTtsTone('neutral');
+    const toneInfo = pickedTone ?? cfgTone;
+    // 配置里的 tone 是「这台机器的默认语气」：neutral 表示不额外改声学参数，
+    // 这样 socialV2.tts.rate / pitch / volume 这些基础值仍然生效。
+    const toneApplies = Boolean(pickedTone) || (toneInfo != null && toneInfo.id !== 'neutral');
+    const asNum = (value) => (value === null || value === undefined || value === '' ? null : Number(value));
+    const clampNum = (value, min, max, fallback) => {
+      const n = Math.round(Number(value));
+      return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+    };
+    // 优先级（dev-doc §4）：显式参数 > tone 值 > 配置值。
+    const synthRate = clampNum(asNum(rate) ?? (toneApplies ? toneInfo.rate : null) ?? tts.rate, -50, 50, tts.rate);
+    const synthPitch = clampNum(asNum(pitch) ?? (toneApplies ? toneInfo.pitch : null) ?? tts.pitch, -30, 30, tts.pitch);
+    const synthVolume = clampNum(asNum(volume) ?? (toneApplies ? toneInfo.volume : null) ?? tts.volume, -50, 50, tts.volume);
     speakInFlight.set(scopeKey, Date.now());
     let made = null;
     try {
@@ -3211,18 +3238,19 @@ async function main() {
         const stamp = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         const file = path.join(dir, `tts-${stamp}.${engine === 'sapi' ? 'wav' : 'mp3'}`);
         try {
-          if (engine === 'edge') {
-            await synthesizeEdge(clean, {
+          const made = engine === 'edge'
+            ? await synthesizeEdge(clean, {
               voice: synthVoice,
               rate: synthRate,
+              pitch: synthPitch,
+              volume: synthVolume,
               outFile: file,
               pythonPath: resolveTtsPython(),
               timeoutMs: tts.timeoutMs
-            });
-          } else {
-            await synthesizeSapi(clean, { outFile: file, timeoutMs: tts.timeoutMs });
-          }
-          return { engine, file };
+            })
+            // SAPI 只有语速：音高/音量它做不到，如实返回 toneApplied:false（不假装生效）。
+            : await synthesizeSapi(clean, { outFile: file, rate: synthRate, timeoutMs: tts.timeoutMs });
+          return { ...made, engine, file };
         } catch (error) {
           try { fs.rmSync(file, { force: true }); } catch {}
           throw error;
@@ -3278,12 +3306,22 @@ async function main() {
       const rel = path.relative(vc.dir, made.file).split(path.sep).join('/');
       // audio: null —— 原样发送，不经过 ffmpeg（本机没有）。
       const sent = await sendVoiceForV2(scopeKey, rel, { label: 'tts', audio: null });
-      log(`[tts] 合成成功 engine=${made.engine} 时长 ${seconds != null ? seconds.toFixed(1) : '?'}s → ${scopeKey}`);
-      appendActivity(`${scopeKey} [tts] 合成语音条（${made.engine}，${seconds != null ? seconds.toFixed(1) : '?'}s）`);
+      // 实际生效的声学参数：SAPI 只会用上语速，音高/音量按 0 回报（不假装 tone 生效）。
+      const appliedRate = Number.isFinite(Number(made.rate)) ? Number(made.rate) : synthRate;
+      const appliedPitch = Number.isFinite(Number(made.pitch)) ? Number(made.pitch) : 0;
+      const appliedVolume = Number.isFinite(Number(made.volume)) ? Number(made.volume) : 0;
+      const toneApplied = made.toneApplied === true;
+      log(`[tts] 合成成功 engine=${made.engine} 时长 ${seconds != null ? seconds.toFixed(1) : '?'}s tone=${toneInfo.id}${toneApplied ? ` rate=${appliedRate} pitch=${appliedPitch} volume=${appliedVolume}` : '（SAPI 只有语速，音高/音量未生效）'} → ${scopeKey}`);
+      appendActivity(`${scopeKey} [tts] 合成语音条（${made.engine}，${seconds != null ? seconds.toFixed(1) : '?'}s，tone=${toneInfo.id}）`);
       return {
         engine: made.engine,
         seconds,
         voice: synthVoice,
+        tone: toneInfo.id,
+        toneApplied,
+        rate: appliedRate,
+        pitch: appliedPitch,
+        volume: appliedVolume,
         messageId: sent.messageId ?? null,
         verified: sent.verification?.confirmed === true
       };
@@ -10370,13 +10408,25 @@ async function main() {
             return;
           }
           try {
-            const spoken = await speakV2(key, body.text ?? body.message ?? '', { voice: body.voice, rate: body.rate });
+            const spoken = await speakV2(key, body.text ?? body.message ?? '', {
+              voice: body.voice,
+              rate: body.rate,
+              tone: body.tone,
+              pitch: body.pitch,
+              volume: body.volume
+            });
             sendJson({
               ok: true,
               key,
               engine: spoken.engine,
               seconds: spoken.seconds,
               voice: spoken.voice,
+              // tone=生效档位；toneApplied=false 表示走了 SAPI（只有语速，音高/音量没生效）
+              tone: spoken.tone,
+              toneApplied: spoken.toneApplied,
+              rate: spoken.rate,
+              pitch: spoken.pitch,
+              volume: spoken.volume,
               messageId: spoken.messageId,
               // verified=true 表示已用 get_msg 回读到这条消息的 record 段
               verified: spoken.verified
@@ -10386,7 +10436,7 @@ async function main() {
             // 调用方写错了参数，回 400 会让模型以为改参数就能好）。
             const code = error?.code;
             const message = error?.message ?? String(error);
-            if (code === 'empty' || code === 'too_long' || code === 'bad_args' || code === 'busy' || code === 'bad_voice') {
+            if (code === 'empty' || code === 'too_long' || code === 'bad_args' || code === 'busy' || code === 'bad_voice' || code === 'bad_tone') {
               sendJson({ ok: false, error: message, reason: code }, 400);
               return;
             }

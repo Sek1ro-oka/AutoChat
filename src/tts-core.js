@@ -28,7 +28,10 @@ export class TtsError extends Error {
 export const TTS_DEFAULTS = Object.freeze({
   engine: 'auto',
   voice: 'zh-CN-XiaoyiNeural',
+  tone: 'neutral',
   rate: 0,
+  pitch: 0,
+  volume: 0,
   maxChars: 80,
   timeoutMs: 15000,
   pythonPath: '',
@@ -37,10 +40,13 @@ export const TTS_DEFAULTS = Object.freeze({
 
 // 夹取区间：字数上限 10–120（低于 10 没法说一句话，高于 120 一条语音会变成长语音）；
 // 超时 3–30 秒（edge-tts 冷启动实测 2.8 秒，超过 30 秒说明链路已经坏了，再等没意义）。
+// 语气参数（T-034）：rate/pitch/volume 都是「相对默认的偏移量」，不是绝对值。
 export const TTS_LIMITS = Object.freeze({
   maxChars: Object.freeze({ min: 10, max: 120 }),
   timeoutMs: Object.freeze({ min: 3000, max: 30000 }),
-  rate: Object.freeze({ min: -50, max: 50 })
+  rate: Object.freeze({ min: -30, max: 30 }),
+  pitch: Object.freeze({ min: -30, max: 30 }),
+  volume: Object.freeze({ min: -50, max: 50 })
 });
 
 const ENGINES = Object.freeze(['edge', 'sapi', 'auto']);
@@ -97,6 +103,66 @@ export function resolveTtsVoice(input) {
   return TTS_VOICES.find((voice) => voice.id === id) ?? null;
 }
 
+// 语气档位（T-034）：免费 edge 接口不处理 mstts:express-as 风格，所以「语气」只能落成
+// 声学参数（语速 / 音高 / 音量）的组合。顺序即展示顺序，第一条是缺省。
+// 数值都是相对默认的偏移：rate/volume 是百分比，pitch 是 Hz。
+export const TTS_TONES = Object.freeze([
+  Object.freeze({ id: 'neutral', label: '平淡', rate: 0, pitch: 0, volume: 0 }),
+  Object.freeze({ id: 'happy', label: '高兴', rate: 8, pitch: 6, volume: 3 }),
+  Object.freeze({ id: 'gentle', label: '温和', rate: -6, pitch: -2, volume: 0 }),
+  Object.freeze({ id: 'cold', label: '冷淡', rate: 4, pitch: -6, volume: -10 }),
+  Object.freeze({ id: 'serious', label: '认真', rate: -10, pitch: 0, volume: 5 })
+]);
+
+export const TTS_DEFAULT_TONE = 'neutral';
+
+// 模型嘴上说的「高兴 / 温柔 / 认真」映射到档位；不在这里的一律算 bad_tone。
+const TONE_ALIASES = new Map([
+  ['neutral', 'neutral'],
+  ['平淡', 'neutral'],
+  ['默认', 'neutral'],
+  ['正常', 'neutral'],
+  ['happy', 'happy'],
+  ['高兴', 'happy'],
+  ['开心', 'happy'],
+  ['兴奋', 'happy'],
+  ['愉快', 'happy'],
+  ['gentle', 'gentle'],
+  ['温和', 'gentle'],
+  ['温柔', 'gentle'],
+  ['关心', 'gentle'],
+  ['耐心', 'gentle'],
+  ['cold', 'cold'],
+  ['冷淡', 'cold'],
+  ['冷漠', 'cold'],
+  ['敷衍', 'cold'],
+  ['平静', 'cold'],
+  ['不耐烦', 'cold'],
+  ['serious', 'serious'],
+  ['认真', 'serious'],
+  ['郑重', 'serious'],
+  ['强调', 'serious'],
+  ['严肃', 'serious']
+]);
+
+/** 「平淡 / 高兴 / 温和 / 冷淡 / 认真」——错误文案与 prompt 共用同一句人话。 */
+export function ttsToneLabels() {
+  return TTS_TONES.map((tone) => tone.label).join(' / ');
+}
+
+/**
+ * 把模型/配置给的 tone 解析成档位。
+ * 认不出来返回 null（由调用方决定是回落配置还是报 bad_tone）——
+ * 与音色同口径：**绝不**悄悄换成平淡，那会让「冷淡」变成「平淡」还以为是模型不会演。
+ */
+export function resolveTtsTone(input) {
+  const raw = String(input ?? '').trim();
+  if (!raw) return null;
+  const id = TONE_ALIASES.get(raw.toLowerCase());
+  if (!id) return null;
+  return TTS_TONES.find((tone) => tone.id === id) ?? null;
+}
+
 // 允许测试替换子进程实现（§4.5 要求「注入假 spawn」）：默认就是 node 的 spawn，
 // 只有测试会调用 __setSpawnForTest，生产路径永远拿默认值。
 let spawnImpl = nodeSpawn;
@@ -126,20 +192,30 @@ export function resolveTtsSettings(source) {
   const engineRaw = String(src.engine ?? '').trim().toLowerCase();
   const wantedVoice = String(src.voice ?? '').trim();
   const picked = resolveTtsVoice(wantedVoice);
+  const wantedTone = String(src.tone ?? '').trim();
+  const pickedTone = resolveTtsTone(wantedTone);
   const warnings = [];
   if (wantedVoice && !picked) {
     // 坏的音色**不静默接受**：回落默认，但把这件事说出来（bridge 会记一条 warn 日志）。
     warnings.push(`socialV2.tts.voice「${wantedVoice}」不在白名单里（只支持 ${ttsVoiceLabels()}），已回落 ${TTS_DEFAULT_VOICE}`);
   }
+  if (wantedTone && !pickedTone) {
+    warnings.push(`socialV2.tts.tone「${wantedTone}」认不出来（只支持 ${ttsToneLabels()}），已回落 ${TTS_DEFAULT_TONE}`);
+  }
   return {
     engine: ENGINES.includes(engineRaw) ? engineRaw : TTS_DEFAULTS.engine,
     voice: picked ? picked.id : TTS_DEFAULT_VOICE,
     lang: picked ? picked.lang : 'mandarin',
-    // 白名单是代码里的常量（TTS_VOICES）；config 里那份只是给人看的镜像，不参与判定。
+    // 白名单是代码里的常量（TTS_VOICES / TTS_TONES）；config 里那份只是给人看的镜像，不参与判定。
     voices: TTS_VOICES,
     voicesText: ttsVoiceLabels(),
+    tone: pickedTone ? pickedTone.id : TTS_DEFAULT_TONE,
+    tones: TTS_TONES,
+    tonesText: ttsToneLabels(),
     warnings,
     rate: clampInt(src.rate, TTS_LIMITS.rate.min, TTS_LIMITS.rate.max, TTS_DEFAULTS.rate),
+    pitch: clampInt(src.pitch, TTS_LIMITS.pitch.min, TTS_LIMITS.pitch.max, TTS_DEFAULTS.pitch),
+    volume: clampInt(src.volume, TTS_LIMITS.volume.min, TTS_LIMITS.volume.max, TTS_DEFAULTS.volume),
     maxChars: clampInt(src.maxChars, TTS_LIMITS.maxChars.min, TTS_LIMITS.maxChars.max, TTS_DEFAULTS.maxChars),
     timeoutMs: clampInt(src.timeoutMs, TTS_LIMITS.timeoutMs.min, TTS_LIMITS.timeoutMs.max, TTS_DEFAULTS.timeoutMs),
     pythonPath: String(src.pythonPath ?? '').trim(),
@@ -317,17 +393,26 @@ const EDGE_TTS_SCRIPT = [
   'rate = int(job.get("rate") or 0)',
   'if rate:',
   '    kwargs["rate"] = "%+d%%" % rate',
+  'pitch = int(job.get("pitch") or 0)',
+  'if pitch:',
+  '    kwargs["pitch"] = "%+dHz" % pitch',
+  'volume = int(job.get("volume") or 0)',
+  'if volume:',
+  '    kwargs["volume"] = "%+d%%" % volume',
   'comm = edge_tts.Communicate(job["text"], job["voice"], **kwargs)',
   'asyncio.run(comm.save(job["out"]))'
 ].join('\n');
 
 /**
  * edge-tts 合成（主路）。
- * `rate` 是相对百分比（0 = 原速），只在非 0 时写进 job，避免传 `+0%`。
+ * `rate` / `pitch` / `volume` 都是相对偏移（0 = 不动），只在非 0 时写进 job，
+ * 避免给引擎传 `+0%` / `+0Hz`（那会让 SSML 里多一条无意义的调节）。
  */
 export async function synthesizeEdge(text, {
   voice = TTS_DEFAULTS.voice,
   rate = 0,
+  pitch = 0,
+  volume = 0,
   outFile,
   pythonPath,
   timeoutMs = TTS_DEFAULTS.timeoutMs
@@ -338,7 +423,9 @@ export async function synthesizeEdge(text, {
   if (!pythonPath) throw new TtsError('tts_unavailable', '没有可用的 Python（edge-tts）');
   const outDir = path.dirname(outFile);
   fs.mkdirSync(outDir, { recursive: true });
-  const rateNum = Math.round(Number(rate) || 0);
+  const rateNum = clampInt(rate, TTS_LIMITS.rate.min, TTS_LIMITS.rate.max, TTS_DEFAULTS.rate);
+  const pitchNum = clampInt(pitch, TTS_LIMITS.pitch.min, TTS_LIMITS.pitch.max, TTS_DEFAULTS.pitch);
+  const volumeNum = clampInt(volume, TTS_LIMITS.volume.min, TTS_LIMITS.volume.max, TTS_DEFAULTS.volume);
   const jobFile = path.join(
     outDir,
     `tts-job-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`
@@ -347,6 +434,8 @@ export async function synthesizeEdge(text, {
     text: say,
     voice: String(voice || TTS_DEFAULTS.voice),
     rate: rateNum,
+    pitch: pitchNum,
+    volume: volumeNum,
     out: outFile
   }), 'utf8');
   try {
@@ -366,7 +455,7 @@ export async function synthesizeEdge(text, {
     try { fs.rmSync(jobFile, { force: true }); } catch {}
   }
   const bytes = requireOutput(outFile, 'edge-tts');
-  return { engine: 'edge', file: outFile, bytes };
+  return { engine: 'edge', file: outFile, bytes, rate: rateNum, pitch: pitchNum, volume: volumeNum, toneApplied: true };
 }
 
 function psQuote(value) {
@@ -383,16 +472,23 @@ function encodeCommand(script) {
  *
  * 文本**不进命令行**：先写一个 UTF-8 的 .txt，脚本里用 [IO.File]::ReadAllText 读，
  * 这样引号、`$`、`;`、换行都不可能变成注入点。
+ *
+ * 语气只能落成语速：SAPI 没有音高/音量控制，`toneApplied` 一律 false，
+ * 调用方要如实告诉模型「兜底时语气退回平淡」，不能假装 tone 生效。
  */
 export async function synthesizeSapi(text, {
   outFile,
   voice = 'Microsoft Huihui Desktop',
+  rate = 0,
   timeoutMs = TTS_DEFAULTS.timeoutMs
 } = {}) {
   const say = String(text ?? '').trim();
   if (!say) throw new TtsError('empty', '没有内容可合成');
   if (!outFile) throw new TtsError('bad_args', 'synthesizeSapi 需要 outFile');
   fs.mkdirSync(path.dirname(outFile), { recursive: true });
+  // SAPI 的 Rate 是 -10…10 的整数档：10% ≈ 1 档（本机实测 22050Hz/16bit/单声道 WAV）。
+  const ratePct = clampInt(rate, TTS_LIMITS.rate.min, TTS_LIMITS.rate.max, TTS_DEFAULTS.rate);
+  const sapiRate = Math.max(-10, Math.min(10, Math.round(ratePct / 10)));
   const textFile = `${outFile}.txt`;
   fs.writeFileSync(textFile, say, 'utf8');
   const script = [
@@ -401,6 +497,7 @@ export async function synthesizeSapi(text, {
     `$text = [System.IO.File]::ReadAllText(${psQuote(textFile)}, [System.Text.Encoding]::UTF8)`,
     '$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer',
     `try { $synth.SelectVoice(${psQuote(voice)}) } catch { }`,
+    `$synth.Rate = ${sapiRate}`,
     `$synth.SetOutputToWaveFile(${psQuote(outFile)})`,
     '$synth.Speak($text)',
     '$synth.Dispose()'
@@ -411,7 +508,7 @@ export async function synthesizeSapi(text, {
       what: 'SAPI'
     });
     const bytes = requireOutput(outFile, 'SAPI');
-    return { engine: 'sapi', file: outFile, bytes };
+    return { engine: 'sapi', file: outFile, bytes, rate: sapiRate * 10, pitch: 0, volume: 0, toneApplied: false };
   } finally {
     try { fs.rmSync(textFile, { force: true }); } catch {}
   }

@@ -43,7 +43,11 @@
 | `socialV2.tts.engine` | `auto` | 合成引擎：`auto`（先 edge-tts，失败回落 SAPI）/ `edge` / `sapi` |
 | `socialV2.tts.voice` | `zh-CN-XiaoyiNeural` | 默认音色（普通话·晓依），**只能是下面 `voices` 里的三项之一**（也可以写 `mandarin` / `普通话` / `晓依` / `xiaoxiao` / `晓晓` / `cantonese` / `粤语` / `曉曼` 这类别名）；配了别的值会在归一化时回落默认并记一条 warn 日志 |
 | `socialV2.tts.voices` | 见下 | 固定三支女声：`{id:'zh-CN-XiaoyiNeural', label:'普通话·晓依'}`、`{id:'zh-CN-XiaoxiaoNeural', label:'普通话·晓晓'}`、`{id:'zh-HK-HiuMaanNeural', label:'粤语·曉曼'}`；这是给人看的镜像，真正的白名单在 `src/tts-core.js` 的 `TTS_VOICES`（**不许加男声**） |
-| `socialV2.tts.rate` | `0` | 语速百分比，夹取 -50 ~ +50 |
+| `socialV2.tts.rate` | `0` | 语速百分比，夹取 -30 ~ +30（0 = 原速） |
+| `socialV2.tts.tone` | `neutral` | 默认语气档位；五档见「七、语气档位」。认不出的值回落 `neutral` 并记一条 warn |
+| `socialV2.tts.tones` | 见下 | 五档镜像：`平淡 / 高兴 / 温和 / 冷淡 / 认真`；真正的事实表在 `src/tts-core.js` 的 `TTS_TONES` |
+| `socialV2.tts.pitch` | `0` | 音高偏移 Hz，夹取 -30 ~ +30；显式 `tone` 会压过这个基础值 |
+| `socialV2.tts.volume` | `0` | 音量百分比，夹取 -50 ~ +50；显式 `tone` 会压过这个基础值 |
 | `socialV2.tts.maxChars` | `80` | 一次最多合成多少字，夹取 10 ~ 120；超了**直接拒绝**，不悄悄截断 |
 | `socialV2.tts.timeoutMs` | `15000` | 单次合成超时，夹取 3000 ~ 30000 |
 | `socialV2.tts.pythonPath` | `''` | 装 edge-tts 的 Python；空 = 读环境变量 `EDGE_TTS_PYTHON`，再空 = 本机已知的 venv |
@@ -82,14 +86,32 @@
 - **失败语义**：`tts_unavailable` / `tts_timeout`（503）说明这台机器现在说不了话，**改发文字、不要重试第二次**；`verified=true` 才代表真发出去了。
 - **实现细节**：音频以 `audio: null` 交给发送层，即**原样发送、不做音量处理** —— 本机没装 ffmpeg 时这点很关键，否则会在发送前失败。
 
-## 七、安全边界：AI 只能取语音库里的文件
+## 七、语气档位（T-034，`tone`）
+
+免费 edge 接口不处理 `mstts:express-as` 的「风格」，所以「语气」只能落成声学参数：语速 `rate` / 音高 `pitch` / 音量 `volume` 三个偏移量的组合。五档固定，`qq_speak` 的 `tone` 缺省是「平淡」：
+
+| 档位 id | 中文 | `rate` | `pitch` | `volume` | 什么时候用 |
+| --- | --- | --- | --- | --- | --- |
+| `neutral` | 平淡 | 0 | 0 | 0 | 陈述、念信息，默认 |
+| `happy` | 高兴 | +8% | +6Hz | +3% | 开心、好消息、打趣 |
+| `gentle` | 温和 | −6% | −2Hz | 0 | 安慰、关心、哄人 |
+| `cold` | 冷淡 | +4% | −6Hz | −10% | 敷衍、不耐烦、被惹到 |
+| `serious` | 认真 | −10% | 0 | +5% | 郑重、强调、说明白 |
+
+- **别名**：英文 id 与中文都认（`高兴/开心/兴奋/愉快`、`温和/温柔/关心/耐心`、`冷淡/冷漠/敷衍/平静/不耐烦`、`认真/郑重/强调/严肃`）。认不出的语气一律 400 `bad_tone` 并列出五档 —— 与 `bad_voice` 同口径，**绝不静默回落成平淡**（否则你以为它在演冷淡，其实只是没认出来）。
+- **优先级**：显式 `rate` / `pitch` / `volume` 参数 > `tone` 给的值 > `socialV2.tts` 里的配置值。所以想微调某一档就只传那一个参数。
+- **夹取**：`rate` ±30、`pitch` ±30 Hz、`volume` ±50；档位本身的值都在范围内，超范围的手动值会被夹住而不是报错。
+- **兜底时语气会退回平淡**：SAPI 只有语速，没有音高/音量控制。走 SAPI 时 `tone` 只能改语速（+8% ≈ 1 档 = 10%），响应里 `toneApplied: false`、`pitch/volume` 回 0 —— 桥接**不假装**语气生效，文档也不假装。
+- **标点比参数重要**：TTS 全靠标点断句和停顿。问句带问号、拖长用省略号、感叹别省，比把 `pitch` 调到 +20 有用得多（免费接口的音高是整体移调，调过头会尖）。
+
+## 八、安全边界：AI 只能取语音库里的文件
 
 - AI 通道只接受**语音库内的相对路径**；给绝对路径直接 400：`语音只能从语音库取文件（语音库目录：audio）；即使是绝对路径也必须位于语音库之内…`。
 - 库外的音频（比如临时下载的一段）只能用**操作者通道**发：独立工具、`scripts/send-voice.mjs`、控制台面板。
 - 原因：模型上下文里的内容是**不可信输入**，一旦允许任意绝对路径，prompt injection 就能把本机任意文件当语音发出去。
 - 顺手一条：语音库为空时的提示按通道区分 —— AI 看到「请让管理员先把音频放进语音库」，操作者看到带目录的完整提示；给 AI 的那份不吐绝对路径。
 
-## 八、排障
+## 九、排障
 
 | 现象 | 多半是 | 怎么办 |
 | --- | --- | --- |
@@ -102,21 +124,24 @@
 | `qq_speak` 回 400 `too_long` | 这句话超过 `maxChars`（或合成后超过 `maxSeconds`） | 说短一点，或者改发文字；不是故障，别重试 |
 | 手动跑 `python -m edge_tts …` 直接抛 `UnboundLocalError: cannot access local variable 'audio_file'` | 本机 edge-tts 的**命令行入口不可用**（7.3.1 实测），库 API `edge_tts.Communicate(...).save(...)` 却正常 | 别修也别换成 npm 包：`src/tts-core.js` 就是这么绕开的 —— 参数写进 job JSON，用 `python -c <脚本>` + 环境变量 `TTS_JOB` 调库，正文不进命令行 |
 
-## 九、实现落点（改代码时看这里）
+| `qq_speak` 回 400 `bad_tone` | 传了不认识的语气名 | 用「平淡 / 高兴 / 温和 / 冷淡 / 认真」或它们的别名；不是故障，别重试同一个值 |
+| `qq_speak` 回 200 但 `toneApplied: false` | 这次走的是 SAPI 兜底 | 正常：兜底只有语速，音高/音量不生效；想要真语气得让 edge-tts 能连上 |
+
+## 十、实现落点（改代码时看这里）
 
 | 文件 | 职责 |
 | --- | --- |
 | `src/voice-core.js` | 内核：格式判断、语音库命名、音量/响度、发送参数、回读探测 |
-| `src/tts-core.js` | TTS 内核（T-032）：文本清洗、切句、配置夹取、edge-tts（job JSON + `python -c` 调库）/ SAPI 合成（带超时与假 spawn 注入口） |
+| `src/tts-core.js` | TTS 内核（T-032/T-034）：文本清洗、切句、配置夹取、语气档位（`TTS_TONES`）、edge-tts（job JSON + `python -c` 调库，`rate`/`pitch`/`volume`）/ SAPI 合成（只有语速，带超时与假 spawn 注入口） |
 | `src/send-voice-lib.js` | 纯转发 shim（`export … from './voice-core.js'`），防止出现两份实现 |
 | `scripts/send-voice.mjs` | 桥接 CLI：默认走 `/api/send/voice`，`--direct` 才是应急直连 |
 | `src/bridge.js` | 路由 `/api/voice/send`、`/api/send/voice`（操作者）、`/api/socialV2/send-voice`、`/api/socialV2/speak`（AI）；额度、审计、回读；`speakV2()` 合成+发送 |
 | `src/mcp-snowluma-safe.js` | 注册 `qq_send_voice` / `qq_list_voices`（`sendVoice` 开关）、`qq_speak`（`speak` 开关） |
 | `public/console.html` | 「语音库与语音发送（调试）」面板 |
 | `scripts/test-voice*.mjs` | 自检：`voice` / `voice-edge` / `voice-gui` / `voice-preview` / `voice-volume` / `voice-system` |
-| `scripts/test-tts.mjs` | TTS 自检（T-032）：清洗/切句/夹取、音色白名单、路由闸门、失败回落、edge 走库 API（argv/env/job JSON）、成功路径、`.tts` 不被列出 |
+| `scripts/test-tts.mjs` | TTS 自检（T-032/T-034）：清洗/切句/夹取、音色白名单、语气五档与别名、`bad_tone` 闸门、优先级（显式 > tone > 配置）、SAPI 只落语速（`toneApplied:false`）、路由闸门、失败回落、edge 走库 API（argv/env/job JSON 的 pitch/volume）、成功路径、`.tts` 不被列出 |
 
-## 十、相关文档
+## 十一、相关文档
 
 - [README.md](../../README.md)「已知限制」：收语音只显示占位文本、AI 发语音默认关闭。
 - [SOCIAL-AUTO.md](SOCIAL-AUTO.md)：社交自动化的开关与额度模型。

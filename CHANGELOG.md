@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+### 语气档位：`qq_speak` 能「演出情绪」了（2026-10-23，T-034）
+
+- 新参数 `tone`（`qq_speak` 与 `POST /api/socialV2/speak` 都收，缺省 `neutral`）。免费 edge 接口不处理 `mstts:express-as` 风格，所以语气走**可确定**的路：`tone → rate/pitch/volume` 三个声学偏移。五档写在 `src/tts-core.js` 的 `TTS_TONES`（顺序即展示、第一条即默认）：`neutral` 平淡 0/0/0、`happy` 高兴 +8%/+6Hz/+3%、`gentle` 温和 −6%/−2Hz/0、`cold` 冷淡 +4%/−6Hz/−10%、`serious` 认真 −10%/0/+5%。
+- 别名：`resolveTtsTone()` 认英文 id 与中文（`平淡/默认/正常`、`高兴/开心/兴奋/愉快`、`温和/温柔/关心/耐心`、`冷淡/冷漠/敷衍/平静/不耐烦`、`认真/郑重/强调/严肃`，大小写不敏感）。认不出返回 null → 桥接抛 `TtsError('bad_tone')` → **400 `bad_tone` 并列出五档**；与 `bad_voice` 同口径，**绝不**静默回落成平淡。
+- 优先级（`speakV2` 内一遍算清）：显式 `rate` / `pitch` / `volume` 参数 > `tone` 给的值 > `socialV2.tts` 的配置值。夹取：`rate` ±30 / `pitch` ±30Hz / `volume` ±50。
+- `synthesizeEdge` 的 job JSON 现在带 `pitch` / `volume`，`EDGE_TTS_SCRIPT` 里按 `%+dHz` / `%+d%%` 组装 kwargs，**值为 0 不传**（与 `rate` 同风格）；返回体回显 `rate/pitch/volume/toneApplied`。
+- **兜底不假装生效**：SAPI 只有语速（`$synth.Rate`，10% ≈ 1 档），请求写进 job 的音高/音量它做不到，所以 `synthesizeSapi` 返回 `toneApplied:false`、`pitch/volume` 回 0；桥接据此在响应里如实回报，文档写明「兜底时语气会退回平淡」。
+- 响应新增 `tone`（生效档位）、`toneApplied`、`rate`/`pitch`/`volume`（实际生效值）；`prompt` 的 `voices.speak` 追加 `tones` / `toneText`，hint 补一句「语气想表达情绪就用 tone：平淡/高兴/温和/冷淡/认真；语音文本把标点写足（问句带问号、拖长用省略号、感叹别省），TTS 全靠标点断句和停顿」。
+- 配置：`socialV2.tts` 新增 `tone`（默认 `neutral`，坏值回落 + 一条 warn）、`tones`（五档镜像）、`pitch`（默认 0）、`volume`（默认 0）；`rate` 夹取从 ±50 收窄到 ±30（与档位取值范围一致）。
+- 回归：`scripts/test-tts.mjs` **34 条**（新增：五档顺序与数值、中文/英文别名解析、`bad_tone` 闸门且未触发合成、tone=高兴 的 job 实参 `rate=8/pitch=6/volume=3`、显式 `pitch` 压过 tone、配置 tone=neutral 时基础值生效而显式「平淡」压过基础值、SAPI 只落 `$synth.Rate` 且 `toneApplied:false`、静态断言 `kwargs["pitch"]`/`kwargs["volume"]` 存在）；`test-audit` **71/72**（唯一红灯仍是既有 `test-token-economy`）。
+- `docs/guides/VOICE.md` 新增「七、语气档位」表与兜底说明、配置表补充 `tone` / `tones` / `pitch` / `volume`，排障加 `bad_tone` 与 `toneApplied:false` 两行。
+
 ### 文本合成语音条：`qq_speak` 让 AI 自己「开口」（2026-10-23，T-032）
 
 - 新工具 `mcp__snowluma__qq_speak(key, token, text, voice?, rate?)`（工具数 73），后端 `POST /api/socialV2/speak`：把一句话合成成音频**当场发成语音条**，发完即删临时文件。合成内核在 `src/tts-core.js`（`sanitizeSpeakText` / `splitBySentences` / `synthesizeEdge` / `synthesizeSapi` / `resolveTtsSettings`），桥接侧是 `speakV2(key, text, { voice, rate })`。
