@@ -522,7 +522,7 @@ function fixtureConfig(dir) {
   }
 }
 
-// T-033：唤醒提示词里也写死「话题命中就调张雪峰视角」，不用等 DSH 重启才进新会话。
+// T-033：唤醒提示词里也写死「对方真在问建议时才调张雪峰视角」，不用等 DSH 重启才进新会话。
 // 这份提示词是桥接每一轮现拼的，所以判定必须和端点一致（同一份 allowKeys + 同一个默认值）。
 {
   const h = await bridgeHarness({ config: { allow: { private: ['123'], groups: ['1131654608', '119212385'] } } });
@@ -531,9 +531,12 @@ function fixtureConfig(dir) {
       const allowed = h.buildWakePromptV2(ZX_KEY, 'atMention');
       assert.ok(allowed.includes('【张雪峰视角】'), '允许的群要把触发条件写进唤醒提示词（等不了 DSH 重启）');
       assert.ok(allowed.includes('zx_perspective'), '要写清调哪个工具');
-      for (const topic of ['志愿填报', '专业选择', '择校', '就业方向']) {
-        assert.ok(allowed.includes(topic), `四个触发话题都要点到，缺 ${topic}`);
+      for (const topic of ['志愿填报', '专业选择', '择校', '就业']) {
+        assert.ok(allowed.includes(topic), `触发话题要点到，缺 ${topic}`);
       }
+      // 默认不再「见话题就调」：必须写明「只在真在问建议时」，否则会把闲聊也带上去查资料。
+      assert.ok(allowed.includes('只在对方真在问建议'), '要限定「真在问建议才调」，不能一提到志愿就查');
+      assert.ok(allowed.includes('都别调'), '要写清哪些情况不调');
       const other = h.buildWakePromptV2(OTHER_KEY, 'atMention');
       assert.equal(other.includes('【张雪峰视角】'), false, '不在 allowKeys 的群不能看到这张小灶');
       assert.equal(other.includes('zx_perspective'), false, '连工具名都不该出现');
