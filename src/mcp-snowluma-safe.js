@@ -2394,9 +2394,9 @@ server.tool(
     key: z.string().describe('会话 key，例如 group:1131654608（必须是允许列表里的群）'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
     topic: z
-      .enum(['frameworks', 'heuristics', 'expression', 'all'])
+      .enum(['frameworks', 'heuristics', 'expression', 'all', '心智模型', '启发式', '表达', '全部'])
       .optional()
-      .describe('取哪一部分：frameworks=5 个心智模型；heuristics=8 条决策启发式；expression=表达方式（表达 DNA）；all=默认，三节一起给（超长会截断）')
+      .describe('取哪一部分：frameworks/心智模型=5 个心智模型；heuristics/启发式=8 条决策启发式；expression/表达=表达方式（表达 DNA）；all/全部=默认，三节一起给（超长会截断）')
   },
   async ({ key, token, topic }) => {
     try {
