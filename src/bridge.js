@@ -184,7 +184,6 @@ import {
   resolveRoleBinding,
   resolveScopeRole,
   revisionOf,
-  roleCardDigest,
   scopeForConversation
 } from './role-binding.js';
 // 名字映射表（T-018）：好友 / 群 / 群成员的「号码 → 名字」缓存。和 cross-core 一样是
@@ -8061,7 +8060,16 @@ async function main() {
           const scopes = [];
           const pushScope = (scope, gid, members) => {
             const resolved = resolveScopeRole(scope, bindings, snapshot.defaultRole);
-            const digest = resolved.mode === 'card' ? roleCardDigest(resolved.roleName, snapshot.cards) : null;
+            // 内容版本 = 该作用域的**生效内容摘要**（`卡名@内容sha1前8` / `missing:卡名`），
+            // 与 prompt 的 role.revision、sessionPolicy 里那一份同源（同一个 roleContentRevision）。
+            //
+            // 为什么不能只在 `mode === 'card'` 时算：`resolveScopeRole` 对「继承默认」返回的
+            // mode 是 `'inherit'`（它**有**生效卡名，只是选择来自默认人格）。旧写法让继承默认的
+            // 组 revision 永远是 null —— 同一个作用域在 prompt 里算得出 `名@摘要`、在绑定列表里
+            // 却是 null，两处口径对不上，界面也没法显示继承组的内容版本。只有显式 none（以及
+            // 连默认人格都没配）才是 null：那两种情况本来就没有卡。
+            const revision = roleContentRevision(resolved);
+            const hasCard = Boolean(resolved.roleName);
             scopes.push({
               scope,
               gid,
@@ -8071,9 +8079,10 @@ async function main() {
               mode: resolved.mode,
               roleName: resolved.roleName,
               source: resolved.source,
-              // 内容版本 = 卡文件内容的 sha1 前 8 位（不是 mtime+size：同秒同长度重写要能认出来）
-              revision: digest,
-              missing: resolved.mode === 'card' && !digest,
+              revision: hasCard ? revision : null,
+              // 「有生效卡名但算不出内容」= 卡文件不在了。继承默认的作用域同样适用：
+              // 默认卡被删时它们也缺卡（dev-doc §8：要能看见，且不静默换成别的人格）。
+              missing: hasCard && revision.startsWith('missing:'),
             });
           };
           // 号：有效编号（gids ∪ 有成员的号）∪ 绑定里点名的号 —— 配置被手改时，一条指向

@@ -228,6 +228,79 @@ await test('GET bindings 返回 revision/scopes/cards，plan 只读（config 字
   }
 });
 
+// ── 2b. scopes[].revision / missing：继承默认也要有内容版本（T-035 C3 修） ──
+await test('GET bindings 的 scopes[].revision 与 prompt 的 role.revision 逐字一致', async () => {
+  const { h } = await makeHarness();
+  try {
+    await withServer(h, async (port) => {
+      const body = (await call(port, '/api/roles/bindings', { headers: ADMIN })).json;
+      const inherit = body.scopes.find((scope) => scope.scope === 'isolated:private:20004');
+      assert.equal(inherit.source, 'default', 'gid=0 且没有绑定 → 继承默认');
+      // 旧写法只在 mode==='card' 时算摘要，继承默认（mode==='inherit'）永远是 null。
+      assert.match(inherit.revision, /^甲@[0-9a-f]{8}$/, '继承默认的作用域也必须给出内容版本');
+      assert.equal(inherit.missing, false);
+
+      // 显式绑卡的口径不变
+      const bound = body.scopes.find((scope) => scope.scope === 'cross:1');
+      assert.match(bound.revision, /^甲@[0-9a-f]{8}$/);
+      assert.equal(bound.missing, false);
+
+      // 三处口径一致：bindings 列表 / prompt 的 role 段都用同一份「生效内容摘要」
+      const prompt = (await call(port, '/api/socialV2/prompt?key=private%3A20004', { headers: ADMIN })).json;
+      assert.equal(prompt.role.source, 'default');
+      assert.equal(prompt.role.name, '甲');
+      assert.equal(prompt.role.revision, inherit.revision, '两个端点的内容版本必须逐字相同');
+    });
+  } finally {
+    await h.close();
+  }
+});
+
+// ── 2c. 显式 none / 显式缺卡 / 默认卡被删 ───────────────────────────────────
+await test('scopes[] 的 revision/missing：none 为 null，缺卡（含默认卡被删）都标 missing', async () => {
+  const { h } = await makeHarness({
+    config: baseConfig({ 'cross:1': { mode: 'none' }, 'cross:2': { mode: 'card', name: '幽灵' } })
+  });
+  try {
+    await withServer(h, async (port) => {
+      const before = (await call(port, '/api/roles/bindings', { headers: ADMIN })).json;
+      const byScope = Object.fromEntries(before.scopes.map((scope) => [scope.scope, scope]));
+      // 显式 none：本来就没有卡 → revision null，且**不是**「缺卡」
+      assert.equal(byScope['cross:1'].mode, 'none');
+      assert.equal(byScope['cross:1'].revision, null);
+      assert.equal(byScope['cross:1'].missing, false);
+      // 显式绑了一张文件不存在的卡 → 有卡名但算不出内容
+      assert.equal(byScope['cross:2'].revision, 'missing:幽灵');
+      assert.equal(byScope['cross:2'].missing, true);
+      // 继承默认且默认卡还在
+      assert.match(byScope['isolated:private:20004'].revision, /^甲@[0-9a-f]{8}$/);
+      assert.equal(byScope['isolated:private:20004'].missing, false);
+
+      // 删掉默认卡：所有继承者都要标缺卡（而不是悄悄退回「无人格」）
+      fs.rmSync(path.join(h.temp, 'roles', '甲.md'));
+      const after = (await call(port, '/api/roles/bindings', { headers: ADMIN })).json;
+      const afterByScope = Object.fromEntries(after.scopes.map((scope) => [scope.scope, scope]));
+      for (const scope of ['isolated:private:20004', 'cross:3']) {
+        assert.equal(afterByScope[scope].source, 'default', `${scope} 仍然继承默认`);
+        assert.equal(afterByScope[scope].revision, 'missing:甲', `${scope} 要能看出默认卡没了`);
+        assert.equal(afterByScope[scope].missing, true, `${scope} 必须标缺卡`);
+      }
+      // 显式 none 不受默认卡被删影响
+      assert.equal(afterByScope['cross:1'].revision, null);
+      assert.equal(afterByScope['cross:1'].missing, false);
+
+      // prompt 段同一口径：不注入正文、name 为 null、missing:true
+      const prompt = (await call(port, '/api/socialV2/prompt?key=private%3A20004', { headers: ADMIN })).json;
+      assert.equal(prompt.role.revision, 'missing:甲');
+      assert.equal(prompt.role.missing, true);
+      assert.equal(prompt.role.name, null);
+      assert.equal(prompt.role.hint, '');
+    });
+  } finally {
+    await h.close();
+  }
+});
+
 // ── 3. apply：三处落盘 + 无关段保留 + 只退役 rebuild ────────────────────────
 await test('apply 一次写三处、保留无关段、只退役 impact.rebuild 的会话', async () => {
   // 省掉 cross:1 的显式绑定（= 继承默认 甲）：apply 里显式写回同名同内容的卡 → rebindOnly。
