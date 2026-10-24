@@ -169,6 +169,22 @@ import {
   emptyCrossState,
   parseCrossState
 } from './cross-core.js';
+// 人格绑定（T-035 C1）：作用域解析 / 三种选项 / 影响计算都是纯函数（零 IO、只读、不分配组号），
+// 全在 role-binding.js；桥接这一层只负责读 config.json、算卡片内容摘要与退役受影响会话。
+// 名字固定，阶段 C3 的各提示词入口直接 import 同一个模块，别再各写一份解析。
+import {
+  effectiveGids,
+  idleGids,
+  listRoleReferences,
+  nextGidFor,
+  normalizeRoleBindings,
+  normalizeRoleGids,
+  planRoleChanges,
+  resolveScopeRole,
+  revisionOf,
+  roleCardDigest,
+  scopeForConversation
+} from './role-binding.js';
 // 名字映射表（T-018）：好友 / 群 / 群成员的「号码 → 名字」缓存。和 cross-core 一样是
 // 纯逻辑模块（零依赖、零 I/O、时钟由 at 参数注入）：清洗 / 归一 / 打分检索 / 提示词块
 // 全在 identity-core.js；桥接只负责拉名单（OneBot）、落 state/identity-map.json、鉴权
@@ -1403,6 +1419,29 @@ function loadConfig() {
     log(`人格注入上限已按范围校正为 ${roleInjectMaxChars} 字符（配置值 ${cfg.role.maxInjectChars}，允许 1000~20000）`);
   }
 
+  // 人格绑定（T-035）：role.bindings 只存**显式**选择（继承 = 不出现），role.gids 是
+  // 「已存在的互通组编号」—— 闲置组靠它保号，新增组永远 max+1（addendum r2 §2）。
+  // 坏值一律丢弃并记一行日志：config.json 是用户可手改的文件，一条写坏不能把桥接拦在
+  // 启动阶段（与 cross / identity / device 的「归一永不抛」同一口径）。
+  try {
+    const roleSource = (cfg.role && typeof cfg.role === 'object' && !Array.isArray(cfg.role)) ? cfg.role : {};
+    const bindingResult = normalizeRoleBindings(roleSource.bindings);
+    cfg.role.bindings = bindingResult.bindings;
+    if (bindingResult.dropped.length > 0) {
+      const detail = bindingResult.dropped.map((item) => `${item.scope}：${item.reason}`).join('；');
+      log(`人格绑定：丢弃 ${bindingResult.dropped.length} 条不合法项（${detail}）`);
+    }
+    // gids 缺失（老配置）时从 groups 反推：反推出来的是「现在真实存在的组」，而不是
+    // 空数组 —— 空数组会让 idleGids / nextGid 把有成员的号当成不存在。
+    cfg.role.gids = roleSource.gids === undefined
+      ? effectiveGids(cfg.socialV2?.cross?.groups, [])
+      : normalizeRoleGids(roleSource.gids);
+  } catch (error) {
+    // 理论上走不到（两个归一函数都不抛），但初始化期任何异常都不该让桥接起不来。
+    cfg.role.bindings = {};
+    cfg.role.gids = effectiveGids(cfg.socialV2?.cross?.groups, []);
+    log(`人格绑定配置读取失败，已按空绑定处理：${error?.message ?? error}`);
+  }
   return cfg;
 }
 
@@ -6005,7 +6044,7 @@ async function main() {
         //                     也没有消息正文，模型查「阿芙乐尔是谁」是正当用途。
         // 两者都是控制台动作，AI 不该自己触发：AI 的心情由它上报（affect/events），
         // 「发不发」由桥接的判定与操作者决定。
-        const adminOnlyV2Paths = ['/api/socialV2/config', '/api/socialV2/activity', '/api/socialV2/reset', '/api/socialV2/states', '/api/socialV2/wake', '/api/socialV2/initial-prompt', '/api/socialV2/automation', '/api/socialV2/affect/vent', '/api/socialV2/affect/config', '/api/socialV2/cross', '/api/socialV2/identity/refresh'];
+        const adminOnlyV2Paths = ['/api/socialV2/config', '/api/socialV2/activity', '/api/socialV2/reset', '/api/socialV2/states', '/api/socialV2/wake', '/api/socialV2/initial-prompt', '/api/socialV2/automation', '/api/socialV2/affect/vent', '/api/socialV2/affect/config', '/api/socialV2/cross', '/api/socialV2/identity/refresh', '/api/roles/bindings', '/api/roles/bindings/plan', '/api/roles/bindings/apply'];
         if (req.headers['x-agent-token'] && (adminOnlyV2Paths.includes(url.pathname) || (url.pathname === '/api/socialV2/feedback' && req.method === 'GET') || (url.pathname === '/api/socialV2/tool-log' && req.method === 'GET'))) {
           sendJson({ ok: false, error: '该接口仅控制台可用' }, 403);
           return;
@@ -7816,20 +7855,21 @@ async function main() {
         if (req.method === 'POST' && url.pathname === '/api/role') {
           const body = await readBody();
           const rs = readRoleState();
-          if (body.role && typeof body.role === 'string') {
-            const name = sanitizeRoleName(body.role);
-            if (!fs.existsSync(path.join(ROOT, 'roles', name + '.md'))) {
-              sendJson({ ok: false, error: `角色「${name}」不存在（roles/${name}.md）` }, 400);
-              return;
-            }
-            writeRoleState(name, rs.mode);
-            log(`控制台：角色已设置为 ${name}`);
-            sendJson({ ok: true, role: name });
-          } else {
-            writeRoleState(null, rs.mode);
-            log('控制台：角色已清除');
-            sendJson({ ok: true, role: null });
+          // T-035：改默认人格**只**影响「继承默认」的作用域；显式绑卡 / 显式 none 不动。
+          // 影响计算与保存绑定共用 planRoleChanges，再把受影响的继承者退役重建（dev-doc §8 / A03）。
+          const requested = (typeof body.role === 'string' && body.role) ? body.role : null;
+          const nextRole = requested === null ? null : sanitizeRoleName(requested);
+          if (nextRole !== null && !fs.existsSync(path.join(ROOT, 'roles', nextRole + '.md'))) {
+            sendJson({ ok: false, error: `角色「${nextRole}」不存在（roles/${nextRole}.md）` }, 400);
+            return;
           }
+          const before = roleBindingSnapshot();
+          const impact = planRoleChanges(before, { ...before, defaultRole: nextRole }, { keys: roleBindingKeys() });
+          writeRoleState(nextRole, rs.mode);
+          const retired = retireAffectedSessions(impact);
+          log(nextRole ? `控制台：角色已设置为 ${nextRole}` : '控制台：角色已清除');
+          // role 保持老契约（当前默认人格）；impact / retired 给控制台看「谁要重建会话」。
+          sendJson({ ok: true, role: nextRole, impact, retired });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/role-mode') {
@@ -7845,12 +7885,19 @@ async function main() {
         if (req.method === 'GET' && url.pathname === '/api/roles') {
           const rs = readRoleState();
           const summaries = roleSummaries();
+          const defaultRole = rs.role ?? null;
+          const bindings = normalizeRoleBindings(cfg.role?.bindings).bindings;
           sendJson({
             // roles 保持「人格名字符串数组」的既有契约（scripts/test-console.mjs 等调用方依赖它）；
             // 富信息放在 summaries 里，新老调用方互不影响。
             roles: summaries.map((role) => role.name),
             summaries,
-            current: rs.role ?? null,
+            current: defaultRole,
+            // T-035：defaultRole 是 current 的显式别名（老字段含义不变 = 默认人格）；
+            // refs 给出每张卡被哪些**作用域**引用 ——「编辑/删除这张卡会影响谁」必须在这里
+            // 就看得见，不能等保存后才发现别的组也变了（dev-doc §3.3 / §8）。
+            defaultRole,
+            refs: Object.fromEntries(summaries.map((role) => [role.name, listRoleReferences(role.name, bindings, defaultRole)])),
             limits: { nameMax: ROLE_NAME_MAX, contentMaxBytes: ROLE_CONTENT_MAX_BYTES, injectMaxChars: roleInjectMaxChars },
           });
           return;
@@ -7936,6 +7983,151 @@ async function main() {
           if (cleared) writeRoleState(null, rs.mode);
           log(`控制台：删除人格「${name}」${cleared ? '（该人格正在启用，已同时清除当前人格）' : ''}`);
           sendJson({ ok: true, deleted: name, clearedCurrent: cleared });
+          return;
+        }
+
+        // ── 人格绑定（T-035 C2）：查看 / 预演 / 提交 ────────────────────────────
+        // 三个端点**只认 console token**：已登记进 adminOnlyV2Paths，带 agent token 的
+        // 请求在更前面就被 403 了（AI 不能自己改组号、也不能自己换人格）。
+        if (req.method === 'GET' && url.pathname === '/api/roles/bindings') {
+          const snapshot = roleBindingSnapshot();
+          const groups = snapshot.groups;
+          const bindings = snapshot.bindings;
+          const scopes = [];
+          const pushScope = (scope, gid, members) => {
+            const resolved = resolveScopeRole(scope, bindings, snapshot.defaultRole);
+            const digest = resolved.mode === 'card' ? roleCardDigest(resolved.roleName, snapshot.cards) : null;
+            scopes.push({
+              scope,
+              gid,
+              label: gid > 0 ? `互通组 ${gid}` : '独立会话',
+              members,
+              idle: members.length === 0,
+              mode: resolved.mode,
+              roleName: resolved.roleName,
+              source: resolved.source,
+              // 内容版本 = 卡文件内容的 sha1 前 8 位（不是 mtime+size：同秒同长度重写要能认出来）
+              revision: digest,
+              missing: resolved.mode === 'card' && !digest,
+            });
+          };
+          // 号：有效编号（gids ∪ 有成员的号）∪ 绑定里点名的号 —— 配置被手改时，一条指向
+          // 不存在组号的绑定也必须**出现在列表里**，否则界面既删不掉也看不见。
+          const crossGids = new Set(effectiveGids(groups, snapshot.gids));
+          for (const scope of Object.keys(bindings)) {
+            const cross = /^cross:(\d+)$/.exec(scope);
+            if (cross) crossGids.add(Number(cross[1]));
+          }
+          for (const gid of [...crossGids].filter((value) => value > 0).sort((a, b) => a - b)) {
+            pushScope(`cross:${gid}`, gid, membersOf(groups, gid));
+          }
+          // 独立会话：gid=0 的会话 + 只存在于 bindings 的 isolated 作用域。
+          const isolatedKeys = new Set();
+          for (const key of Object.keys(groups)) {
+            if (scopeForConversation(key, groups).gid === 0) isolatedKeys.add(key);
+          }
+          for (const scope of Object.keys(bindings)) {
+            if (scope.startsWith('isolated:')) isolatedKeys.add(scope.slice('isolated:'.length));
+          }
+          for (const key of [...isolatedKeys].sort()) pushScope(`isolated:${key}`, 0, [key]);
+          const cards = listRoles().map((name) => {
+            const info = snapshot.cardInfo[name];
+            return {
+              name,
+              chars: info ? info.injectedV2 : 0,
+              revision: snapshot.cards[name] ?? null,
+              refs: listRoleReferences(name, bindings, snapshot.defaultRole).bindings,
+            };
+          });
+          sendJson({
+            ok: true,
+            revision: revisionOf(snapshot),
+            defaultRole: snapshot.defaultRole,
+            maxInjectChars: roleInjectMaxChars,
+            nextGid: nextGidFor(groups, snapshot.gids),
+            idleGids: idleGids(groups, snapshot.gids),
+            groups,
+            // 整块替换接口要能原样回填：gids 是闲置组的保号来源，不给出就没法安全提交。
+            gids: snapshot.gids,
+            bindings,
+            cards,
+            scopes,
+          });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/roles/bindings/plan') {
+          const body = await readBody();
+          const snapshot = roleBindingSnapshot();
+          const parsed = readBindingRequest(body, snapshot);
+          if (!parsed.ok) { sendJson({ ok: false, error: parsed.error }, 400); return; }
+          const impact = planRoleChanges(snapshot, { ...snapshot, ...parsed.value }, { keys: roleBindingKeys() });
+          const revision = revisionOf(snapshot);
+          // 只读：不落盘、不退役。revision 是「提交前」的那一份，apply 要拿它比对。
+          sendJson({ ok: true, revision, before: { revision }, impact });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/roles/bindings/apply') {
+          const body = await readBody();
+          const baseRevision = String(body?.baseRevision ?? '').trim();
+          if (!baseRevision) { sendJson({ ok: false, error: 'baseRevision 必填（先 plan 再 apply）' }, 400); return; }
+          const snapshot = roleBindingSnapshot();
+          const revision = revisionOf(snapshot);
+          if (baseRevision !== revision) {
+            // 两个页面同时开着时，后提交的那一份不能悄悄盖掉别人刚保存的绑定。
+            sendJson({ ok: false, error: '配置已被其他页面修改，请刷新后重试', revision }, 409);
+            return;
+          }
+          const parsed = readBindingRequest(body, snapshot);
+          if (!parsed.ok) { sendJson({ ok: false, error: parsed.error, revision }, 400); return; }
+          if ((parsed.value.defaultRole ?? null) !== (snapshot.defaultRole ?? null)) {
+            // 默认人格存在 state/current-role.json，不属于这次的三处联合写入 —— 明确拒绝，
+            // 而不是「收下了但没生效」（那会让界面显示一个假结果）。
+            sendJson({ ok: false, error: '默认人格只在「人格与角色」页修改；这里只提交分组与组绑定', revision }, 400);
+            return;
+          }
+          const after = { ...snapshot, ...parsed.value, defaultRole: snapshot.defaultRole };
+          const impact = planRoleChanges(snapshot, after, { keys: roleBindingKeys() });
+          if (impact.conflicts.length > 0) {
+            // 合并两组时人格不同：必须先选最终人格，未选则**零修改**（dev-doc §6）。
+            sendJson({ ok: false, error: '合并后的人格冲突还没解决，请先选择最终人格', conflicts: impact.conflicts, revision }, 409);
+            return;
+          }
+          if (impact.invalid.length > 0) {
+            const scopes = impact.invalid.map((item) => item.scope).join('、');
+            sendJson({ ok: false, error: `绑定引用了不存在的互通组：${scopes}`, invalid: impact.invalid, revision }, 400);
+            return;
+          }
+          try {
+            // 三处（role.bindings / role.gids / socialV2.cross.groups）**一次**原子写：
+            // 分两次写会留下「组已合并、人格还没选」的中间态（dev-doc §8 的写协调器）。
+            writeRoleAndCrossConfig({
+              role: { bindings: after.bindings, gids: after.gids },
+              cross: { groups: after.groups },
+            });
+          } catch (error) {
+            // 写盘失败：内存与在途都不动（writeRoleAndCrossConfig 只在成功后改 cfg）。
+            log(`[role] 写回人格绑定失败：${error?.message ?? error}`);
+            sendJson({ ok: false, error: '写 config.json 失败，已记日志' }, 500);
+            return;
+          }
+          const retired = retireAffectedSessions(impact);
+          const notes = ['旧会话停止中；下一次唤醒才会用新人格'];
+          if (impact.missing.length > 0) {
+            const detail = impact.missing.map((item) => `${item.scope} → ${item.name}`).join('、');
+            notes.push(`绑定的卡缺失：${detail}（本轮只报告，不静默换成别的人格）`);
+          }
+          log(`控制台：人格绑定已保存（重建 ${impact.rebuild.length} 个会话，${impact.unchangedScopes.length} 个作用域不变）`);
+          sendJson({
+            ok: true,
+            revision: revisionOf(roleBindingSnapshot()),
+            applied: {
+              rebuild: impact.rebuild.map((item) => item.key),
+              rebindOnly: impact.rebindOnly.map((item) => item.key),
+              unchanged: impact.unchangedScopes.length,
+            },
+            retire: retired,
+            notes,
+          });
           return;
         }
 
@@ -14995,6 +15187,186 @@ async function main() {
     atomicWriteJson(configFile, file);
     // normalize 一次再放进内存：控制台/接口只允许过合法值，这里兜底防手写坏值。
     cfg.socialV2.cross = { ...(cfg.socialV2.cross ?? normalizeCrossConfig(undefined)), ...normalizeCrossConfig(merged) };
+  }
+
+  // ── 人格绑定（T-035 C2）：快照 / 卡片摘要 / 联合写入 / 受影响会话退役 ──────────
+  //
+  // 三个端点（GET bindings / POST plan / POST apply）与「改默认人格」共用这一组 helper：
+  // 「预演看到的影响」和「提交后真的退役了谁」必须是同一份计算（dev-doc §7）。
+
+  /**
+   * 卡片文件的内容摘要与字数（一次读盘，两处都用）。
+   *
+   * 摘要刻意**不用** mtime+size：同一秒内用同样长度重写人格卡时它们都不变，而注入文本
+   * 已经变了（dev-doc §5.1 / A10）。roles/ 只有几十个文件，每次读一遍比维护缓存更不容易错；
+   * 真要缓存也只能缓存「内容哈希 → 文本」，不能缓存「mtime → 结论」。
+   */
+  function roleCardInfo() {
+    const info = {};
+    for (const name of listRoles()) {
+      try {
+        const content = fs.readFileSync(roleFilePath(name), 'utf8');
+        // 按模式筛完小节后的实际注入字数；统计函数不可用时退化成正文总字数。
+        // 字数只用于界面展示，**绝不能**因为它取不到而连带丢掉内容摘要（摘要是 revision 的分子）。
+        let injectedV2 = content.length;
+        try { injectedV2 = roleCharStats(content).v2; } catch {}
+        info[name] = {
+          digest: crypto.createHash('sha1').update(content, 'utf8').digest('hex').slice(0, 8),
+          chars: content.length,
+          injectedV2,
+        };
+      } catch {
+        // 读不到就当没这张卡：plan 会把它报成 missing，而不是让整个端点 500。
+      }
+    }
+    return info;
+  }
+
+  /** 当前快照（before / after 同一形状）：groups / gids / bindings / defaultRole / cards。 */
+  function roleBindingSnapshot() {
+    const groups = { ...crossGroups() };
+    const cardInfo = roleCardInfo();
+    const cards = {};
+    for (const name of Object.keys(cardInfo)) cards[name] = cardInfo[name].digest;
+    return {
+      groups,
+      gids: normalizeRoleGids(cfg.role?.gids ?? effectiveGids(groups, [])),
+      bindings: normalizeRoleBindings(cfg.role?.bindings).bindings,
+      defaultRole: readRoleState().role ?? null,
+      cards,
+      // 只给 GET bindings 用（卡片字数）；plan / revision 只认 cards，多出来的字段会被忽略。
+      cardInfo,
+    };
+  }
+
+  /** 影响计算要看的会话 key：分组表 / 已建会话 / 二代会话 / 只存在于 bindings 的独立作用域。 */
+  function roleBindingKeys() {
+    const keys = new Set(Object.keys(crossGroups()));
+    for (const key of Object.keys(state.sessions ?? {})) keys.add(key);
+    for (const key of socialV2.conversations.keys()) keys.add(key);
+    for (const scope of Object.keys(cfg.role?.bindings ?? {})) {
+      if (scope.startsWith('isolated:')) keys.add(scope.slice('isolated:'.length));
+    }
+    return [...keys].sort();
+  }
+
+  /**
+   * 只对影响计划里 rebuild 的会话退役（旧 DSH 会话停掉、token 轮换）；rebindOnly 不动。
+   * 远端停止失败只记日志 + 记进 failed，不回滚配置：本地 token 已经换了，旧 turn 发不出去。
+   */
+  function retireAffectedSessions(impact) {
+    const started = [];
+    const failed = [];
+    for (const item of impact?.rebuild ?? []) {
+      try {
+        retireSession(item.key, '人格绑定变化');
+        started.push(item.key);
+      } catch (error) {
+        failed.push({ key: item.key, error: error?.message ?? String(error) });
+        log(`[role] 退役会话 ${item.key} 失败：${error?.message ?? error}`);
+      }
+    }
+    return { started, failed };
+  }
+
+  /**
+   * 解析 plan / apply 的请求体：groups / gids / bindings 都是**整块替换**（不是 patch），
+   * 缺省字段沿用当前值；defaultRole 只允许在 plan 里预演（apply 不写默认人格）。
+   *
+   * 这里严格校验、不静默归一：控制台写错 key 或组号时要看得见 400，而不是「保存成功但
+   * 少了几个会话」。真正的清洗仍在 role-binding.js（保存前那一步）。
+   *
+   * @returns {{ ok: true, value: object } | { ok: false, error: string }}
+   */
+  function readBindingRequest(body, current) {
+    const source = (body && typeof body === 'object' && !Array.isArray(body)) ? body : {};
+    const next = {
+      groups: current.groups,
+      gids: current.gids,
+      bindings: current.bindings,
+      defaultRole: current.defaultRole,
+    };
+    if (source.groups !== undefined) {
+      if (!source.groups || typeof source.groups !== 'object' || Array.isArray(source.groups)) {
+        return { ok: false, error: 'groups 必须是对象（会话 key → 编号）' };
+      }
+      const groups = {};
+      for (const [key, value] of Object.entries(source.groups)) {
+        if (!/^(group|private):\d{1,20}$/.test(key)) return { ok: false, error: `会话 key 不合法：${key}` };
+        const gid = normalizeGid(value);
+        if (gid === null) return { ok: false, error: `分组号必须是非负整数：${key}` };
+        groups[key] = gid;
+      }
+      next.groups = groups;
+    }
+    if (source.gids !== undefined) {
+      if (!Array.isArray(source.gids)) return { ok: false, error: 'gids 必须是正整数数组' };
+      const gids = [];
+      for (const value of source.gids) {
+        const gid = normalizeGid(value);
+        if (gid === null || gid <= 0) return { ok: false, error: `gids 只允许正整数：${value}` };
+        gids.push(gid);
+      }
+      next.gids = normalizeRoleGids(gids);
+    }
+    if (source.bindings !== undefined) {
+      if (!source.bindings || typeof source.bindings !== 'object' || Array.isArray(source.bindings)) {
+        return { ok: false, error: 'bindings 必须是对象（作用域 → { mode, name }）' };
+      }
+      const normalized = normalizeRoleBindings(source.bindings);
+      if (normalized.dropped.length > 0) {
+        const detail = normalized.dropped.map((item) => `${item.scope}（${item.reason}）`).join('、');
+        return { ok: false, error: `绑定项不合法：${detail}` };
+      }
+      next.bindings = normalized.bindings;
+    }
+    if (source.defaultRole !== undefined) {
+      if (source.defaultRole !== null && typeof source.defaultRole !== 'string') {
+        return { ok: false, error: 'defaultRole 必须是字符串或 null' };
+      }
+      const name = typeof source.defaultRole === 'string' ? source.defaultRole.trim() : '';
+      if (name && !fs.existsSync(roleFilePath(sanitizeRoleName(name)))) {
+        return { ok: false, error: `人格「${name}」不存在` };
+      }
+      next.defaultRole = name || null;
+    }
+    return { ok: true, value: next };
+  }
+
+  /**
+   * 联合写回「人格绑定 + 互通分组」：三处块**一次** atomicWriteJson，成功后**才**改内存。
+   *
+   * 形状照 writeCrossConfig：readConfigObject 读原始文件 → 只换目标段 → 原子写 → 换内存。
+   * 为什么必须一次写：分组与绑定分开写会留下「组已合并、人格还没选」的中间态；两个页面
+   * 同时保存时，各自读旧 config 再回写还会把对方那一段整块盖掉（dev-doc §8）。
+   * 失败抛错，调用方回 500 —— 此时磁盘与内存都没变。
+   *
+   * @param {{ role?: { bindings?: object, gids?: number[] }, cross?: { groups?: object } }} next
+   */
+  function writeRoleAndCrossConfig(next) {
+    const configFile = path.join(ROOT, 'config.json');
+    const file = readConfigObject(configFile);
+    const role = (file.role && typeof file.role === 'object' && !Array.isArray(file.role)) ? file.role : {};
+    const social = (file.socialV2 && typeof file.socialV2 === 'object' && !Array.isArray(file.socialV2)) ? file.socialV2 : {};
+    const cross = (social.cross && typeof social.cross === 'object' && !Array.isArray(social.cross)) ? social.cross : {};
+    let touchedRole = false;
+    let touchedSocial = false;
+    if (next?.role?.bindings !== undefined) { role.bindings = next.role.bindings; touchedRole = true; }
+    if (next?.role?.gids !== undefined) { role.gids = next.role.gids; touchedRole = true; }
+    if (next?.cross?.groups !== undefined) { social.cross = { ...cross, groups: next.cross.groups }; touchedSocial = true; }
+    // 只替换自己的段：没被点名的段（qzone / affect / identity / 其它 socialV2 字段）原样写回。
+    if (touchedRole) file.role = role;
+    if (touchedSocial) file.socialV2 = social;
+    atomicWriteJson(configFile, file);
+    // 落盘成功之后才换内存：失败时 cfg 与磁盘仍然一致（端点回 500，界面提示重试）。
+    if (next?.role?.bindings !== undefined) cfg.role.bindings = normalizeRoleBindings(next.role.bindings).bindings;
+    if (next?.role?.gids !== undefined) cfg.role.gids = normalizeRoleGids(next.role.gids);
+    if (next?.cross?.groups !== undefined) {
+      // cross 段仍走那唯一的归一入口（normalizeCrossConfig），只是先算成局部量再整体替换：
+      // 直接写成赋值会把「唯一入口」这条登记期断言绕过去。
+      const mergedCross = normalizeCrossConfig({ ...(cfg.socialV2?.cross ?? {}), groups: next.cross.groups });
+      cfg.socialV2.cross = mergedCross;
+    }
   }
 
   /**

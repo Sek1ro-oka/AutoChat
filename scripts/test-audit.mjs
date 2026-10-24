@@ -197,6 +197,16 @@ const tests = [
   // token、额度 429）；合成失败回落 SAPI 与超时 kill；成功路径走真实 sendVoiceForV2
   // （record 段落在 <语音库>/.tts、audio 传 null）且发完即删。合成用假 spawn，不发 QQ 消息。
   'test-tts.mjs',
+  // 人格绑定（T-035 阶段 C1）：作用域解析 / 三态（继承 / 指定卡 / 不用）/ 影响计算 /
+  // revision 全是纯函数（零 IO、不分配组号）。钉住「同组一致、组间不同、gid=0 不聚合」、
+  // 闲置组占号（gids=[1,2,3] 且组 3 无成员 → 下一号 4）、合并冲突两种、scope 变化即使内容
+  // 相同也重建、绑法变化但内容相同只 rebindOnly、卡缺失、revision 稳定性。
+  'test-role-binding.mjs',
+  // 人格绑定（T-035 阶段 C2）：三个管理端点的**隔离 HTTP** 回归（真跑 startConsoleServer，
+  // 临时 config/state/roles）。钉住 agent token 403、plan 只读（config 字节不变）、apply
+  // 一次写三处并保留无关段、只退役 impact.rebuild、旧 baseRevision/合并冲突 409 零修改、
+  // 写盘失败 500 且内存不变、既有写路径不丢 role.bindings。
+  'test-role-bindings-endpoints.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

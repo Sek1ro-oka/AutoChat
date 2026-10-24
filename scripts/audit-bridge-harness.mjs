@@ -60,6 +60,12 @@ import * as socialAuto from '../src/social-auto.js';
 // 时钟由 now 注入）。bridge.js 顶层 import 会被下面按行剥掉，这里补上同名绑定：
 // loadConfig 期间就调 normalizeCrossConfig，少了这一行 VM 里立刻 ReferenceError。
 import * as crossCore from '../src/cross-core.js';
+// 人格绑定（T-035 C1）：作用域解析 / 三种选项 / 影响计算 / revision 都是纯逻辑（零 IO、
+// 只读、不分配组号）。bridge.js 顶层 import 会被下面按行剥掉，这里补上同名绑定：
+// loadConfig 期间就调 normalizeRoleBindings + effectiveGids，少了这一行 VM 里立刻
+// ReferenceError → 所有 HTTP 用例一起红（与 cross / identity / device 同理）。
+// 导出名已核对：14 个导出与其它 spread 模块均不重名。
+import * as roleBinding from '../src/role-binding.js';
 // 生图（T-017）：image-core 是纯逻辑（配置归一 / 提示词清洗与审计 / 尺寸 / 额度 /
 // 上游响应解析 / 用量序列化 / 来源白名单），image-gen 是 IO 薄层（取图 / 落盘 / 读回 /
 // 索引）。bridge.js 顶层把这两个模块的导出都 import 成了同名绑定，下面按行剥掉 import
@@ -254,6 +260,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...stall, ...consoleAuth, ...qzone, ...presetPrompt,
     ...socialAuto,
     ...crossCore,
+    ...roleBinding,
     ...imageCore, ...imageGen,
     ...identityCore,
     ...heyboxCore,
