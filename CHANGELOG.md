@@ -5,6 +5,19 @@
 
 ## [Unreleased]
 
+### 按互通组配置人格卡（2026-10-25，T-035）
+
+- **产品规则**：人格卡从「全局唯一」改成「按互通组解析」。编号 > 0 的会话作用域是 `cross:<gid>`（组内群聊与私聊共享一张卡），编号 0 是 `isolated:<会话key>`（各自独立，绝不聚合成「0 号组」）。三种选项：继承默认人格（**不落记录**）/ 指定人格卡（`{"mode":"card","name":…}`）/ 不使用人格卡（`{"mode":"none"}`）；解析顺序 作用域 → 默认 → 无人格，不拼接多张卡。默认人格仍在 `state/current-role.json`，不复制进 config。
+- **落盘**：`config.json` 的 `role.bindings` + `role.gids`，与 `socialV2.cross.groups` 一起由 `writeRoleAndCrossConfig()` **一次** `atomicWriteJson` 写入，成功后才改内存；坏绑定项只丢弃并记一行日志，`gids` 缺失从 `groups` 反推，不让桥接起不来。新增组编号 = 现有最大 + 1（升序、不补空号）；有绑定没成员的组是「闲置组」，编号继续保留。
+- **纯逻辑** `src/role-binding.js`：`scopeForConversation` / `resolveRoleBinding` / `planRoleChanges` / `revisionOf` 等，零 IO、不分配组号；影响计算只用「作用域 + 生效内容摘要」判断，`reason` 分 `new|scope|content|default`，绑法变了但内容没变只进 `rebindOnly`（不重建）。
+- **接口**（只认 `x-console-token`，agent token 403）：`GET /api/roles/bindings`、`POST /api/roles/bindings/plan`、`POST /api/roles/bindings/apply`。apply 必须带 `baseRevision`：旧版本 409、合并冲突 409、写盘失败 500，三种都**零修改**；`mergeChoice: {"cross:N": "卡名"|"none"}` 可一次完成「合并 + 选最终人格」。`GET /api/roles` 增 `defaultRole` 与引用摘要，`POST /api/role` 只退役继承者。
+- **提示词接线**：`roleFor(key)` 成为唯一解析入口；`roleRawContent`/`roleHintForMode`/`currentRoleHint`/`currentRoleHintV2` 接受 key，正文缓存按「卡名@内容 sha1 前 8 位」，解析按 `groups+bindings+defaultRole` 失效（A/B/A 不串卡）。`GET /api/socialV2/prompt` 的 `role` 段新增 `scope`/`source`/`revision`/`missing`；显式 `none` 或缺卡时不注入正文，`【当前角色】` 整行不出现。
+- **会话策略与在途隔离**：`sessionPolicy()` 增加「作用域 + 生效内容摘要」，`captureSendGuard` 自动拦住旧回合的发送 / 语音 / 图片（不另造机制）；不含 `source`，所以「继承 ↔ 显式同名同内容卡」不会误杀。
+- **迁移**：`adoptLegacySessionPolicy()` 只对「旧 3 元组策略 + 继承默认」的就地采纳成新五元组，升级后第一次启动**不再一次性退役所有既有会话**（dev-doc §9）；显式绑卡 / `none` / 模式·preset·ownerQQ 真变了的照常重建。
+- **控制台**：「跨渠道互通」页新增吸顶的互通组总览（编号 / 成员 / 生效人格三态 / 内容版本 / 状态）、「+ 新增互通组（编号 N）」「清除闲置绑定」；会话编号改成下拉（`0（不共享）` + 各组）；底部「未保存变更 / 预览影响 / 保存 / 重置」，保存是**一次** apply，409 只提示刷新不重试，500 保留草稿；人格卡折叠区支持查看 / 复制到组 / 编辑原卡 / 删除（被引用时先拦下并列出引用清单）。人格页只保留默认人格与卡库。
+- **测试**：新增 `test-role-binding`（73 断言）、`test-role-bindings-endpoints`（13 组隔离 HTTP 用例）、`test-role-injection`（8 用例）、`test-role-policy-migration`（5 用例），`test-console-cross` 重写；均已登记 `test-audit`。`test-audit` 现为 **75/76**，唯一红灯仍是既有的 `test-token-economy` 观察语义用例。
+- **文档**：新增 `docs/guides/ROLE-BINDING.md`；设计与接口见 `work/agent-tasks/T-035/`（dev-doc、addendum-r2、api-contract、demo、验收记录）。
+
 ### 语气档位：`qq_speak` 能「演出情绪」了（2026-10-23，T-034）
 
 - 新参数 `tone`（`qq_speak` 与 `POST /api/socialV2/speak` 都收，缺省 `neutral`）。免费 edge 接口不处理 `mstts:express-as` 风格，所以语气走**可确定**的路：`tone → rate/pitch/volume` 三个声学偏移。五档写在 `src/tts-core.js` 的 `TTS_TONES`（顺序即展示、第一条即默认）：`neutral` 平淡 0/0/0、`happy` 高兴 +8%/+6Hz/+3%、`gentle` 温和 −6%/−2Hz/0、`cold` 冷淡 +4%/−6Hz/−10%、`serious` 认真 −10%/0/+5%。

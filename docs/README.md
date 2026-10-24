@@ -27,6 +27,7 @@
 | [guides/DEVICE.md](guides/DEVICE.md) | 安卓平板：截图 / 点击 / 滑动 / 输入 / 按键 / 开应用 / 列应用；预算闸门 + 黑名单前台硬闸门 + `home` 逃生口 | ✅ 2026-10-21 新增（T-023） |
 | [guides/REACH.md](guides/REACH.md) | 三平台只读检索（`reach_status` / `reach_search` / `reach_read`）：B站 / 小红书 / 小黑盒一个入口；错误语义、Windows 上 `opencli.cmd` 的 spawn 细节与三个上游的实测状态 | ✅ 2026-10-23 新增（T-027） |
 | [guides/ZHANGXUEFENG.md](guides/ZHANGXUEFENG.md) | `zx_perspective`：把「张雪峰视角」skill 当作参考资料取用（咨询模式，不换人格）；只在 `group:1131654608` 可用、只读外部 SKILL.md、4000 字上限与失败语义 | ✅ 2026-10-23 新增（T-030） |
+| [guides/ROLE-BINDING.md](guides/ROLE-BINDING.md) | 按互通组配置人格卡：三种选项（继承 / 指定卡 / 不用）、作用域 `cross:<gid>` 与 `isolated:<key>`、`role.bindings`/`role.gids` 落盘、三个管理端点与 `mergeChoice`、控制台位置、生效时机与一次性基线迁移 | ✅ 2026-10-25 新增（T-035） |
 
 ## design/ —— 设计与规划（读设计意图用）
 
