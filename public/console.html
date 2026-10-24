@@ -1895,7 +1895,7 @@ button:active:not(:disabled) {
 }
 #section-cross .cross-head,
 #section-cross .cross-row {
-  display:grid; grid-template-columns:minmax(0,1fr) 112px 62px 88px;
+  display:grid; grid-template-columns:minmax(0,1fr) 112px minmax(140px,200px) 62px 88px;
   gap:10px; align-items:center; padding:8px 12px
 }
 #section-cross .cross-head {
@@ -1904,8 +1904,12 @@ button:active:not(:disabled) {
   font-size:11px; color:var(--muted-soft); letter-spacing:.02em
 }
 #section-cross .cross-head > :nth-child(2),
-#section-cross .cross-head > :nth-child(3),
-#section-cross .cross-head > :nth-child(4) { text-align:center }
+#section-cross .cross-head > :nth-child(4),
+#section-cross .cross-head > :nth-child(5) { text-align:center }
+/* 人格一列：编号 0 的会话在这里是下拉（可单独设卡），编号 >0 的会话只有一枚只读 chip。 */
+#section-cross .cross-persona-cell { min-width:0; display:flex; flex-direction:column; gap:2px }
+#section-cross .cross-persona-cell select.cross-persona { width:100%; min-width:0 }
+#section-cross .cross-persona-cell>.cross-tag { align-self:flex-start }
 #section-cross .cross-row { border-bottom:1px solid var(--border-subtle) }
 #section-cross .cross-row:last-child { border-bottom:0 }
 /* 同组会话不止一个时给一条左侧强调线：扫一眼就能看出「这几个已经互通了」。 */
@@ -2045,14 +2049,15 @@ button:active:not(:disabled) {
   #section-cross .cross-group-row>.cross-rev { grid-area:rev }
   #section-cross .cross-head { display:none }
   #section-cross .cross-row {
-    grid-template-columns:minmax(0,1fr) auto auto;
-    grid-template-areas:"conv conv conv" "pick count time";
+    grid-template-columns:112px minmax(0,1fr);
+    grid-template-areas:"conv conv" "pick persona" "count time";
     row-gap:6px
   }
   #section-cross .cross-conv { grid-area:conv }
-  #section-cross .cross-row>.cross-pick { grid-area:pick }
-  #section-cross .cross-count { grid-area:count }
-  #section-cross .cross-time { grid-area:time }
+  #section-cross .cross-row>.cross-pick:not(.cross-persona) { grid-area:pick }
+  #section-cross .cross-persona-cell { grid-area:persona }
+  #section-cross .cross-count { grid-area:count; text-align:left }
+  #section-cross .cross-time { grid-area:time; text-align:right }
   #section-cross .cross-card-row {
     grid-template-columns:minmax(0,1fr) auto;
     grid-template-areas:"name rev" "chars refs" "ops ops";
@@ -3743,7 +3748,7 @@ button:active:not(:disabled) {
 
     <section id="section-cross" data-page="cross" class="card span-all">
       <h2 data-note="停在这一页时才读取会话与人格绑定">跨渠道互通</h2>
-      <div class="meta"><b>同一个编号 = 同一个圈子：</b>编号相同的会话互相记得对方说过的话，并共用同一张人格卡；<b>编号 0 = 不共享（独立会话）</b>，两条 0 号会话互不相干。</div>
+      <div class="meta"><b>同一个编号 = 同一个圈子：</b>编号相同的会话互相记得对方说过的话，并共用同一张人格卡；<b>编号 0 = 不共享（独立会话）</b>，两条 0 号会话互不相干，可以各自用「人格」那一列单独设卡。</div>
       <div class="meta">改完编号和人格点「保存」：分组与人格绑定<b>一次提交</b>，不会留下「组变了、人格还没变」的中间态；保存后立刻生效，不需要重启桥接。</div>
       <div class="cross-stats" id="crossStats" role="status" aria-live="polite">会话 — · 互通组 — · 已共享 —</div>
 
@@ -3757,7 +3762,7 @@ button:active:not(:disabled) {
         </div>
       </div>
       <div class="cross-window">
-        <div class="cross-head" aria-hidden="true"><span>会话</span><span>编号</span><span>缓冲</span><span>最后一条</span></div>
+        <div class="cross-head" aria-hidden="true"><span>会话</span><span>编号</span><span>人格</span><span>缓冲</span><span>最后一条</span></div>
         <div id="crossList"><div class="cross-empty">读取中…</div></div>
       </div>
       <div class="cross-actions">
@@ -7753,11 +7758,16 @@ function crossDirtyCount() {
   before.forEach((gid) => { if (!after.has(gid)) total += 1; });
   return total;
 }
-function crossPersonaOptions(current) {
+// 三态下拉的选项。withCurrent=true 时继承项写成「继承默认人格（当前：X）」——
+// 会话行用这个措辞：那一行只有一张卡在生效，默认人格是「当前会用的那张」，不是组里的默认。
+function crossPersonaOptions(current, withCurrent) {
   const cards = lastBind && Array.isArray(lastBind.cards) ? lastBind.cards : [];
   const defaultRole = lastBind && lastBind.defaultRole ? String(lastBind.defaultRole) : '';
+  const inheritSuffix = defaultRole
+    ? (withCurrent ? '（当前：' + esc(defaultRole) + '）' : '（' + esc(defaultRole) + '）')
+    : '';
   let html = '<option value="inherit"' + (current === 'inherit' ? ' selected' : '') + '>继承默认人格'
-    + (defaultRole ? '（' + esc(defaultRole) + '）' : '') + '</option>';
+    + inheritSuffix + '</option>';
   html += '<option value="none"' + (current === 'none' ? ' selected' : '') + '>不使用人格卡</option>';
   let matched = false;
   for (const card of cards) {
@@ -7803,8 +7813,16 @@ function crossSignature(list) {
   const cards = (lastBind && Array.isArray(lastBind.cards) ? lastBind.cards : [])
     .map((card) => String(card.name) + '@' + String(card.revision || '')).join('|');
   const defaultRole = lastBind && lastBind.defaultRole ? String(lastBind.defaultRole) : '';
+  // 每行的「生效人格」也必须进签名：否则把某条 0 号会话从卡 A 改成卡 B 时，
+  // key/label/gid 一个都没变，会话表就不会重画，下拉框会停在旧值上。
+  const bindings = crossBindingsBulk();
   return gids + '\u0003' + cards + '\u0003' + defaultRole + '\u0003'
-    + list.map((conversation) => [conversation.key, conversation.label, crossEffectiveGid(conversation)].join('\u0001')).join('\u0002');
+    + list.map((conversation) => {
+      const gid = crossEffectiveGid(conversation);
+      const scope = gid > 0 ? 'cross:' + gid : 'isolated:' + String(conversation.key || '');
+      const record = Object.prototype.hasOwnProperty.call(bindings, scope) ? bindings[scope] : null;
+      return [conversation.key, conversation.label, gid, crossBindingText(record)].join('\u0001');
+    }).join('\u0002');
 }
 function crossRowHtml(conversation) {
   const key = String(conversation.key || '');
@@ -7817,21 +7835,34 @@ function crossRowHtml(conversation) {
   if (nums.indexOf(gid) < 0) nums.push(gid);
   const options = nums.map((n) => '<option value="' + n + '"' + (gid === n ? ' selected' : '') + '>'
     + (n === 0 ? '0（不共享）' : '组 ' + n) + '</option>').join('');
-  const tag = persona.mode === 'none'
-    ? '<span class="cross-tag is-none">不使用人格卡</span>'
-    : persona.mode === 'inherit'
-      ? '<span class="cross-tag">' + esc(persona.label) + '</span>'
-      : '<span class="cross-tag is-card">人格卡：' + esc(persona.name) + '</span>';
-  const tip = '来源：' + persona.sourceLabel + ' · 内容版本：' + persona.revision;
+  // 编号 >0：人格由互通组统一决定，这一行只显示 chip（带 title 说明去哪改）。
+  // 编号 =0：这一行就是 isolated:<key> 作用域，给一个能单独设卡的三态下拉。
+  let personaCell;
+  if (gid > 0) {
+    const tag = persona.mode === 'none'
+      ? '<span class="cross-tag is-none">不使用人格卡</span>'
+      : persona.mode === 'inherit'
+        ? '<span class="cross-tag">' + esc(persona.label) + '</span>'
+        : '<span class="cross-tag is-card">人格卡：' + esc(persona.name) + '</span>';
+    personaCell = '<div class="cross-persona-cell" title="' + esc('来源：' + persona.sourceLabel + ' · 内容版本：' + persona.revision
+      + ' · 由互通组 ' + gid + ' 统一设置（这条会话不能单独改）') + '">' + tag + '</div>';
+  } else {
+    const record = crossBindingRecord(scope);
+    const current = record ? (record.mode === 'none' ? 'none' : 'card:' + String(record.name || '')) : 'inherit';
+    personaCell = '<div class="cross-persona-cell"><select class="cross-pick cross-persona" data-session="' + esc(key)
+      + '" aria-label="' + esc(label + ' 的人格（编号 0 = 不共享）') + '">'
+      + crossPersonaOptions(current, true) + '</select>'
+      + (persona.missing ? '<div class="cross-warn">卡缺失，会话暂停输出待修复</div>' : '') + '</div>';
+  }
   return '<div class="cross-row" data-key="' + esc(key) + '">'
     + '<div class="cross-conv">'
     + '<span class="cross-tag ' + (group ? 'g' : 'p') + '">' + (group ? '群' : '私聊') + '</span>'
     + '<span class="cross-name">' + esc(label) + '</span>'
     + '<span class="cross-key">' + esc(key) + '</span>'
-    + '<span title="' + esc(tip) + '">' + tag + '</span>'
     + '</div>'
     + '<select class="cross-pick" data-key="' + esc(key) + '" aria-label="' + esc(label + ' 的互通组编号') + '">'
     + options + '</select>'
+    + personaCell
     + '<div class="cross-count">' + crossCountText(conversation.count) + '</div>'
     + '<div class="cross-time">' + esc(crossAgo(conversation.lastAt)) + '</div>'
     + '</div>';
@@ -7858,6 +7889,21 @@ function crossImpactLines(impact) {
   }
   if (invalid.length) lines.push('无效绑定：' + invalid.map((item) => String(item.scope)).join('、'));
   return lines;
+}
+// 编号 >0 却还留着 isolated:<key> 绑定 = 「切回 0 会恢复」的设置。它此刻不生效，
+// 保存前/保存后都要说一句，否则用户会以为那张卡还在起作用（dev-doc §6）。
+function crossParkedIsolatedLines() {
+  const bindings = crossBindingsBulk();
+  const parked = [];
+  for (const conversation of crossConversations()) {
+    const key = String(conversation.key || '');
+    if (!key || crossEffectiveGid(conversation) <= 0) continue;
+    if (!Object.prototype.hasOwnProperty.call(bindings, 'isolated:' + key)) continue;
+    parked.push(String(conversation.label || key));
+  }
+  if (!parked.length) return [];
+  return ['这些会话原有的独立人格设置会保存在配置里、此刻不生效，切回 0 时恢复：'
+    + parked.slice(0, 6).join('、') + (parked.length > 6 ? ' 等 ' + parked.length + ' 条' : '')];
 }
 function crossMergeChoicePayload() {
   // 只提交「当前面板上正报着的冲突」里的选择：拿着一个已经不算冲突的 scope 去 apply，
@@ -8201,15 +8247,48 @@ function refreshCrossBoard(force = false) {
   refreshCross(force);
   refreshBindings(force);
 }
+// 会话行里有两个下拉：编号（data-key）与「人格」（data-session，只在编号 0 时存在）。
+// 人格下拉写的是 isolated:<会话key> 作用域，和组人格共用同一份 bindDraft / 同一套三态语义。
+function crossSessionPersonaChange(select) {
+  const key = String(select.dataset.session || '');
+  if (!key) return;
+  const scope = 'isolated:' + key;
+  const value = String(select.value || '');
+  const record = value === 'inherit' ? null
+    : value === 'none' ? { mode: 'none' }
+      : { mode: 'card', name: value.slice('card:'.length) };
+  const base = crossBaseBindings();
+  const saved = Object.prototype.hasOwnProperty.call(base, scope) ? base[scope] : null;
+  if (crossBindingEqual(record, saved)) bindDraft.delete(scope);
+  else bindDraft.set(scope, record);
+  bindRenderedSig = null;
+  crossRenderedSig = null;
+  paintCross();
+}
 function crossOnInput(event) {
-  const select = event.target && event.target.closest ? event.target.closest('select[data-key]') : null;
+  const target = event.target;
+  const personaSelect = target && target.closest ? target.closest('select[data-session]') : null;
+  if (personaSelect && personaSelect.dataset.session) { crossSessionPersonaChange(personaSelect); return; }
+  const select = target && target.closest ? target.closest('select[data-key]') : null;
   if (!select || !select.dataset.key) return;
   const key = select.dataset.key;
   const gid = crossGid(select.value);
+  const before = crossDraft.has(key) ? crossGid(crossDraft.get(key)) : crossSavedGid(key);
   if (gid === crossSavedGid(key)) crossDraft.delete(key);
   else crossDraft.set(key, String(gid));
   crossRenderedSig = null;
   bindRenderedSig = null;
+  // 从「不共享」挪进某个组时，原来的独立人格设置会留在 config 里（切回 0 恢复），
+  // 但此刻不生效 —— 不说清楚，用户会以为那张卡还在起作用。
+  if (before === 0 && gid > 0 && !crossNotice.stale
+    && Object.prototype.hasOwnProperty.call(crossBaseBindings(), 'isolated:' + key)) {
+    crossNotice = {
+      kind: '',
+      lines: ['该会话原有的独立人格设置已保存但不生效，切回 0 时恢复；它现在跟随互通组 ' + gid + ' 的人格。'],
+      conflicts: crossNotice.conflicts,
+      stale: false
+    };
+  }
   paintCross();
 }
 // 组上的三态下拉：继承 = 删记录，不用人格 = 一条 mode:'none'，指定 = 一条 mode:'card'。
@@ -8286,9 +8365,12 @@ async function crossPreview() {
     const conflicts = r.impact && Array.isArray(r.impact.conflicts) ? r.impact.conflicts : [];
     crossNotice = {
       kind: conflicts.length ? 'warn' : '',
-      lines: crossImpactLines(r.impact).concat(conflicts.length
-        ? ['合并后两个人格不同：先在下面选一个最终人格，再点「保存」。没选之前保存会零修改。']
-        : []),
+      lines: crossImpactLines(r.impact).concat(
+        crossParkedIsolatedLines(),
+        conflicts.length
+          ? ['合并后两个人格不同：先在下面选一个最终人格，再点「保存」。没选之前保存会零修改。']
+          : []
+      ),
       conflicts,
       stale: false
     };
@@ -8370,6 +8452,8 @@ async function crossSave() {
         throw new Error((data && data.error) || CROSS_SAVE_REASONS[reason] || ('HTTP ' + result.status));
       }
       // 成功：先清草稿（不清会把刚提交的这笔再提交一次），再按新 revision 重读两个来源。
+      // 停用的独立人格要在这之前算 —— 清完草稿，分组表就跟着新快照变了，算出来是空的。
+      const parkedLines = crossParkedIsolatedLines();
       crossDraft.clear();
       bindDraft.clear();
       mergeDraft.clear();
@@ -8389,7 +8473,7 @@ async function crossSave() {
         kind: 'ok',
         lines: ['已保存配置（revision ' + String(data.revision || '') + '）：将重建 ' + rebuild + ' 条、只改绑法 ' + rebind + ' 条。'
           + '旧会话停止中' + (failed.length ? '（' + failed.length + ' 条远端停止失败，只记日志，不影响这次保存）' : '')
-          + '；下一次唤醒才会用新人格。'].concat(notes),
+          + '；下一次唤醒才会用新人格。'].concat(notes, parkedLines),
         conflicts: [],
         stale: false
       };

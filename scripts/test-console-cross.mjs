@@ -69,7 +69,7 @@ for (const id of [
   const n = (html.match(new RegExp(`id="${id}"`, 'g')) ?? []).length;
   ok(n === 1, `元素 ${id}`, `${n} 处`);
 }
-ok(/<div class="cross-head" aria-hidden="true"><span>会话<\/span><span>编号<\/span><span>缓冲<\/span><span>最后一条<\/span><\/div>/.test(panel), '会话表头四列：会话 / 编号 / 缓冲 / 最后一条');
+ok(/<div class="cross-head" aria-hidden="true"><span>会话<\/span><span>编号<\/span><span>人格<\/span><span>缓冲<\/span><span>最后一条<\/span><\/div>/.test(panel), '会话表头五列：会话 / 编号 / 人格 / 缓冲 / 最后一条');
 ok(/<div class="cross-groups-head" aria-hidden="true"><span>编号<\/span><span>成员<\/span><span>生效人格<\/span><span>内容版本<\/span><span>状态<\/span><\/div>/.test(panel), '组总览表头五列：编号 / 成员 / 生效人格 / 内容版本 / 状态');
 ok(/<button id="crossSave" class="primary" type="button">保存<\/button>/.test(panel), '保存按钮是 primary 且显式 type="button"');
 ok(/<button id="crossPreview" class="small" type="button">预览影响<\/button>/.test(panel), '预览影响按钮在');
@@ -95,7 +95,7 @@ ok(/\.cross-group-row[\s\S]{0,80}grid-template-columns:52px/.test(groupsCss), '�
 ok(/\.cross-tag\.dirty/.test(groupsCss) && /\.cross-tag\.idle/.test(groupsCss), '状态标签有「待保存 / 闲置组」两种样式');
 
 console.log('## 组行：三态人格下拉');
-ok(/function crossPersonaOptions\(current\)/.test(crossJs), '三态下拉由一个函数生成（组行与会话行同一套文案）');
+ok(/function crossPersonaOptions\(current, withCurrent\)/.test(crossJs), '三态下拉由一个函数生成（组行与会话行同一套文案）');
 ok(/<option value="inherit"/.test(crossJs) && /继承默认人格/.test(crossJs), '第一态：继承默认人格（无记录）');
 ok(/<option value="none"/.test(crossJs) && /不使用人格卡/.test(crossJs), '第二态：不使用人格卡（mode:"none"）');
 ok(/const value = 'card:' \+ String\(card\.name\)/.test(crossJs) && /人格卡：/.test(crossJs), '第三态：人格库里的每一张卡');
@@ -125,6 +125,28 @@ ok(/lastCross\.enabled === false/.test(crossJs), '互通开关关闭时统计行
 ok(/esc\(label\)/.test(crossJs) && /esc\(key\)/.test(crossJs), 'label / key 都经过 esc 再进 DOM');
 ok(/\.cross-row\.is-shared \{ box-shadow:inset 3px 0 0 var\(--accent\) \}/.test(crossCss), '同组会话有左侧强调线');
 ok(/row\.classList\.toggle\('is-shared'/.test(crossJs), '强调线按当前编号实时切换');
+
+console.log('## 会话行：编号 0 可以单独设人格');
+// 人格格的分支切片：证明「有组 → 只读 chip」「编号 0 → 可编辑下拉」不是两处各写一半。
+const personaStart = crossJs.indexOf('let personaCell;');
+const personaEnd = crossJs.indexOf("return '<div class=\"cross-row\"", personaStart);
+const personaJs = personaStart > -1 && personaEnd > personaStart ? crossJs.slice(personaStart, personaEnd) : '';
+ok(personaJs.length > 0, '人格格由 personaCell 分支生成', `${personaJs.length} 字符`);
+ok(/if \(gid > 0\) \{/.test(personaJs), '编号 >0：走只读 chip 分支');
+ok(/由互通组 ' \+ gid \+ ' 统一设置（这条会话不能单独改）/.test(personaJs), '编号 >0 的 chip 带 title「由互通组 N 统一设置」');
+ok(personaJs.indexOf('data-session') > personaJs.indexOf('统一设置'), 'data-session 下拉只出现在 else（编号 0）分支里');
+ok(/class="cross-pick cross-persona" data-session="' \+ esc\(key\)/.test(crossJs), '编号 0 的行给出 data-session 人格下拉');
+ok(/crossPersonaOptions\(current, true\)/.test(crossJs), '会话下拉用「继承默认人格（当前：X）」的措辞');
+ok(/withCurrent \? '（当前：' \+ esc\(defaultRole\) \+ '）'/.test(crossJs), 'withCurrent 分支拼出「（当前：默认人格）」');
+ok(/const scope = 'isolated:' \+ key;/.test(crossJs) && /bindDraft\.set\(scope, record\)/.test(crossJs), '改会话人格写的是 isolated:<会话key> 作用域的草稿');
+ok(/function crossSessionPersonaChange\(select\)/.test(crossJs) && /closest\('select\[data-session\]'\)/.test(crossJs), '会话人格下拉有自己的 change 处理（与编号下拉分流）');
+ok(/const record = value === 'inherit' \? null/.test(crossJs) && /value === 'none' \? \{ mode: 'none' \}/.test(crossJs), '三态语义与组人格一致（继承=删记录 / none / card）');
+ok(/crossBindingText\(record\)\]\.join\('\\u0001'\)/.test(crossJs), '每行生效人格进渲染签名（改卡后下拉会重画，不会停在旧值）');
+ok(/function crossParkedIsolatedLines\(\)/.test(crossJs), '「切回 0 会恢复」有专门的计算函数');
+ok(/切回 0 时恢复/.test(crossJs), '提示文案写明切回 0 恢复');
+ok(/crossParkedIsolatedLines\(\),/.test(crossJs), '预览影响里带上这条提示');
+ok(/concat\(notes, parkedLines\)/.test(crossJs), '保存成功的回执里也带上这条提示');
+ok(/before === 0 && gid > 0/.test(crossJs), '从 0 挪进组时当场提示「独立人格已保存但不生效」');
 
 console.log('## 读写接口');
 ok(/api\('\/api\/socialV2\/cross'\)/.test(crossJs), 'GET /api/socialV2/cross（读会话列表与限额）');
@@ -178,8 +200,15 @@ console.log('## 滑动窗口');
 ok(/\.cross-window \{[^}]*max-height:340px/.test(crossCss), '外层容器固定高度 340px');
 ok(/\.cross-window \{[^}]*overflow-y:auto/.test(crossCss), '外层容器纵向滚动');
 ok(/\.cross-head \{[^}]*position:sticky; top:0/.test(crossCss), '表头 sticky 在窗口顶部');
-ok(/grid-template-columns:minmax\(0,1fr\) 112px 62px 88px/.test(crossCss), '表头与行共用四列网格（编号列放得下「0（不共享）」）');
+ok(/grid-template-columns:minmax\(0,1fr\) 112px minmax\(140px,200px\) 62px 88px/.test(crossCss), '表头与行共用五列网格（编号列放得下「0（不共享）」，人格列放得下卡名）');
 ok(!/<pre/.test(panel), '面板里没有代码块');
+
+console.log('## 窄屏（≤760px）不再多挤一列');
+ok(/"conv conv" "pick persona" "count time"/.test(groupsCss), '会话行两段式：会话一行、编号+人格一行、缓冲+时间一行');
+ok(/#section-cross \.cross-persona-cell \{ grid-area:persona \}/.test(groupsCss), '人格格占 persona 区域（跟着编号那行走）');
+ok(/#section-cross \.cross-row>\.cross-pick:not\(\.cross-persona\) \{ grid-area:pick \}/.test(groupsCss), '编号下拉与人格下拉分属两格，不互相盖住');
+ok(/#section-cross \.cross-time \{ grid-area:time; text-align:right \}/.test(groupsCss), '最后一条仍右对齐（两段式里没丢格）');
+ok(/@media \(max-width:760px\) \{/.test(groupsCss), '断点跟页面一致（760px）');
 
 console.log('## 刷新接线');
 ok(/if \(currentConsolePage === 'cross'\) refreshCrossBoard\(\);/.test(html), 'refresh() 里按当前视图守着跨渠道页（两个来源一起刷）');
