@@ -66,6 +66,12 @@ import * as crossCore from '../src/cross-core.js';
 // ReferenceError → 所有 HTTP 用例一起红（与 cross / identity / device 同理）。
 // 导出名已核对：14 个导出与其它 spread 模块均不重名。
 import * as roleBinding from '../src/role-binding.js';
+// 人格卡解析（角色卡按 〔一代〕/〔二代〕 筛小节）：bridge.js 顶层 import 了
+// GEN1_ROLE_LINE_RE / parseRoleSections / roleCharStats / roleSectionReport / selectRoleText，
+// 这一行 import 同样会在下面被剥掉。之前 context 里**没人**提供这几个绑定，所以任何
+// 「默认人格不为空 + 真的去取提示词」的用例都会 ReferenceError（旧用例恰好都停在角色为空的
+// 分支上，问题一直没暴露）。role-card.js 零依赖、零 I/O，整份导出直接铺进 context。
+import * as roleCard from '../src/role-card.js';
 // 生图（T-017）：image-core 是纯逻辑（配置归一 / 提示词清洗与审计 / 尺寸 / 额度 /
 // 上游响应解析 / 用量序列化 / 来源白名单），image-gen 是 IO 薄层（取图 / 落盘 / 读回 /
 // 索引）。bridge.js 顶层把这两个模块的导出都 import 成了同名绑定，下面按行剥掉 import
@@ -206,6 +212,14 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     sendToQQ, sendStickerV2, handleIncoming, startConsoleServer, cfg, state, api, promptQueues,
     getSocialV2State, appendSocialV2Message, recordSentMessagesV2,
     buildWakePromptV2, buildWakeSnapshotV2, sendWakePromptV2, socialV2,
+    // 人格绑定（T-035 阶段 C3）：按会话 key 解析生效卡、提示词注入、会话策略快照。
+    // 这几个是「同组一致 / 组间不同 / gid=0 不聚合 / 卡缺失不回落默认」的可断言入口；
+    // 不导出它们，测试就只能去读源码字符串，那等于没测到行为。
+    roleFor, roleRawContent, roleHintForMode, currentRoleHint, currentRoleHintV2, currentRoleLine,
+    roleContentRevision, sessionPolicy,
+    // 部署迁移（T-035 C3 / dev-doc §9）：旧三元组基线的采纳走 reconcileSessionPolicies 的真实
+    // 路径，所以直接导出它（+ isCurrentSession）来断言「采纳了 / 退役了」，而不是只读源码字符串。
+    reconcileSessionPolicies, isCurrentSession,
     refreshMode, modeAllowed, trackTurnEvent, replayPendingWakeReasonsV2,
     collectors, setupSleepTimerV2,
     getInitialPrompt, setInitialPrompt, loadInitialPrompts, formatInitialPromptV2,
@@ -261,6 +275,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...socialAuto,
     ...crossCore,
     ...roleBinding,
+    ...roleCard,
     ...imageCore, ...imageGen,
     ...identityCore,
     ...heyboxCore,

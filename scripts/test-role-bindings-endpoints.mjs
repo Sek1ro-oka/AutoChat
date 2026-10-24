@@ -355,6 +355,150 @@ await test('两个不同人格的完整组合并 → 409 且零修改', async ()
   }
 });
 
+// ── 5b. apply 带 mergeChoice：一步解决合并冲突（契约 §3.1） ────────────────
+await test('apply 带 mergeChoice：一步解决合并冲突，并按选定后的人格重算影响', async () => {
+  const { h } = await makeHarness();
+  try {
+    await withServer(h, async (port) => {
+      const current = (await call(port, '/api/roles/bindings', { headers: ADMIN })).json;
+      const res = await call(port, '/api/roles/bindings/apply', {
+        method: 'POST',
+        headers: ADMIN,
+        body: {
+          baseRevision: current.revision,
+          // 组 2 的会话整个搬进组 1（完整合并 → merge-persona 冲突），同时选定最终人格。
+          groups: { ...GROUPS, 'group:20002': 1 },
+          mergeChoice: { 'cross:1': '乙' }
+        }
+      });
+      assert.equal(res.status, 200, res.body);
+      const body = res.json;
+      assert.equal(body.ok, true);
+      assert.deepEqual(body.resolvedConflicts, [{ scope: 'cross:1', name: '乙' }]);
+
+      // 三处一次落盘，bindings 用用户选的那张卡
+      const onDisk = readConfig(h);
+      assert.deepEqual(onDisk.role.bindings, {
+        'cross:1': { mode: 'card', name: '乙' },
+        'cross:2': { mode: 'card', name: '乙' }
+      });
+      assert.deepEqual(onDisk.role.gids, [1, 2, 3]);
+      assert.deepEqual(onDisk.socialV2.cross.groups, { ...GROUPS, 'group:20002': 1 });
+      assert.deepEqual(h.cfg.role.bindings, onDisk.role.bindings, '内存同步');
+      assert.deepEqual(h.cfg.socialV2.cross.groups, onDisk.socialV2.cross.groups);
+
+      // 影响必须是「选定之后」的那一版：1 组三个会话全都要重建（内容变了 / 组变了），
+      // gid=0 的继承者不动。
+      assert.deepEqual(body.applied.rebuild, ['group:10001', 'group:20002', 'private:20001']);
+      assert.deepEqual(body.retire.started, ['group:10001', 'group:20002', 'private:20001']);
+      assert.deepEqual(body.retire.failed, []);
+      assert.equal(h.state.sessions['private:20004'], 'sess-20004');
+      assert.equal(h.state.sessions['group:10001'], undefined, 'rebuild 的会话必须退役');
+    });
+  } finally {
+    await h.close();
+  }
+});
+
+// ── 5c. mergeChoice 非法 → 400 零修改 ─────────────────────────────────────
+await test('mergeChoice 非法（非候选 / 非本次冲突 / 形状坏）→ 400 且零修改', async () => {
+  const { h, logs } = await makeHarness();
+  try {
+    await withServer(h, async (port) => {
+      const current = (await call(port, '/api/roles/bindings', { headers: ADMIN })).json;
+      const bytesBefore = configBytes(h);
+      const cases = [
+        [{ 'cross:1': '丙' }, '候选只有 甲 / 乙'],
+        [{ 'cross:9': '乙' }, 'cross:9 不是本次冲突'],
+        [{ 'cross:1': 42 }, '值必须是字符串'],
+        [[], 'mergeChoice 必须是对象']
+      ];
+      for (const [mergeChoice, why] of cases) {
+        const res = await call(port, '/api/roles/bindings/apply', {
+          method: 'POST',
+          headers: ADMIN,
+          body: { baseRevision: current.revision, groups: { ...GROUPS, 'group:20002': 1 }, mergeChoice }
+        });
+        assert.equal(res.status, 400, `${why}：${res.body}`);
+        assert.equal(res.json.ok, false);
+        assert.ok(configBytes(h).equals(bytesBefore), `${why}：400 之后 config.json 必须一字未改`);
+      }
+      const after = (await call(port, '/api/roles/bindings', { headers: ADMIN })).json;
+      assert.equal(after.revision, current.revision, 'revision 不得变化');
+      assert.equal(retireLogs(logs).length, 0, '400 不得退役任何会话');
+      assert.equal(h.state.sessions['group:20002'], 'sess-20002');
+    });
+  } finally {
+    await h.close();
+  }
+});
+
+// ── 5d. mergeChoice 只解决点名的 scope：仍有未解决冲突 → 409 零修改 ────────
+await test('两处独立合并只选了一处 → 剩下的冲突仍 409 且零修改', async () => {
+  const mergeGroups = {
+    'group:10001': 1,
+    'private:20001': 1,
+    'group:20002': 2,
+    'group:30002': 3,
+    'private:30003': 3,
+    'group:40002': 4
+  };
+  const { h } = await makeHarness({
+    config: {
+      role: {
+        maxInjectChars: 13000,
+        bindings: {
+          'cross:1': { mode: 'card', name: '甲' },
+          'cross:2': { mode: 'card', name: '乙' },
+          'cross:3': { mode: 'card', name: '甲' },
+          'cross:4': { mode: 'card', name: '丙' }
+        },
+        gids: [1, 2, 3, 4]
+      },
+      socialV2: { cross: { groups: mergeGroups } },
+      social: { enabled: false }
+    }
+  });
+  try {
+    await withServer(h, async (port) => {
+      const current = (await call(port, '/api/roles/bindings', { headers: ADMIN })).json;
+      const bytesBefore = configBytes(h);
+      const merged = { ...mergeGroups, 'group:20002': 1, 'group:40002': 3 };
+      const res = await call(port, '/api/roles/bindings/apply', {
+        method: 'POST',
+        headers: ADMIN,
+        body: { baseRevision: current.revision, groups: merged, mergeChoice: { 'cross:1': '乙' } }
+      });
+      assert.equal(res.status, 409, res.body);
+      assert.equal(res.json.ok, false);
+      assert.deepEqual(res.json.conflicts.map((item) => item.scope), ['cross:3'], '只剩没选的那一处');
+      assert.deepEqual(res.json.conflicts[0].candidates, [{ gid: 3, name: '甲' }, { gid: 4, name: '丙' }]);
+      assert.ok(configBytes(h).equals(bytesBefore), '冲突未决时磁盘零修改');
+
+      // 把两处都选掉 → 一次通过
+      const ok = await call(port, '/api/roles/bindings/apply', {
+        method: 'POST',
+        headers: ADMIN,
+        body: {
+          baseRevision: current.revision,
+          groups: merged,
+          mergeChoice: { 'cross:1': '乙', 'cross:3': '丙' }
+        }
+      });
+      assert.equal(ok.status, 200, ok.body);
+      assert.deepEqual(ok.json.resolvedConflicts, [
+        { scope: 'cross:1', name: '乙' },
+        { scope: 'cross:3', name: '丙' }
+      ]);
+      const onDisk = readConfig(h);
+      assert.deepEqual(onDisk.role.bindings['cross:1'], { mode: 'card', name: '乙' });
+      assert.deepEqual(onDisk.role.bindings['cross:3'], { mode: 'card', name: '丙' });
+    });
+  } finally {
+    await h.close();
+  }
+});
+
 // ── 6. 写盘失败 → 500 且内存不变 ───────────────────────────────────────────
 await test('写盘失败（注入 renameSync 抛 EPERM）→ 500，内存 revision 与磁盘都不变', async () => {
   const failingFs = {

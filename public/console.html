@@ -1895,7 +1895,7 @@ button:active:not(:disabled) {
 }
 #section-cross .cross-head,
 #section-cross .cross-row {
-  display:grid; grid-template-columns:minmax(0,1fr) 78px 62px 88px;
+  display:grid; grid-template-columns:minmax(0,1fr) 112px 62px 88px;
   gap:10px; align-items:center; padding:8px 12px
 }
 #section-cross .cross-head {
@@ -1922,11 +1922,6 @@ button:active:not(:disabled) {
   font-size:13px; font-weight:600; color:var(--text); min-width:0; overflow-wrap:anywhere
 }
 #section-cross .cross-key { font-size:11px; color:var(--muted-soft); overflow-wrap:anywhere }
-/* 数字框定宽：主样式里 input[type=number]{width:100%}，这里靠 #section-cross 的权重压过去。 */
-#section-cross input.cross-num {
-  width:100%; min-width:0; padding:5px 6px; text-align:center;
-  font-variant-numeric:tabular-nums
-}
 #section-cross .cross-count,
 #section-cross .cross-time {
   font-size:12px; color:var(--text-secondary); text-align:center; font-variant-numeric:tabular-nums
@@ -1940,6 +1935,135 @@ button:active:not(:disabled) {
 #section-cross .cross-limit { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted) }
 #section-cross .cross-limit input { width:110px }
 #section-cross .cross-buffer { margin-top:8px; font-size:11px; color:var(--muted-soft) }
+
+/* ===== 互通组人格（T-035 C4）=====
+   结构照 work/agent-tasks/T-035/demo/index.html：组总览在最上面、**吸顶 + 独立滚动**，
+   会话列表再长也能直接改组人格（addendum-r2 §5 A15）。所有选择器都挂 #section-cross，
+   深色主题吃同名变量的另一套值，也不会外溢到别的页。 */
+#section-cross .cross-groups {
+  position:sticky; top:8px; z-index:6;
+  max-height:42vh; overflow:auto;
+  margin-top:14px; border:1px solid var(--border-subtle); border-radius:12px;
+  background:var(--surface); box-shadow:0 2px 10px rgba(20,30,60,.06)
+}
+#section-cross .cross-groups-head,
+#section-cross .cross-group-row {
+  display:grid; grid-template-columns:52px minmax(0,1fr) minmax(120px,172px) 72px 64px;
+  gap:10px; align-items:center; padding:8px 12px
+}
+#section-cross .cross-groups-head {
+  position:sticky; top:0; z-index:1;
+  background:var(--surface-subtle); border-bottom:1px solid var(--border-subtle);
+  font-size:11px; color:var(--muted-soft); letter-spacing:.02em
+}
+#section-cross .cross-group-row { border-bottom:1px solid var(--border-subtle) }
+#section-cross .cross-group-row:last-child { border-bottom:0 }
+#section-cross .cross-group-gid {
+  font-size:13px; font-weight:600; color:var(--text); font-variant-numeric:tabular-nums
+}
+#section-cross .cross-group-count { font-size:12px; color:var(--text-secondary) }
+#section-cross .cross-group-member { font-size:12px; color:var(--text-secondary); overflow-wrap:anywhere }
+#section-cross .cross-muted { font-size:11.5px; color:var(--muted-soft) }
+#section-cross .cross-rev {
+  font-size:11.5px; color:var(--muted); font-family:ui-monospace,Consolas,monospace; overflow-wrap:anywhere
+}
+#section-cross .cross-warn { margin-top:4px; font-size:11px; color:var(--err) }
+/* 主样式里 select 是 width:100% + padding:9px 11px；行内下拉要窄一点才塞得进网格。 */
+#section-cross select.cross-pick {
+  width:100%; min-width:0; padding:5px 8px; font-size:12px; border-radius:8px
+}
+#section-cross .cross-tag.dirty { color:var(--warn-fg); border-color:var(--warn-fg) }
+#section-cross .cross-tag.idle { color:var(--muted); border-style:dashed }
+#section-cross .cross-tag.is-card { color:var(--accent); border-color:var(--accent) }
+#section-cross .cross-tag.is-none { color:var(--warn-fg); border-color:var(--warn-fg) }
+#section-cross .cross-groups-foot {
+  display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  padding:8px 12px; border-top:1px solid var(--border-subtle);
+  position:sticky; bottom:0; background:var(--surface)
+}
+#section-cross .cross-groups-foot>.meta { margin:0; font-size:11.5px }#section-cross #crossDirty, #section-cross #crossRevision { margin:0 }
+#section-cross #crossImpact { margin-top:8px }
+#section-cross #crossImpact:empty { display:none }
+#section-cross .cross-notice {
+  margin-top:6px; padding:8px 10px; border-radius:10px;
+  border:1px solid var(--border-subtle); background:var(--surface-subtle);
+  font-size:12px; line-height:1.7; color:var(--text-secondary); overflow-wrap:anywhere
+}
+#section-cross .cross-notice.ok { border-color:var(--ok); color:var(--ok) }
+#section-cross .cross-notice.warn { border-color:var(--warn-fg); color:var(--warn-fg) }
+#section-cross .cross-notice.err { border-color:var(--err); color:var(--err) }
+#section-cross .cross-merge {
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  margin-top:8px; padding:8px 10px; border-radius:10px;
+  border:1px solid var(--warn-fg); font-size:12px; color:var(--warn-fg)
+}
+#section-cross .cross-merge select { width:auto; min-width:160px; padding:5px 8px; font-size:12px }
+/* 人格卡：折叠区里一张小表，操作是行内文字按钮。 */
+#section-cross .cross-cards-head,
+#section-cross .cross-card-row {
+  display:grid; grid-template-columns:minmax(0,1fr) 62px 82px minmax(0,1.3fr) auto;
+  gap:10px; align-items:center; padding:8px 2px
+}
+#section-cross .cross-cards-head {
+  font-size:11px; color:var(--muted-soft); letter-spacing:.02em;
+  border-bottom:1px solid var(--border-subtle)
+}
+#section-cross .cross-card-row { border-bottom:1px solid var(--border-subtle); font-size:12px }
+#section-cross .cross-card-row:last-child { border-bottom:0 }
+#section-cross .cross-card-name { font-size:13px; font-weight:600; color:var(--text); overflow-wrap:anywhere }
+#section-cross .cross-card-ops { display:flex; align-items:center; gap:6px; flex-wrap:wrap; justify-content:flex-end }
+#section-cross .cross-card-ops button { font-size:11.5px; padding:2px 4px }
+#section-cross .cross-card-panel {
+  margin:2px 0 12px; padding:10px 12px; border:1px dashed var(--border-subtle);
+  border-radius:10px; background:var(--surface-subtle); font-size:12px; line-height:1.75
+}
+#section-cross .cross-card-panel .cross-rev { font-size:11.5px }
+#section-cross .cross-card-content {
+  margin-top:6px; max-height:200px; overflow:auto; white-space:pre-wrap;
+  overflow-wrap:anywhere; font-size:11.5px; color:var(--text-secondary)
+}
+#section-cross .cross-card-copy {
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:8px
+}
+#section-cross .cross-card-copy select { width:auto; min-width:140px; padding:5px 8px; font-size:12px }
+#section-cross .cross-cards-foot { margin-top:10px; display:flex; align-items:center; gap:12px; flex-wrap:wrap }
+#section-cross .cross-cards-foot>.meta { margin:0; font-size:11.5px }
+/* 窄屏：五列表格会被挤成一列一个字，所以组行 / 会话行改成两段式（与页面自己的 760px 断点一致）。
+   表头在这里让位 —— 每段都有 aria-label 或自带单位（「条会话」「条」「分钟前」）。 */
+@media (max-width:760px) {
+  #section-cross .cross-groups-head,
+  #section-cross .cross-cards-head { display:none }
+  #section-cross .cross-group-row {
+    grid-template-columns:auto minmax(0,1fr);
+    grid-template-areas:"gid state" "members members" "persona persona" "rev rev";
+    row-gap:6px
+  }
+  #section-cross .cross-group-gid { grid-area:gid }
+  #section-cross .cross-group-state { grid-area:state; text-align:right }
+  #section-cross .cross-group-members { grid-area:members }
+  #section-cross .cross-group-persona { grid-area:persona }
+  #section-cross .cross-group-row>.cross-rev { grid-area:rev }
+  #section-cross .cross-head { display:none }
+  #section-cross .cross-row {
+    grid-template-columns:minmax(0,1fr) auto auto;
+    grid-template-areas:"conv conv conv" "pick count time";
+    row-gap:6px
+  }
+  #section-cross .cross-conv { grid-area:conv }
+  #section-cross .cross-row>.cross-pick { grid-area:pick }
+  #section-cross .cross-count { grid-area:count }
+  #section-cross .cross-time { grid-area:time }
+  #section-cross .cross-card-row {
+    grid-template-columns:minmax(0,1fr) auto;
+    grid-template-areas:"name rev" "chars refs" "ops ops";
+    row-gap:6px
+  }
+  #section-cross .cross-card-name { grid-area:name }
+  #section-cross .cross-card-row>.cross-rev { grid-area:rev }
+  #section-cross .cross-card-chars { grid-area:chars }
+  #section-cross .cross-card-refs { grid-area:refs }
+  #section-cross .cross-card-ops { grid-area:ops; justify-content:flex-start }
+}
 
 /* ===== 名字映射（T-018）=====
    骨架照跨渠道互通（T-016）：固定高度的滑动窗口 + sticky 表头 + 行内网格。
@@ -3618,17 +3742,43 @@ button:active:not(:disabled) {
     </section>
 
     <section id="section-cross" data-page="cross" class="card span-all">
-      <h2 data-note="停在这一页时才读取会话列表">跨渠道互通</h2>
-      <div class="meta"><b>同一个编号 = 同一个圈子：编号相同的会话可以互相回忆对方说过的话；0 = 不共享。</b>列表只显示会话元数据，不展示聊天正文。改完编号点「保存分组」，桥接收到后立刻按新分组工作。</div>
+      <h2 data-note="停在这一页时才读取会话与人格绑定">跨渠道互通</h2>
+      <div class="meta"><b>同一个编号 = 同一个圈子：</b>编号相同的会话互相记得对方说过的话，并共用同一张人格卡；<b>编号 0 = 不共享（独立会话）</b>，两条 0 号会话互不相干。</div>
+      <div class="meta">改完编号和人格点「保存」：分组与人格绑定<b>一次提交</b>，不会留下「组变了、人格还没变」的中间态；保存后立刻生效，不需要重启桥接。</div>
       <div class="cross-stats" id="crossStats" role="status" aria-live="polite">会话 — · 互通组 — · 已共享 —</div>
+
+      <div class="cross-groups" id="crossGroups" data-scenario="group-overview-sticky" role="region" aria-label="互通组总览">
+        <div class="cross-groups-head" aria-hidden="true"><span>编号</span><span>成员</span><span>生效人格</span><span>内容版本</span><span>状态</span></div>
+        <div id="crossGroupRows"><div class="cross-empty">读取中…</div></div>
+        <div class="cross-groups-foot">
+          <button id="crossGroupAdd" class="small" type="button" data-scenario="new-group">+ 新增互通组</button>
+          <span class="meta">编号升序，不补空号</span>
+          <button id="crossIdleClear" class="small danger" type="button" data-scenario="idle-group">清除闲置绑定</button>
+        </div>
+      </div>
       <div class="cross-window">
         <div class="cross-head" aria-hidden="true"><span>会话</span><span>编号</span><span>缓冲</span><span>最后一条</span></div>
         <div id="crossList"><div class="cross-empty">读取中…</div></div>
       </div>
       <div class="cross-actions">
-        <button id="crossSave" class="primary" type="button">保存分组</button>
-        <p class="cross-hint">保存后立刻生效，不需要重启桥接。</p>
+        <span class="meta" id="crossDirty" role="status" aria-live="polite">未保存变更 0 项</span>
+        <button id="crossPreview" class="small" type="button">预览影响</button>
+        <button id="crossSave" class="primary" type="button">保存</button>
+        <button id="crossReset" class="small" type="button">重置</button>
+        <span class="meta" id="crossRevision"></span>
       </div>
+      <div id="crossImpact" class="meta" role="status" aria-live="polite"></div>
+
+      <details class="settings-group" id="crossCardsGroup">
+        <summary>人格卡（<span id="crossCardCount">—</span>）<span class="meta"> · 注入上限 <span id="crossInjectMax">—</span> 字符</span></summary>
+        <div class="settings-content">
+          <div class="cross-cards-head" aria-hidden="true"><span>名称</span><span>字数</span><span>内容版本</span><span>被哪些组引用</span><span>操作</span></div>
+          <div id="crossCardList"><div class="cross-empty">读取中…</div></div>
+          <div class="cross-cards-foot">
+            <span class="meta">删除被引用的卡会被拒绝，并列出引用清单；想让某个组单独改人格，先「复制到组」。</span>
+          </div>
+        </div>
+      </details>
       <div class="cross-limits">
         <label class="cross-limit">qq_recall 次数上限
           <input id="crossRecallMax" type="number" min="0" max="100" step="1" inputmode="numeric" aria-label="qq_recall 次数上限">
@@ -3636,7 +3786,7 @@ button:active:not(:disabled) {
         <label class="cross-limit">窗口（分钟）
           <input id="crossRecallWindow" type="number" min="1" max="60" step="1" inputmode="numeric" aria-label="qq_recall 限流窗口分钟数">
         </label>
-        <p class="cross-hint">同一个会话在一个窗口内最多能查几次；<b>0 次 = 不限次数</b>，窗口 1–60 分钟。改完和分组一起保存。</p>
+        <p class="cross-hint">同一个会话在一个窗口内最多能查几次；<b>0 次 = 不限次数</b>，窗口 1–60 分钟。改完点同一个「保存」一起提交。</p>
       </div>
       <div class="cross-buffer" id="crossBufferNote">每个会话最多保留 — 条</div>
     </section>
@@ -3795,7 +3945,7 @@ async function refresh() {
     if (currentConsolePage === 'affect') refreshAffect();
     // 跨渠道互通（T-016）：同样只停在这一页才拉；5 秒节流，离开即停。
     // refreshCross 自己吞异常（错误画在列表里并弹 toast），不会把这一趟 /api/status 拖成「连接中断」。
-    if (currentConsolePage === 'cross') refreshCross();
+    if (currentConsolePage === 'cross') refreshCrossBoard();
     // 名字映射（T-018）：同样只停在这一页才拉；15 秒节流（refreshIdentity 内部判），离开即停。
     // refreshIdentity 自己吞异常（错误画在列表里并弹 toast），不会把这一趟 /api/status 拖成「连接中断」。
     if (currentConsolePage === 'identity') refreshIdentity();
@@ -6220,7 +6370,7 @@ function setConsolePage(page, { updateHash = true, focus = false, target = '' } 
   if (page === 'affect') { affectParamsDirty = false; paintAffect(); refreshAffect(true); }
   // 跨渠道互通：先用上一份快照画一遍，再强拉一次；进入即清掉没保存的草稿，
   // 与情绪页同一口径——离开再回来等于放弃那笔改动，输入框重新对齐服务端真值。
-  if (page === 'cross') { crossDraft.clear(); crossRenderedSig = null; paintCross(); refreshCross(true); }
+  if (page === 'cross') { crossReload(); }
   // 名字映射：先用上一份快照画一遍，再强拉一次；离开时把还没到点的输入防抖清掉，
   // 免得切走 300ms 后又打一次接口。
   if (page === 'identity') { identityRenderedSig = null; paintIdentity(); refreshIdentity(true); }
@@ -7374,24 +7524,59 @@ document.getElementById('afDebug').addEventListener('change', markAffectParamsDi
 // count / lastAt），控制台不碰消息正文 —— 这一页要做的只是「把会话分进同一个圈子」。
 // 读写都走控制台令牌（POST 在 adminOnlyV2Paths 里）；保存后立刻重拉，不猜桥接的内部状态。
 let lastCross = null;
+let lastBind = null;
 let crossFetchedAt = 0;
 let crossLoading = false;
 let crossAgain = false;
 let crossReadError = '';
 let crossErrorShown = '';
+let bindFetchedAt = 0;
+let bindLoading = false;
+let bindAgain = false;
+let bindReadError = '';
+let bindErrorShown = '';
 let crossBusy = false;
-// 改过但没保存的编号：key → 输入框里的原始字符串。轮询重绘以它为准，
-// 否则每 5 秒一次的刷新会把用户正在敲的数字抹掉。进页/保存成功后清空。
+let crossCardBusy = false;
+// 草稿 1：改过但没保存的会话编号（key → 字符串）。轮询重绘以它为准，否则 5 秒一次的
+// 刷新会把用户刚选的号抹掉。进页/保存成功后清空。
 const crossDraft = new Map();
-// 当前 DOM 是按哪一版列表画的（key / label / gid 的签名）。签名没变就只就地更新
-// 「缓冲条数 / 最后一条时间」，绝不重建输入框 —— 重建等于把焦点和光标一起扔掉。
+// 草稿 2：作用域 → 绑定。null = 回到「继承默认人格」= 删掉那条记录（不是写一条 inherit）。
+const bindDraft = new Map();
+// 草稿 3：组号列表。null = 没动过，沿用服务端快照（闲置组靠它保号）。
+let gidDraft = null;
+// 合并冲突里用户选的最终人格：scope → 卡名 / 'none'（接口契约 §3.1 的 mergeChoice）。
+const mergeDraft = new Map();
+// 当前 DOM 是按哪一版画的（签名没变就只就地更新计数，重建会把下拉框的焦点扔掉）。
 let crossRenderedSig = null;
+let bindRenderedSig = null;
+let cardsRenderedSig = null;
+// 人格卡展开面板：{ name, mode: 'view' | 'copy' | 'edit' }；查看时另存一份卡内容。
+let crossCardPanel = null;
+let crossCardContent = null;
+// 底部提示区：预览结果 / 409 / 500 都写在这里（不改页面别处的文案）。
+let crossNotice = { kind: '', lines: [], conflicts: [], stale: false };
 const CROSS_SAVE_REASONS = {
   bad_key: '会话 key 不合法',
   bad_gid: '编号必须是非负整数',
   bad_body: '提交内容不合法',
   config_write_failed: '写 config.json 失败，详情见桥接日志'
 };
+const CROSS_REASON_LABELS = { new: '新会话', scope: '组变了', content: '内容变了', default: '默认人格变了' };
+// 需要知道状态码的地方（409 旧 revision / 409 合并冲突 / 500 写盘失败）用这个：
+// api() 只回 body，拿不到状态码。401 仍旧交给 api() 去弹令牌框，这里只把 status 带回来。
+async function apiWithStatus(path, method, body) {
+  const headers = body ? {'content-type':'application/json'} : {};
+  const token = localStorage.getItem('consoleToken');
+  if (token) headers['x-console-token'] = token;
+  const res = await fetch(path, { method: method || 'GET', headers, body: body ? JSON.stringify(body) : undefined });
+  if (res.status === 401) {
+    const retried = await api(path, method, body);
+    return { status: 200, data: retried };
+  }
+  let data = null;
+  try { data = await res.json(); } catch { data = null; }
+  return { status: res.status, data };
+}
 
 function crossGid(value) {
   const n = Number(value);
@@ -7416,30 +7601,289 @@ function crossAgo(lastAt) {
 function crossConversations() {
   return lastCross && Array.isArray(lastCross.conversations) ? lastCross.conversations : [];
 }
-// 输入框里正在敲的值优先于服务端快照；只有没改过的 key 才用快照里的 gid。
+// 服务端保存过的编号（/api/roles/bindings 的 groups 是权威快照；没有就退回会话列表里的 gid）。
+function crossSavedGid(key) {
+  const groups = lastBind && lastBind.groups && typeof lastBind.groups === 'object' ? lastBind.groups : null;
+  if (groups && Object.prototype.hasOwnProperty.call(groups, key)) return crossGid(groups[key]);
+  const found = crossConversations().find((conversation) => String(conversation.key || '') === key);
+  return found ? crossGid(found.gid) : 0;
+}
+// 下拉框里正在选的号优先于服务端快照；只有没改过的 key 才用保存过的号。
 function crossEffectiveGid(conversation) {
   const key = String(conversation.key || '');
-  return crossDraft.has(key) ? crossGid(crossDraft.get(key)) : crossGid(conversation.gid);
+  if (crossDraft.has(key)) return crossGid(crossDraft.get(key));
+  return lastBind ? crossSavedGid(key) : crossGid(conversation.gid);
+}
+// 这一笔要提交的分组表：以服务端快照为底，会话列表补全，草稿覆盖。
+function crossGroupsEffective() {
+  const out = {};
+  const base = lastBind && lastBind.groups && typeof lastBind.groups === 'object' ? lastBind.groups : {};
+  for (const key of Object.keys(base)) out[key] = crossGid(base[key]);
+  for (const conversation of crossConversations()) {
+    const key = String(conversation.key || '');
+    if (!key) continue;
+    out[key] = crossEffectiveGid(conversation);
+  }
+  crossDraft.forEach((value, key) => {
+    if (!Object.prototype.hasOwnProperty.call(out, key)) out[key] = crossGid(value);
+  });
+  return out;
+}
+function crossBaseGids() {
+  return (lastBind && Array.isArray(lastBind.gids) ? lastBind.gids : [])
+    .map(crossGid).filter((gid) => gid > 0);
+}
+// 生效的组号 = 快照里的 gids ∪ 有成员的号 ∪ 被绑定点名的号。
+// 三者必须自洽，否则 apply 会把「指向不存在组号」的绑定判成 invalid（幽灵组）直接 400。
+function crossGidsEffective() {
+  const set = new Set();
+  const base = gidDraft !== null ? gidDraft : crossBaseGids();
+  for (const value of base) {
+    const gid = crossGid(value);
+    if (gid > 0) set.add(gid);
+  }
+  for (const gid of Object.values(crossGroupsEffective())) {
+    const n = crossGid(gid);
+    if (n > 0) set.add(n);
+  }
+  for (const scope of Object.keys(crossBindingsBulk())) {
+    if (!scope.startsWith('cross:')) continue;
+    const gid = crossGid(scope.slice('cross:'.length));
+    if (gid > 0) set.add(gid);
+  }
+  return [...set].sort((a, b) => a - b);
+}
+// 服务端保存过的绑定（不含草稿）。
+function crossBaseBindings() {
+  const out = {};
+  const source = lastBind && lastBind.bindings && typeof lastBind.bindings === 'object' ? lastBind.bindings : {};
+  for (const scope of Object.keys(source)) out[scope] = source[scope];
+  return out;
+}
+// 草稿叠在快照上（null = 删掉那条记录 = 继承默认人格）。
+function crossBindingsBulk() {
+  const out = crossBaseBindings();
+  bindDraft.forEach((value, scope) => {
+    if (value === null) delete out[scope];
+    else out[scope] = value;
+  });
+  return out;
+}
+function crossBindingRecord(scope) {
+  const bindings = crossBindingsBulk();
+  return Object.prototype.hasOwnProperty.call(bindings, scope) ? bindings[scope] : null;
+}
+function crossBindingText(record) {
+  if (!record) return 'inherit';
+  if (record.mode === 'none') return 'none';
+  return 'card:' + String(record.name || '');
+}
+function crossBindingEqual(a, b) {
+  return crossBindingText(a) === crossBindingText(b);
+}
+function crossCardByName(name) {
+  const cards = lastBind && Array.isArray(lastBind.cards) ? lastBind.cards : [];
+  return cards.find((card) => String(card.name) === String(name)) || null;
+}
+function crossCardNames() {
+  return (lastBind && Array.isArray(lastBind.cards) ? lastBind.cards : []).map((card) => String(card.name));
+}
+// 作用域的生效人格。顺序与桥接的 resolveScopeRole 一致：显式绑定 → 默认人格 → 无人格。
+function crossPersona(scope) {
+  const defaultRole = lastBind && lastBind.defaultRole ? String(lastBind.defaultRole) : '';
+  const record = crossBindingRecord(scope);
+  if (record && record.mode === 'none') {
+    return { mode: 'none', source: 'none', sourceLabel: '显式不用', name: '', revision: '—', missing: false, label: '不使用人格卡' };
+  }
+  if (record && record.mode === 'card' && record.name) {
+    const card = crossCardByName(record.name);
+    return {
+      mode: 'card', source: 'binding', sourceLabel: '显式指定', name: String(record.name),
+      revision: card && card.revision ? String(card.revision) : '卡缺失',
+      missing: !card, label: String(record.name)
+    };
+  }
+  const card = defaultRole ? crossCardByName(defaultRole) : null;
+  return {
+    mode: 'inherit', source: 'default', sourceLabel: '继承', name: defaultRole,
+    revision: card && card.revision ? String(card.revision) : (defaultRole ? '卡缺失' : '—'),
+    missing: Boolean(defaultRole) && !card,
+    label: defaultRole ? ('继承 → ' + defaultRole) : '继承默认人格'
+  };
+}
+function crossPrettyScope(scope) {
+  const text = String(scope || '');
+  if (text.startsWith('cross:')) return '互通组 ' + text.slice('cross:'.length);
+  if (text.startsWith('isolated:')) return '独立会话 ' + text.slice('isolated:'.length);
+  return text;
+}
+function crossMembersOf(gid) {
+  return crossConversations().filter((conversation) => crossEffectiveGid(conversation) === gid);
+}
+// 这个号上有没有显式人格绑定（闲置组 = 有绑定、没成员；清除按钮只清得掉这种）。
+function crossGroupHasBinding(gid) {
+  return crossBindingRecord('cross:' + gid) !== null;
+}
+// 闲置组：没有成员，但号还占着（人格绑定 / gids 里保号）。
+function crossGroupIsIdle(gid) {
+  if (crossMembersOf(gid).length > 0) return false;
+  return crossGroupHasBinding(gid) || crossBaseGids().indexOf(gid) >= 0;
+}
+// 这次草稿里新加的号（服务端快照里既没有成员、也没有 gid、也没有绑定）。
+function crossGroupIsNew(gid) {
+  if (crossBaseGids().indexOf(gid) >= 0) return false;
+  const groups = lastBind && lastBind.groups && typeof lastBind.groups === 'object' ? lastBind.groups : {};
+  if (Object.values(groups).some((value) => crossGid(value) === gid)) return false;
+  return !Object.prototype.hasOwnProperty.call(crossBaseBindings(), 'cross:' + gid);
+}
+// 新增组编号 = max(有效编号 ∪ {0}) + 1（addendum §2：升序、不回头填空号）。
+// 后端给的 nextGid 与按钮上的号必须一致；草稿里已经加过组时按草稿再往后顺延。
+function crossNextGid() {
+  const serverNext = lastBind && Number.isFinite(Number(lastBind.nextGid)) ? Math.floor(Number(lastBind.nextGid)) : 1;
+  const list = crossGidsEffective();
+  const max = list.length ? list[list.length - 1] : 0;
+  return Math.max(serverNext > 0 ? serverNext : 1, max + 1);
+}
+function crossDirtyCount() {
+  let total = crossDraft.size + bindDraft.size;
+  const before = new Set(crossBaseGids());
+  const current = gidDraft !== null ? gidDraft : crossBaseGids();
+  const after = new Set(current.map(crossGid).filter((gid) => gid > 0));
+  after.forEach((gid) => { if (!before.has(gid)) total += 1; });
+  before.forEach((gid) => { if (!after.has(gid)) total += 1; });
+  return total;
+}
+function crossPersonaOptions(current) {
+  const cards = lastBind && Array.isArray(lastBind.cards) ? lastBind.cards : [];
+  const defaultRole = lastBind && lastBind.defaultRole ? String(lastBind.defaultRole) : '';
+  let html = '<option value="inherit"' + (current === 'inherit' ? ' selected' : '') + '>继承默认人格'
+    + (defaultRole ? '（' + esc(defaultRole) + '）' : '') + '</option>';
+  html += '<option value="none"' + (current === 'none' ? ' selected' : '') + '>不使用人格卡</option>';
+  let matched = false;
+  for (const card of cards) {
+    const value = 'card:' + String(card.name);
+    const selected = current === value;
+    if (selected) matched = true;
+    html += '<option value="' + esc(value) + '"' + (selected ? ' selected' : '') + '>人格卡：' + esc(String(card.name)) + '</option>';
+  }
+  // 绑定的卡已经不在库里的情况下，也要让下拉框显示真实值（否则会被误读成「继承」）。
+  if (current.startsWith('card:') && !matched) {
+    html += '<option value="' + esc(current) + '" selected>人格卡：' + esc(current.slice('card:'.length)) + '（卡缺失）</option>';
+  }
+  return html;
+}
+function crossGroupRowHtml(gid) {
+  const scope = 'cross:' + gid;
+  const members = crossMembersOf(gid);
+  const record = crossBindingRecord(scope);
+  const current = record ? (record.mode === 'none' ? 'none' : 'card:' + String(record.name || '')) : 'inherit';
+  const persona = crossPersona(scope);
+  const state = bindDraft.has(scope) || crossGroupIsNew(gid)
+    ? '<span class="cross-tag dirty">待保存</span>'
+    : crossGroupIsIdle(gid)
+      ? '<span class="cross-tag idle">闲置组</span>'
+      : '<span class="cross-tag">已保存</span>';
+  const memberCell = members.length
+    ? '<div class="cross-group-count">' + members.length + ' 条会话</div>'
+      + members.map((conversation) => '<div class="cross-group-member">' + esc(String(conversation.label || conversation.key))
+        + ' <span class="cross-key">' + esc(String(conversation.key || '')) + '</span></div>').join('')
+    : '<span class="cross-muted">0 条会话 · 闲置组（编号保留）</span>';
+  return '<div class="cross-group-row" data-gid="' + gid + '" data-scope="' + esc(scope) + '">'
+    + '<div class="cross-group-gid">' + gid + '</div>'
+    + '<div class="cross-group-members">' + memberCell + '</div>'
+    + '<div class="cross-group-persona"><select class="cross-pick" data-scope="' + esc(scope) + '" aria-label="' + esc('互通组 ' + gid + ' 的生效人格') + '">'
+    + crossPersonaOptions(current) + '</select>'
+    + (persona.missing ? '<div class="cross-warn">卡缺失，相关会话暂停输出待修复</div>' : '') + '</div>'
+    + '<div class="cross-rev">' + esc(persona.revision) + '</div>'
+    + '<div class="cross-group-state">' + state + '</div>'
+    + '</div>';
 }
 function crossSignature(list) {
-  return list.map((conversation) => [conversation.key, conversation.label, conversation.gid].join('\u0001')).join('\u0002');
+  const gids = crossGidsEffective().join(',');
+  const cards = (lastBind && Array.isArray(lastBind.cards) ? lastBind.cards : [])
+    .map((card) => String(card.name) + '@' + String(card.revision || '')).join('|');
+  const defaultRole = lastBind && lastBind.defaultRole ? String(lastBind.defaultRole) : '';
+  return gids + '\u0003' + cards + '\u0003' + defaultRole + '\u0003'
+    + list.map((conversation) => [conversation.key, conversation.label, crossEffectiveGid(conversation)].join('\u0001')).join('\u0002');
 }
 function crossRowHtml(conversation) {
   const key = String(conversation.key || '');
   const label = String(conversation.label || key);
   const group = key.startsWith('group:');
-  const raw = crossDraft.has(key) ? String(crossDraft.get(key)) : String(crossGid(conversation.gid));
+  const gid = crossEffectiveGid(conversation);
+  const scope = gid > 0 ? 'cross:' + gid : 'isolated:' + key;
+  const persona = crossPersona(scope);
+  const nums = [0].concat(crossGidsEffective());
+  if (nums.indexOf(gid) < 0) nums.push(gid);
+  const options = nums.map((n) => '<option value="' + n + '"' + (gid === n ? ' selected' : '') + '>'
+    + (n === 0 ? '0（不共享）' : '组 ' + n) + '</option>').join('');
+  const tag = persona.mode === 'none'
+    ? '<span class="cross-tag is-none">不使用人格卡</span>'
+    : persona.mode === 'inherit'
+      ? '<span class="cross-tag">' + esc(persona.label) + '</span>'
+      : '<span class="cross-tag is-card">人格卡：' + esc(persona.name) + '</span>';
+  const tip = '来源：' + persona.sourceLabel + ' · 内容版本：' + persona.revision;
   return '<div class="cross-row" data-key="' + esc(key) + '">'
     + '<div class="cross-conv">'
     + '<span class="cross-tag ' + (group ? 'g' : 'p') + '">' + (group ? '群' : '私聊') + '</span>'
     + '<span class="cross-name">' + esc(label) + '</span>'
     + '<span class="cross-key">' + esc(key) + '</span>'
+    + '<span title="' + esc(tip) + '">' + tag + '</span>'
     + '</div>'
-    + '<input type="number" class="cross-num" min="0" step="1" inputmode="numeric" data-key="' + esc(key)
-    + '" value="' + esc(raw) + '" aria-label="' + esc(label + ' 的分组编号') + '">'
+    + '<select class="cross-pick" data-key="' + esc(key) + '" aria-label="' + esc(label + ' 的互通组编号') + '">'
+    + options + '</select>'
     + '<div class="cross-count">' + crossCountText(conversation.count) + '</div>'
     + '<div class="cross-time">' + esc(crossAgo(conversation.lastAt)) + '</div>'
     + '</div>';
+}
+function crossImpactLines(impact) {
+  const source = impact && typeof impact === 'object' ? impact : {};
+  const rebuild = Array.isArray(source.rebuild) ? source.rebuild : [];
+  const rebindOnly = Array.isArray(source.rebindOnly) ? source.rebindOnly : [];
+  const missing = Array.isArray(source.missing) ? source.missing : [];
+  const invalid = Array.isArray(source.invalid) ? source.invalid : [];
+  const lines = ['将重建 ' + rebuild.length + ' 条 / 只改绑法 ' + rebindOnly.length + ' 条 / 卡缺失 ' + missing.length];
+  if (rebuild.length) {
+    lines.push('将重建：' + rebuild.slice(0, 8).map((item) => String(item.key) + '（'
+      + (CROSS_REASON_LABELS[item.reason] || String(item.reason || '?')) + '）').join('、')
+      + (rebuild.length > 8 ? ' 等 ' + rebuild.length + ' 条' : ''));
+  }
+  if (rebindOnly.length) {
+    lines.push('只改绑法（不重建）：' + rebindOnly.slice(0, 8).map((item) => String(item.key)).join('、')
+      + (rebindOnly.length > 8 ? ' 等 ' + rebindOnly.length + ' 条' : ''));
+  }
+  if (missing.length) {
+    lines.push('卡缺失：' + missing.map((item) => String(item.scope) + ' → ' + String(item.name)).join('、')
+      + '（这些会话会暂停输出待修复，不会悄悄换成别的人格）');
+  }
+  if (invalid.length) lines.push('无效绑定：' + invalid.map((item) => String(item.scope)).join('、'));
+  return lines;
+}
+function crossMergeChoicePayload() {
+  // 只提交「当前面板上正报着的冲突」里的选择：拿着一个已经不算冲突的 scope 去 apply，
+  // 服务端会 400（它只允许解决本次报出来的 merge-persona）。少发一条比被拒一次干净。
+  const scopes = new Set((crossNotice.conflicts || []).map((item) => String(item.scope || '')));
+  const out = {};
+  mergeDraft.forEach((value, scope) => { if (value && scopes.has(scope)) out[scope] = value; });
+  return out;
+}
+function crossPayload() {
+  return { groups: crossGroupsEffective(), gids: crossGidsEffective(), bindings: crossBindingsBulk() };
+}
+function crossLimitsCurrent() {
+  const maxEl = document.getElementById('crossRecallMax');
+  const winEl = document.getElementById('crossRecallWindow');
+  return {
+    max: Number(maxEl ? maxEl.value : NaN),
+    minutes: Number(winEl ? winEl.value : NaN)
+  };
+}
+function crossLimitsDirty() {
+  if (!lastCross) return false;
+  const current = crossLimitsCurrent();
+  const savedMax = Number(lastCross.recallMaxPerWindow ?? 3);
+  const savedMinutes = Math.round(Number(lastCross.recallWindowMs ?? 300000) / 60000);
+  return current.max !== savedMax || current.minutes !== savedMinutes;
 }
 function paintCrossStats() {
   const el = document.getElementById('crossStats');
@@ -7470,23 +7914,17 @@ function paintCrossShared() {
     row.classList.toggle('is-shared', gid > 0 && (groupSize.get(gid) || 0) > 1);
   });
 }
-function paintCross() {
+function paintCrossSessions() {
   const listEl = document.getElementById('crossList');
   if (!listEl) return;
-  const bufferEl = document.getElementById('crossBufferNote');
   const live = lastCross !== null;
   const conversations = crossConversations();
-  if (bufferEl) {
-    const max = live ? Number(lastCross.bufferPerConversation) : NaN;
-    bufferEl.textContent = '每个会话最多保留 ' + (Number.isFinite(max) && max > 0 ? Math.floor(max) : '—') + ' 条';
-  }
   if (!live || conversations.length === 0) {
     const text = live
       ? '还没有任何会话记录；等 AI 收发过消息后再来看。'
       : (crossReadError ? '读取失败：' + crossReadError : '读取中…');
     listEl.innerHTML = '<div class="cross-empty">' + esc(text) + '</div>';
     crossRenderedSig = null;
-    paintCrossStats();
     return;
   }
   const signature = crossSignature(conversations);
@@ -7494,7 +7932,7 @@ function paintCross() {
     listEl.innerHTML = conversations.map(crossRowHtml).join('');
     crossRenderedSig = signature;
   } else {
-    // 结构没变：只刷新每行的条数与相对时间，输入框（焦点 / 光标 / 草稿）原样保留。
+    // 结构没变：只刷新每行的条数与相对时间，下拉框（焦点 / 草稿）原样保留。
     const rows = listEl.querySelectorAll('.cross-row');
     if (rows.length !== conversations.length) {
       listEl.innerHTML = conversations.map(crossRowHtml).join('');
@@ -7509,8 +7947,204 @@ function paintCross() {
       });
     }
   }
-  paintCrossStats();
   paintCrossShared();
+}
+function bindSignature() {
+  const parts = [lastBind ? String(lastBind.revision || '') : '\u2205', 'dirty:' + crossDirtyCount()];
+  for (const gid of crossGidsEffective()) {
+    const record = crossBindingRecord('cross:' + gid);
+    parts.push(gid + ':' + crossBindingText(record) + ':' + crossMembersOf(gid).length);
+  }
+  parts.push('cards:' + crossCardNames().join('|'));
+  parts.push('def:' + (lastBind ? String(lastBind.defaultRole || '') : ''));
+  parts.push('err:' + bindReadError);
+  return parts.join('\u0001');
+}
+function paintCrossGroups() {
+  const rowsEl = document.getElementById('crossGroupRows');
+  if (!rowsEl) return;
+  const addButton = document.getElementById('crossGroupAdd');
+  if (addButton) addButton.textContent = '+ 新增互通组（编号 ' + crossNextGid() + '）';
+  if (!lastBind) {
+    const text = bindReadError ? '绑定读取失败：' + bindReadError : '读取中…';
+    if (rowsEl.innerHTML.indexOf(text) < 0) rowsEl.innerHTML = '<div class="cross-empty">' + esc(text) + '</div>';
+    bindRenderedSig = null;
+    return;
+  }
+  const gids = crossGidsEffective();
+  if (!gids.length) {
+    const empty = '<div class="cross-empty">还没有互通组：先点「+ 新增互通组（编号 ' + crossNextGid() + '）」，'
+      + '再到下面的会话列表里把会话指过去。编号 0 = 不共享（独立会话）。</div>';
+    if (rowsEl.innerHTML !== empty) rowsEl.innerHTML = empty;
+    bindRenderedSig = null;
+    return;
+  }
+  const signature = bindSignature();
+  if (signature === bindRenderedSig) return;
+  rowsEl.innerHTML = gids.map(crossGroupRowHtml).join('');
+  bindRenderedSig = signature;
+}
+function paintCrossActions() {
+  const dirtyEl = document.getElementById('crossDirty');
+  if (dirtyEl) dirtyEl.textContent = '未保存变更 ' + crossDirtyCount() + ' 项';
+  const revisionEl = document.getElementById('crossRevision');
+  if (!revisionEl) return;
+  if (!lastBind) {
+    revisionEl.textContent = bindReadError ? 'revision —（读取失败）' : 'revision —';
+    return;
+  }
+  const revision = String(lastBind.revision || '');
+  revisionEl.textContent = 'revision ' + (revision || '—')
+    + (lastBind.defaultRole ? ' · 默认人格 ' + String(lastBind.defaultRole) : '');
+}
+function crossCardsSignature() {
+  const cards = lastBind && Array.isArray(lastBind.cards) ? lastBind.cards : [];
+  return cards.map((card) => [card.name, card.chars, card.revision, (Array.isArray(card.refs) ? card.refs : []).join('|')].join('@')).join('\u0002')
+    + '\u0003' + (lastBind ? String(lastBind.revision || '') : '')
+    + '\u0003' + (crossCardPanel ? String(crossCardPanel.name) + ':' + String(crossCardPanel.mode) : '')
+    + '\u0003' + (crossCardContent ? String(crossCardContent.name) + ':' + (crossCardContent.loading ? '1' : '0') : '')
+    + '\u0003' + (crossCardContent && crossCardContent.error ? String(crossCardContent.error) : '');
+}
+function crossCardPanelHtml(card) {
+  const panel = crossCardPanel || {};
+  const name = String(card.name);
+  const refs = Array.isArray(card.refs) ? card.refs.map(String) : [];
+  const refText = refs.length ? refs.map(crossPrettyScope).join('、') : '没有被任何组引用';
+  const close = '<button class="text-button" type="button" data-card-action="close" data-name="' + esc(name) + '">收起</button>';
+  const head = '<div><b>' + esc(name) + '</b> · ' + (Number.isFinite(Number(card.chars)) ? Math.floor(Number(card.chars)) : 0)
+    + ' 字 · 内容版本 <span class="cross-rev">' + esc(String(card.revision || '卡缺失')) + '</span> · 引用：' + esc(refText) + '</div>';
+  if (panel.mode === 'copy') {
+    const groups = crossGidsEffective();
+    const options = groups.length
+      ? groups.map((gid) => '<option value="' + gid + '">互通组 ' + gid + '</option>').join('')
+      : '<option value="0">（还没有互通组）</option>';
+    return '<div class="cross-card-panel">' + head
+      + '<div class="cross-card-copy">复制到组：<select class="cross-pick" id="crossCopyGid">' + options + '</select>'
+      + '<button class="primary" type="button" data-card-action="copy-go" data-name="' + esc(name) + '">确认复制</button>'
+      + close + '</div>'
+      + '<div class="cross-muted">会新建一张 <b>' + esc(name + '-组N') + '</b> 的独立卡，再用一次提交把该组切过去；原卡和其它组不受影响。</div>'
+      + '</div>';
+  }
+  if (panel.mode === 'edit') {
+    return '<div class="cross-card-panel">' + head
+      + '<div>编辑原卡会同时改变所有引用它的作用域：<b>' + esc(refText) + '</b>。只想改一个组就先「复制到组」。</div>'
+      + '<div class="cross-card-copy">'
+      + '<button class="primary" type="button" data-card-action="goto-persona" data-name="' + esc(name) + '">去「人格与角色」页编辑</button>'
+      + close + '</div></div>';
+  }
+  const content = crossCardContent && String(crossCardContent.name) === name ? crossCardContent : null;
+  const text = !content || content.loading
+    ? '读取中…'
+    : content.error ? ('读取失败：' + String(content.error)) : (String(content.content ?? '') || '（这张卡是空的）');
+  const shown = text.length > 1200 ? text.slice(0, 1200) + '\n…（只显示前 1200 字）' : text;
+  return '<div class="cross-card-panel">' + head
+    + '<div class="cross-card-content">' + esc(shown) + '</div>'
+    + '<div class="cross-card-copy">' + close + '</div></div>';
+}
+function crossCardRowHtml(card) {
+  const name = String(card.name);
+  const refs = Array.isArray(card.refs) ? card.refs.map(String) : [];
+  const refText = refs.length ? refs.map(crossPrettyScope).join('、') : '未被引用';
+  const chars = Number.isFinite(Number(card.chars)) ? Math.floor(Number(card.chars)) : 0;
+  const row = '<div class="cross-card-row" data-card="' + esc(name) + '">'
+    + '<div class="cross-card-name">' + esc(name) + '</div>'
+    + '<div class="cross-card-chars">' + chars + ' 字</div>'
+    + '<div class="cross-rev">' + esc(String(card.revision || '卡缺失')) + '</div>'
+    + '<div class="cross-card-refs">' + esc(refText) + '</div>'
+    + '<div class="cross-card-ops">'
+    + '<button class="text-button" type="button" data-card-action="view" data-name="' + esc(name) + '">查看</button>'
+    + '<button class="text-button" type="button" data-card-action="copy" data-name="' + esc(name) + '">复制到组</button>'
+    + '<button class="text-button" type="button" data-card-action="edit" data-name="' + esc(name) + '">编辑原卡</button>'
+    + '<button class="text-button" type="button" data-card-action="delete" data-name="' + esc(name) + '">删除</button>'
+    + '</div></div>';
+  const panel = crossCardPanel && String(crossCardPanel.name) === name ? crossCardPanelHtml(card) : '';
+  return row + panel;
+}
+function paintCrossCards() {
+  const listEl = document.getElementById('crossCardList');
+  const countEl = document.getElementById('crossCardCount');
+  const maxEl = document.getElementById('crossInjectMax');
+  const cards = lastBind && Array.isArray(lastBind.cards) ? lastBind.cards : [];
+  if (countEl) countEl.textContent = lastBind ? String(cards.length) : '—';
+  if (maxEl) maxEl.textContent = lastBind && Number.isFinite(Number(lastBind.maxInjectChars)) ? String(Math.floor(Number(lastBind.maxInjectChars))) : '—';
+  if (!listEl) return;
+  if (!lastBind) {
+    listEl.innerHTML = '<div class="cross-empty">' + esc(bindReadError ? '人格卡读取失败：' + bindReadError : '读取中…') + '</div>';
+    cardsRenderedSig = null;
+    return;
+  }
+  if (!cards.length) {
+    const empty = '<div class="cross-empty">人格库是空的：绑定了卡的作用域会显示「卡缺失」，会话暂停输出待修复。去「人格与角色」页新建一张。</div>';
+    if (listEl.innerHTML !== empty) listEl.innerHTML = empty;
+    cardsRenderedSig = null;
+    return;
+  }
+  const signature = crossCardsSignature();
+  if (signature === cardsRenderedSig) return;
+  listEl.innerHTML = cards.map(crossCardRowHtml).join('');
+  cardsRenderedSig = signature;
+}
+function paintCrossNotice() {
+  const host = document.getElementById('crossImpact');
+  if (!host) return;
+  const parts = [];
+  if (crossNotice.lines.length) {
+    parts.push('<div class="cross-notice ' + (crossNotice.kind || '') + '">'
+      + crossNotice.lines.map((line) => esc(String(line))).join('<br>') + '</div>');
+  }
+  for (const conflict of crossNotice.conflicts) {
+    const scope = String(conflict.scope || '');
+    const selected = mergeDraft.has(scope) ? mergeDraft.get(scope) : '';
+    let options = '<option value=""' + (selected === '' ? ' selected' : '') + '>— 选最终人格 —</option>';
+    for (const candidate of (Array.isArray(conflict.candidates) ? conflict.candidates : [])) {
+      const value = String(candidate.name || '');
+      options += '<option value="' + esc(value) + '"' + (selected === value ? ' selected' : '') + '>'
+        + esc(value) + '（来自互通组 ' + esc(String(candidate.gid ?? '')) + '）</option>';
+    }
+    options += '<option value="none"' + (selected === 'none' ? ' selected' : '') + '>不使用人格卡</option>';
+    parts.push('<div class="cross-merge"><span>' + esc(String(conflict.message || '合并后两个人格不同，必须选择最终人格'))
+      + '（' + esc(scope) + '）</span><select class="cross-pick" data-merge-scope="' + esc(scope) + '">'
+      + options + '</select></div>');
+  }
+  if (crossNotice.stale) {
+    parts.push('<button class="small" type="button" data-cross-action="reload">刷新（丢弃本地草稿，重新读取）</button>');
+  }
+  host.innerHTML = parts.join('');
+}
+function paintCross() {
+  const bufferEl = document.getElementById('crossBufferNote');
+  if (bufferEl) {
+    const max = lastCross ? Number(lastCross.bufferPerConversation) : NaN;
+    bufferEl.textContent = '每个会话最多保留 ' + (Number.isFinite(max) && max > 0 ? Math.floor(max) : '—') + ' 条';
+  }
+  paintCrossGroups();
+  paintCrossSessions();
+  paintCrossStats();
+  paintCrossActions();
+  paintCrossCards();
+  paintCrossNotice();
+  syncCrossButtons();
+}
+function crossReload() {
+  crossDraft.clear();
+  bindDraft.clear();
+  mergeDraft.clear();
+  gidDraft = null;
+  crossCardPanel = null;
+  crossCardContent = null;
+  crossRenderedSig = null;
+  bindRenderedSig = null;
+  cardsRenderedSig = null;
+  crossNotice = { kind: '', lines: [], conflicts: [], stale: false };
+  paintCross();
+  refreshCrossBoard(true);
+}
+function syncCrossButtons() {
+  const busy = crossBusy || crossCardBusy;
+  for (const id of ['crossPreview', 'crossSave', 'crossReset', 'crossGroupAdd', 'crossIdleClear']) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = busy;
+  }
 }
 // 读失败不吞：列表里画错误，toast 也只对「新的错误」弹一次，避免 3 秒轮询刷屏。
 // 上一份快照会留着继续显示（总比整页突然空掉好），下一次成功再对齐。
@@ -7537,58 +8171,257 @@ async function refreshCross(force = false) {
   if (!failure) crossErrorShown = '';
   if (crossAgain) { crossAgain = false; refreshCross(true); }
 }
+// 组总览与人格卡的来源。与 /api/socialV2/cross 同一口径：只在停在 #cross 时才拉，
+// 5 秒节流（3 秒的 /api/status 轮询不会每拍都多打一发），读失败画在面板里并只 toast 一次。
+async function refreshBindings(force = false) {
+  if (bindLoading) { if (force) bindAgain = true; return; }
+  if (!force && bindFetchedAt > 0 && Date.now() - bindFetchedAt < 5000) { paintCrossGroups(); return; }
+  bindLoading = true;
+  bindFetchedAt = Date.now();
+  let failure = '';
+  try {
+    const r = await api('/api/roles/bindings');
+    if (r && r.ok === true) lastBind = r;
+    else failure = (r && (r.error || r.reason)) ? String(r.error || r.reason) : '接口没有返回原因';
+  } catch (error) {
+    failure = error && error.message ? error.message : String(error);
+  }
+  bindReadError = failure;
+  bindLoading = false;
+  paintCross();
+  if (failure && failure !== bindErrorShown) {
+    bindErrorShown = failure;
+    showConsoleToast('互通组人格读取失败：' + failure);
+  }
+  if (!failure) bindErrorShown = '';
+  if (bindAgain) { bindAgain = false; refreshBindings(true); }
+}
+// 两个来源一起刷：分组与绑定必须来自同一份快照，否则草稿会按旧 revision 提交（409）。
+function refreshCrossBoard(force = false) {
+  refreshCross(force);
+  refreshBindings(force);
+}
 function crossOnInput(event) {
-  const target = event.target;
-  const input = target && target.closest ? target.closest('input[data-key]') : null;
-  if (!input || !input.dataset.key) return;
-  crossDraft.set(input.dataset.key, input.value);
-  paintCrossStats();
-  paintCrossShared();
+  const select = event.target && event.target.closest ? event.target.closest('select[data-key]') : null;
+  if (!select || !select.dataset.key) return;
+  const key = select.dataset.key;
+  const gid = crossGid(select.value);
+  if (gid === crossSavedGid(key)) crossDraft.delete(key);
+  else crossDraft.set(key, String(gid));
+  crossRenderedSig = null;
+  bindRenderedSig = null;
+  paintCross();
+}
+// 组上的三态下拉：继承 = 删记录，不用人格 = 一条 mode:'none'，指定 = 一条 mode:'card'。
+function crossGroupOnChange(event) {
+  const select = event.target && event.target.closest ? event.target.closest('select[data-scope]') : null;
+  if (!select || !select.dataset.scope) return;
+  const scope = select.dataset.scope;
+  const value = String(select.value || '');
+  const record = value === 'inherit' ? null
+    : value === 'none' ? { mode: 'none' }
+      : { mode: 'card', name: value.slice('card:'.length) };
+  const base = crossBaseBindings();
+  const saved = Object.prototype.hasOwnProperty.call(base, scope) ? base[scope] : null;
+  if (crossBindingEqual(record, saved)) bindDraft.delete(scope);
+  else bindDraft.set(scope, record);
+  bindRenderedSig = null;
+  crossRenderedSig = null;
+  paintCross();
+}
+function crossGroupAdd() {
+  if (!lastBind) { showConsoleToast('还没读到人格绑定快照，先点「重置」重读一次'); return; }
+  const gid = crossNextGid();
+  const current = gidDraft !== null ? gidDraft : crossBaseGids();
+  gidDraft = [...new Set(current.concat([gid]))].sort((a, b) => a - b);
+  bindRenderedSig = null;
+  crossRenderedSig = null;
+  crossNotice = {
+    kind: '',
+    lines: ['已把新互通组 ' + gid + ' 放进草稿（成员 0、继承默认人格）：点「保存」才会落盘，编号按升序分配、不补空号。'],
+    conflicts: [],
+    stale: false
+  };
+  paintCross();
+}
+function crossIdleClear() {
+  if (!lastBind) { showConsoleToast('还没读到人格绑定快照，先点「重置」重读一次'); return; }
+  // 只清「有绑定、没成员」的号：空号本身不是错，绑在空号上的人格才会让人误会。
+  const idle = crossGidsEffective().filter((gid) => crossMembersOf(gid).length === 0 && crossGroupHasBinding(gid));
+  if (!idle.length) {
+    crossNotice = {
+      kind: '',
+      lines: ['没有可清除的闲置绑定：空号上没有绑人格（编号会作为空组保留，把会话指回来就能恢复共享）。'],
+      conflicts: [],
+      stale: false
+    };
+    paintCrossNotice();
+    return;
+  }
+  for (const gid of idle) bindDraft.set('cross:' + gid, null);
+  bindRenderedSig = null;
+  crossRenderedSig = null;
+  crossNotice = {
+    kind: '',
+    lines: ['已把闲置组 ' + idle.join('、') + ' 的人格绑定放进草稿（保存前不落盘）。编号保留、随时可以把会话指回来；'
+      + '新增组仍然是「现有最大号 +1」，不会回头填空号。'],
+    conflicts: [],
+    stale: false
+  };
+  paintCross();
+}
+async function crossPreview() {
+  if (crossBusy) return;
+  if (!lastBind) {
+    crossNotice = { kind: 'err', lines: ['还没读到人格绑定快照（读取失败或正在读取），先点「重置」重读一次。'], conflicts: [], stale: false };
+    paintCrossNotice();
+    return;
+  }
+  crossBusy = true;
+  syncCrossButtons();
+  try {
+    const payload = Object.assign({ baseRevision: String(lastBind.revision || '') }, crossPayload());
+    const r = await api('/api/roles/bindings/plan', 'POST', payload);
+    if (!r || r.ok !== true) throw new Error((r && r.error) || '桥接拒绝了这次预演');
+    const conflicts = r.impact && Array.isArray(r.impact.conflicts) ? r.impact.conflicts : [];
+    crossNotice = {
+      kind: conflicts.length ? 'warn' : '',
+      lines: crossImpactLines(r.impact).concat(conflicts.length
+        ? ['合并后两个人格不同：先在下面选一个最终人格，再点「保存」。没选之前保存会零修改。']
+        : []),
+      conflicts,
+      stale: false
+    };
+  } catch (error) {
+    crossNotice = { kind: 'err', lines: ['预览失败：' + (error && error.message ? error.message : error)], conflicts: [], stale: false };
+  } finally {
+    crossBusy = false;
+    syncCrossButtons();
+    paintCross();
+  }
 }
 async function crossSave() {
   if (crossBusy) return;
-  const inputs = [...document.querySelectorAll('#crossList input[data-key]')];
-  const maxEl = document.getElementById('crossRecallMax');
-  const winEl = document.getElementById('crossRecallWindow');
-  const recallMax = Number(maxEl ? maxEl.value : lastCross?.recallMaxPerWindow ?? 3);
-  const recallMinutes = Number(winEl ? winEl.value : Math.round((lastCross?.recallWindowMs ?? 300000) / 60000));
-  if (!Number.isInteger(recallMax) || recallMax < 0 || recallMax > 100) {
+  if (!lastBind) {
+    crossNotice = { kind: 'err', lines: ['还没读到人格绑定快照（读取失败或正在读取），先点「重置」重读一次再保存。'], conflicts: [], stale: false };
+    paintCrossNotice();
+    return;
+  }
+  const limits = crossLimitsCurrent();
+  if (!Number.isInteger(limits.max) || limits.max < 0 || limits.max > 100) {
     showConsoleToast('qq_recall 次数上限要填 0–100 的整数（0 = 不限次数）');
     return;
   }
-  if (!Number.isInteger(recallMinutes) || recallMinutes < 1 || recallMinutes > 60) {
+  if (!Number.isInteger(limits.minutes) || limits.minutes < 1 || limits.minutes > 60) {
     showConsoleToast('限流窗口要填 1–60 分钟');
     return;
   }
-  const groups = {};
-  for (const input of inputs) {
-    const gid = crossGid(input.value);
-    groups[input.dataset.key] = gid;
-    // 小数/空值统一夹成非负整数再提交，桥接那边只认这个形状。
-    input.value = String(gid);
-    crossDraft.set(input.dataset.key, String(gid));
+  const dirty = crossDirtyCount();
+  const limitsDirty = crossLimitsDirty();
+  const choice = crossMergeChoicePayload();
+  if (dirty === 0 && !limitsDirty && Object.keys(choice).length === 0) {
+    showConsoleToast('没有未保存的变更');
+    return;
   }
-  const payload = { recallMaxPerWindow: recallMax, recallWindowMs: recallMinutes * 60000 };
-  // 列表为空（一个会话都没见过）时也能只保存限流旋钮；有分组就一起提交。
-  if (inputs.length > 0) payload.groups = groups;
-  const button = document.getElementById('crossSave');
   crossBusy = true;
-  if (button) button.disabled = true;
+  syncCrossButtons();
   try {
-    const r = await api('/api/socialV2/cross', 'POST', payload);
-    if (!r || r.ok !== true) {
-      const reason = r && typeof r.reason === 'string' ? r.reason : '';
-      throw new Error((r && r.error) || CROSS_SAVE_REASONS[reason] || '桥接拒绝了这次改动');
+    if (dirty > 0 || Object.keys(choice).length > 0) {
+      // **一次** apply：groups + gids + bindings 同一笔写盘（接口契约 §3）。
+      const payload = Object.assign({ baseRevision: String(lastBind.revision || '') }, crossPayload());
+      if (Object.keys(choice).length > 0) payload.mergeChoice = choice;
+      const result = await apiWithStatus('/api/roles/bindings/apply', 'POST', payload);
+      const data = result.data;
+      const conflicts = data && Array.isArray(data.conflicts) ? data.conflicts : [];
+      if (conflicts.length > 0) {
+        // 409（合并没定）或 400（选了一个已经不算冲突的 scope）：都退回「先选最终人格」这一步，
+        // 并把服务端这一次报的冲突清单原样展示 —— 不猜、不自动重试。
+        crossNotice = {
+          kind: 'warn',
+          lines: ['合并后两个人格不同：先在下面选一个最终人格，再点「保存」。没选之前这次提交零修改。'],
+          conflicts,
+          stale: false
+        };
+        return;
+      }
+      if (result.status === 409) {
+        // 旧 revision：只提示刷新，**不自动重试**、不覆盖另一个页面刚保存的配置。
+        crossNotice = {
+          kind: 'err',
+          lines: ['409 配置已被其他页面修改，请刷新后重试（本次没有写入，也没有覆盖对方的改动）。'
+            + (data && data.revision ? ' 服务端 revision：' + data.revision : '')],
+          conflicts: [],
+          stale: true
+        };
+        return;
+      }
+      if (result.status === 500) {
+        crossNotice = {
+          kind: 'err',
+          lines: ['写盘失败：' + ((data && data.error) || 'HTTP 500') + '。草稿保留在页面上，可以直接重试。'],
+          conflicts: [],
+          stale: false
+        };
+        showConsoleToast('保存失败：写盘失败，草稿已保留');
+        return;
+      }
+      if (!data || data.ok !== true) {
+        const reason = data && typeof data.reason === 'string' ? data.reason : '';
+        throw new Error((data && data.error) || CROSS_SAVE_REASONS[reason] || ('HTTP ' + result.status));
+      }
+      // 成功：先清草稿（不清会把刚提交的这笔再提交一次），再按新 revision 重读两个来源。
+      crossDraft.clear();
+      bindDraft.clear();
+      mergeDraft.clear();
+      gidDraft = null;
+      crossCardPanel = null;
+      crossCardContent = null;
+      crossRenderedSig = null;
+      bindRenderedSig = null;
+      cardsRenderedSig = null;
+      const applied = data.applied && typeof data.applied === 'object' ? data.applied : {};
+      const rebuild = Array.isArray(applied.rebuild) ? applied.rebuild.length : 0;
+      const rebind = Array.isArray(applied.rebindOnly) ? applied.rebindOnly.length : 0;
+      const retired = data.retire && typeof data.retire === 'object' ? data.retire : {};
+      const failed = Array.isArray(retired.failed) ? retired.failed : [];
+      const notes = Array.isArray(data.notes) ? data.notes.map(String) : [];
+      crossNotice = {
+        kind: 'ok',
+        lines: ['已保存配置（revision ' + String(data.revision || '') + '）：将重建 ' + rebuild + ' 条、只改绑法 ' + rebind + ' 条。'
+          + '旧会话停止中' + (failed.length ? '（' + failed.length + ' 条远端停止失败，只记日志，不影响这次保存）' : '')
+          + '；下一次唤醒才会用新人格。'].concat(notes),
+        conflicts: [],
+        stale: false
+      };
+      showConsoleToast('已保存');
+      await refreshCrossBoard(true);
     }
-    crossDraft.clear();
-    crossRenderedSig = null;
-    showConsoleToast('已保存');
-    await refreshCross(true);
+    if (limitsDirty) {
+      // qq_recall 限额走原来的端点（分组已经由 apply 一次提交完，这里不再带 groups）。
+      const payload = { recallMaxPerWindow: limits.max, recallWindowMs: limits.minutes * 60000 };
+      const saved = await api('/api/socialV2/cross', 'POST', payload);
+      if (!saved || saved.ok !== true) {
+        const reason = saved && typeof saved.reason === 'string' ? saved.reason : '';
+        crossNotice = {
+          kind: 'warn',
+          lines: crossNotice.lines.concat(['qq_recall 限额没存进去：'
+            + ((saved && saved.error) || CROSS_SAVE_REASONS[reason] || '桥接拒绝了这次改动')
+            + '（分组与人格已经保存成功）']),
+          conflicts: [],
+          stale: false
+        };
+      } else {
+        paintCrossLimits();
+        await refreshCross(true);
+      }
+    }
   } catch (error) {
+    crossNotice = { kind: 'err', lines: ['保存失败：' + (error && error.message ? error.message : error) + '（草稿还在，可以重试）'], conflicts: [], stale: false };
     showConsoleToast('保存失败：' + (error && error.message ? error.message : error));
   } finally {
     crossBusy = false;
-    if (button) button.disabled = false;
+    syncCrossButtons();
+    paintCross();
   }
 }
 // 用桥接返回的真实值回填限流输入框（保存后可能被钳制）；正在编辑的框不动。
@@ -7599,8 +8432,191 @@ function paintCrossLimits() {
   if (maxEl && document.activeElement !== maxEl) maxEl.value = String(lastCross.recallMaxPerWindow ?? 3);
   if (winEl && document.activeElement !== winEl) winEl.value = String(Math.round((lastCross.recallWindowMs ?? 300000) / 60000));
 }
-document.getElementById('crossList').addEventListener('input', crossOnInput);
+function crossReset() {
+  crossReload();
+  showConsoleToast('已丢弃本地草稿，重新读取服务端配置');
+}
+function crossMergeOnChange(event) {
+  const select = event.target && event.target.closest ? event.target.closest('select[data-merge-scope]') : null;
+  if (!select || !select.dataset.mergeScope) return;
+  const scope = select.dataset.mergeScope;
+  const value = String(select.value || '');
+  if (value) mergeDraft.set(scope, value);
+  else mergeDraft.delete(scope);
+  if (!value) { paintCrossNotice(); return; }
+  // 选定后草稿里的绑定也指过去 —— 预览与保存看到的是同一个结果，不是两套账。
+  const base = crossBaseBindings();
+  const saved = Object.prototype.hasOwnProperty.call(base, scope) ? base[scope] : null;
+  const record = value === 'none' ? { mode: 'none' } : { mode: 'card', name: value };
+  if (crossBindingEqual(record, saved)) bindDraft.delete(scope);
+  else bindDraft.set(scope, record);
+  bindRenderedSig = null;
+  crossRenderedSig = null;
+  paintCross();
+}
+function crossImpactOnClick(event) {
+  const button = event.target && event.target.closest ? event.target.closest('button[data-cross-action]') : null;
+  if (!button) return;
+  if (button.dataset.crossAction === 'reload') crossReload();
+}
+function crossCardOnClick(event) {
+  const button = event.target && event.target.closest ? event.target.closest('button[data-card-action]') : null;
+  if (!button) return;
+  const name = String(button.dataset.name || '');
+  const action = String(button.dataset.cardAction || '');
+  if (!name) return;
+  if (action === 'view') {
+    crossCardPanel = { name, mode: 'view' };
+    crossCardContent = { name, loading: true };
+    paintCrossCards();
+    crossCardLoad(name);
+  } else if (action === 'copy') {
+    crossCardPanel = { name, mode: 'copy' };
+    crossCardContent = null;
+    paintCrossCards();
+  } else if (action === 'edit') {
+    crossCardPanel = { name, mode: 'edit' };
+    crossCardContent = null;
+    paintCrossCards();
+  } else if (action === 'close') {
+    crossCardPanel = null;
+    crossCardContent = null;
+    paintCrossCards();
+  } else if (action === 'delete') {
+    crossCardDelete(name);
+  } else if (action === 'copy-go') {
+    crossCardCopyRun(name);
+  } else if (action === 'goto-persona') {
+    crossCardGotoPersona(name);
+  }
+}
+async function crossCardLoad(name) {
+  try {
+    const r = await api('/api/roles/content?name=' + encodeURIComponent(name));
+    crossCardContent = r && r.ok === true
+      ? { name, content: String(r.content ?? ''), chars: Number(r.chars) || 0 }
+      : { name, content: '', error: (r && r.error) || '读取失败' };
+  } catch (error) {
+    crossCardContent = { name, content: '', error: error && error.message ? error.message : String(error) };
+  }
+  paintCrossCards();
+}
+// 被引用的卡不能删：先把「谁会一起没」列清楚，绝不静默换人格（dev-doc §8）。
+function crossCardDelete(name) {
+  const card = crossCardByName(name);
+  const refs = card && Array.isArray(card.refs) ? card.refs.map(String) : [];
+  if (refs.length) {
+    crossNotice = {
+      kind: 'err',
+      lines: ['409 拒绝删除：卡片「' + name + '」仍被 ' + refs.length + ' 个作用域引用（' + refs.map(crossPrettyScope).join('、')
+        + '）。先把这些组改成继承或别的卡，或者先「复制到组」再删。'],
+      conflicts: [],
+      stale: false
+    };
+    paintCrossNotice();
+    showConsoleToast('不能删除：这张卡还在被引用');
+    return;
+  }
+  if (!window.confirm('删除人格卡「' + name + '」？这张卡没有被任何组引用，删除后不可恢复。')) return;
+  crossCardBusy = true;
+  syncCrossButtons();
+  api('/api/roles/delete', 'POST', { name })
+    .then((r) => {
+      if (!r || r.ok !== true) throw new Error((r && r.error) || '删除失败');
+      crossCardPanel = null;
+      crossCardContent = null;
+      crossNotice = { kind: 'ok', lines: ['已删除人格卡「' + name + '」。'], conflicts: [], stale: false };
+      showConsoleToast('已删除「' + name + '」');
+      return refreshCrossBoard(true);
+    })
+    .catch((error) => {
+      crossNotice = { kind: 'err', lines: ['删除失败：' + (error && error.message ? error.message : error) + '（卡片没有变化）'], conflicts: [], stale: false };
+    })
+    .finally(() => {
+      crossCardBusy = false;
+      syncCrossButtons();
+      paintCross();
+    });
+}
+// 「复制到组」= 读原卡内容 → 建一张 <原名>-组N 的副本 → 用一次 apply 把该组切过去。
+// 两步之间失败会如实说明：副本可能已经建好（不会被悄悄回滚，也不会假装成功）。
+async function crossCardCopyRun(name) {
+  if (crossCardBusy) return;
+  const select = document.getElementById('crossCopyGid');
+  const gid = crossGid(select ? select.value : 0);
+  if (!(gid > 0)) {
+    showConsoleToast('先在面板里选一个互通组');
+    return;
+  }
+  if (!lastBind) {
+    showConsoleToast('还没读到绑定快照，先点「重置」重读一次');
+    return;
+  }
+  const copyName = name + '-组' + gid;
+  crossCardBusy = true;
+  syncCrossButtons();
+  try {
+    const content = await api('/api/roles/content?name=' + encodeURIComponent(name));
+    if (!content || content.ok !== true) throw new Error((content && content.error) || '读不到原卡内容');
+    const created = await api('/api/roles/create', 'POST', { name: copyName, content: String(content.content ?? '') });
+    if (!created || created.ok !== true) throw new Error((created && created.error) || '创建副本失败');
+    const bindings = crossBindingsBulk();
+    bindings['cross:' + gid] = { mode: 'card', name: copyName };
+    const payload = {
+      baseRevision: String(lastBind.revision || ''),
+      groups: crossGroupsEffective(),
+      gids: crossGidsEffective(),
+      bindings
+    };
+    const result = await apiWithStatus('/api/roles/bindings/apply', 'POST', payload);
+    if (!result.data || result.data.ok !== true) {
+      throw new Error((result.data && result.data.error) || ('切换组绑定失败（HTTP ' + result.status + '）')
+        + '；副本「' + copyName + '」已经创建好，可以直接在下拉里选它');
+    }
+    crossCardPanel = null;
+    crossCardContent = null;
+    crossNotice = {
+      kind: 'ok',
+      lines: ['已生成副本「' + copyName + '」并把互通组 ' + gid + ' 切到它；原卡和其它组不变。'],
+      conflicts: [],
+      stale: false
+    };
+    showConsoleToast('已复制到组 ' + gid);
+    await refreshCrossBoard(true);
+  } catch (error) {
+    crossNotice = {
+      kind: 'err',
+      lines: ['复制到组失败：' + (error && error.message ? error.message : error)
+        + '（如果副本已创建，它不会自动删掉；可以先改名或删除再重试）'],
+      conflicts: [],
+      stale: false
+    };
+    paintCrossNotice();
+  } finally {
+    crossCardBusy = false;
+    syncCrossButtons();
+    paintCross();
+  }
+}
+function crossCardGotoPersona(name) {
+  crossCardPanel = null;
+  crossCardContent = null;
+  paintCrossCards();
+  setConsolePage('persona');
+  Promise.resolve(openRoleForEdit(name)).catch((error) => {
+    showConsoleToast('读取人格失败：' + (error && error.message ? error.message : error));
+  });
+}
+document.getElementById('crossList').addEventListener('change', crossOnInput);
+document.getElementById('crossGroupRows').addEventListener('change', crossGroupOnChange);
+document.getElementById('crossGroupAdd').addEventListener('click', crossGroupAdd);
+document.getElementById('crossIdleClear').addEventListener('click', crossIdleClear);
+document.getElementById('crossPreview').addEventListener('click', crossPreview);
 document.getElementById('crossSave').addEventListener('click', crossSave);
+document.getElementById('crossReset').addEventListener('click', crossReset);
+document.getElementById('crossImpact').addEventListener('change', crossMergeOnChange);
+document.getElementById('crossImpact').addEventListener('click', crossImpactOnClick);
+document.getElementById('crossCardList').addEventListener('click', crossCardOnClick);
 
 // ── 名字映射（T-018）────────────────────────────────────────────────────────
 // 数据只有一个来源：GET /api/socialV2/identity?q=&limit=50。桥接给的是「这台机器

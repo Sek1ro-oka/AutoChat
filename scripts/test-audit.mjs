@@ -207,6 +207,16 @@ const tests = [
   // 一次写三处并保留无关段、只退役 impact.rebuild、旧 baseRevision/合并冲突 409 零修改、
   // 写盘失败 500 且内存不变、既有写路径不丢 role.bindings。
   'test-role-bindings-endpoints.mjs',
+  // 人格注入（T-035 阶段 C3）：按会话 key 解析生效卡的**隔离**回归（真跑桥接 + 临时
+  // config/state/roles）。钉住同组一致 / 组间不同 / gid=0 继承且互不影响 / 显式 none /
+  // 绑定卡缺失不回落默认 / 默认变化只影响继承者 / sessionPolicy 含作用域+内容摘要
+  // （组变必变、只改绑法不变）/ prompt 的 role 段 scope+source+revision / A-B-A 不串卡。
+  'test-role-injection.mjs',
+  // 人格策略的**部署迁移**（T-035 C3 / dev-doc §9）：旧三元组 `[模式,preset,ownerQQ]` 基线在
+  // 升级后会被判成「策略已变」而集体退役。钉住一次性采纳的三条与关系（3 元组 + 前三项逐项
+  // 相等 + 继承默认 → 只改写基线、不退役、不换 token），以及任一不满足都必须照旧退役
+  // （显式绑卡 / 显式 none / preset 或模式变了），外加幂等与「不动别的状态字段」。
+  'test-role-policy-migration.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

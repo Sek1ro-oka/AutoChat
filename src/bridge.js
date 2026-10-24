@@ -174,12 +174,14 @@ import {
 // 名字固定，阶段 C3 的各提示词入口直接 import 同一个模块，别再各写一份解析。
 import {
   effectiveGids,
+  effectiveRoleDigest,
   idleGids,
   listRoleReferences,
   nextGidFor,
   normalizeRoleBindings,
   normalizeRoleGids,
   planRoleChanges,
+  resolveRoleBinding,
   resolveScopeRole,
   revisionOf,
   roleCardDigest,
@@ -4372,8 +4374,24 @@ async function main() {
     return modeAllowed(key, m[1], Number(m[2]), cfg, currentMode);
   }
 
+  /**
+   * 会话策略快照：模式 / preset / ownerQQ，**再加**「人格作用域 + 生效注入内容摘要」。
+   *
+   * 为什么把人格塞进这里（T-035 C3 / dev-doc §5.1、§7）：captureSendGuard 与 isCurrentSession
+   * 已经逐条比对这份快照，排队中的文字/语音/图片/表情在真正发出去之前都会再算一次。于是
+   * 「组变了」「换了张内容不同的卡」「继承者被默认人格改动波及」都会让旧回合的守卫直接失败，
+   * **不需要另造一套取消机制**；反过来，只改绑法（继承↔显式同名同内容的卡）时摘要不变，
+   * rebindOnly 的会话也就不会被误杀。
+   */
   function sessionPolicy(key) {
-    return JSON.stringify([currentMode, modePreset(key, currentMode, cfg) ?? '', currentMode === 'closed-agent' ? cfg.ownerQQ : null]);
+    const role = roleFor(key);
+    return JSON.stringify([
+      currentMode,
+      modePreset(key, currentMode, cfg) ?? '',
+      currentMode === 'closed-agent' ? cfg.ownerQQ : null,
+      role.scope ?? '',
+      roleContentRevision(role),
+    ]);
   }
 
   function isCurrentSession(key, sessionId) {
@@ -4489,6 +4507,47 @@ async function main() {
     return { rotated: true, contextTokens };
   }
 
+  /**
+   * 旧会话策略基线的**一次性采纳**（T-035 C3 的部署迁移，dev-doc §9）。
+   *
+   * 为什么要有：C3 之前 `sessionPolicy()` 是三元组 `[模式, preset, ownerQQ]`，之后多了
+   * 「人格作用域 + 生效内容摘要」。不做迁移的话，升级后第一次启动会把**所有**既有会话判成
+   * 「策略已变」而集体退役：DSH 会话被停、token 轮换、映射删除，每个群的上下文各丢一次 ——
+   * 这与 §9「第一次装载不强制重建所有会话，部署时建立与既有会话一致的初始快照」直接冲突。
+   *
+   * 为什么判定必须**三条同时满足**（放宽任何一条都会让「该重建的会话被静默放过」）：
+   *   ① 存的必须是**恰好 3 个元素**的数组：3 元组 = 升级前写下的快照，里面根本没有人格信息，
+   *      它的缺失不代表人格变过。五元组（哪怕内容不符）是本进程写过的，必须走正常比较。
+   *   ② 三元组里的**每一项**都要与当前策略的前三项逐项相等：模式 / preset / ownerQQ 是旧快照
+   *      里真实存在的信息，任何一项变了都是真的策略变化，采纳逻辑不许掩盖。
+   *   ③ 该 key 的生效人格必须是 `source === 'default'`（继承默认）：只有这种作用域能断定
+   *      「停机期间这个人格不可能变」（它没有自己的选择，只能跟着默认人格走，而默认人格
+   *      不在这份快照的管辖范围内）。显式绑卡 / 显式 none 的作用域可能正是在停机期间被改的，
+   *      必须退役重建，不能让旧会话顶着旧人格的上下文继续说话（dev-doc §7）。
+   *
+   * 幂等：改写后存的就是新五元组，下一次启动不再满足 ①；不额外落盘（下一次正常的 saveState
+   * 会把它一起写下去），也只动这一个字段，其它状态原样保留。
+   *
+   * @returns {boolean} 是否采纳（true = 已就地改写基线，调用方不要再退役）
+   */
+  function adoptLegacySessionPolicy(key, sessionId) {
+    // 先排除「与策略无关的问题」：模式白名单不认、会话 id 已经换过，都必须照常退役 ——
+    // 采纳逻辑只解释「旧快照少了人格那两项」，不负责替别的故障兜底。
+    if (!isSessionAllowedInCurrentMode(key) || state.sessions[key] !== sessionId) return false;
+    const stored = state.sessionPolicies?.[key];
+    if (typeof stored !== 'string' || !stored) return false;
+    let legacy;
+    try { legacy = JSON.parse(stored); } catch { return false; }
+    if (!Array.isArray(legacy) || legacy.length !== 3) return false;
+    // 复用同一个 sessionPolicy()：前三项怎么算由它决定，这里只做比较，不另写一份规则。
+    const policy = sessionPolicy(key);
+    const current = JSON.parse(policy);
+    if (legacy[0] !== current[0] || legacy[1] !== current[1] || legacy[2] !== current[2]) return false;
+    if (roleFor(key).source !== 'default') return false;
+    state.sessionPolicies[key] = policy;
+    return true;
+  }
+
   function reconcileSessionPolicies() {
     // DSH preset 清单未知时**绝不能**做退役判定。
     //
@@ -4499,9 +4558,15 @@ async function main() {
     // 于是**所有** QQ 会话在这一个 tick 里被集体退役：DSH 会话被停掉归档、agentToken 轮换、
     // 映射删除，每个群的上下文全丢，日志里只有一句「会话权限已变化」。
     // 一次网络抖动换来全体失忆，代价完全不成比例。清单为空时宁可不判定，等下一轮。
+    // 注意：这条守卫必须在采纳逻辑**之前** —— 清单未知时连"前三项是否相等"都算不准。
     if (dshPresetIds.length === 0) return;
     for (const [key, sessionId] of Object.entries(state.sessions)) {
-      if (!isCurrentSession(key, sessionId)) retireSession(key);
+      if (isCurrentSession(key, sessionId)) continue;
+      if (adoptLegacySessionPolicy(key, sessionId)) {
+        log(`[role] 采纳旧会话策略基线 ${key}（人格=继承默认）`);
+        continue;
+      }
+      retireSession(key);
     }
   }
 
@@ -8086,10 +8151,56 @@ async function main() {
             return;
           }
           const after = { ...snapshot, ...parsed.value, defaultRole: snapshot.defaultRole };
-          const impact = planRoleChanges(snapshot, after, { keys: roleBindingKeys() });
-          if (impact.conflicts.length > 0) {
+          let impact = planRoleChanges(snapshot, after, { keys: roleBindingKeys() });
+          // 合并冲突的**显式确认**（接口契约 §3.1，覆盖 C2 首版的 409-only 行为）。
+          // 界面先拿 plan 的 conflicts，用户选定最终人格后由 apply 带 mergeChoice 提交。
+          const mergeChoice = readMergeChoice(body?.mergeChoice);
+          if (!mergeChoice.ok) {
+            sendJson({ ok: false, error: mergeChoice.error, revision }, 400);
+            return;
+          }
+          const resolvedConflicts = [];
+          if (mergeChoice.value) {
+            const conflictByScope = new Map(
+              impact.conflicts.filter((item) => item.type === 'merge-persona').map((item) => [item.scope, item])
+            );
+            for (const [scope, name] of Object.entries(mergeChoice.value)) {
+              const conflict = conflictByScope.get(scope);
+              if (!conflict) {
+                // 只允许解决**本次**报出来的合并冲突：拿一个别的 scope 来「提前决定」未来某次
+                // 合并的人格，等于绕过预览（dev-doc §6 要求先预览再决定）。
+                sendJson({ ok: false, error: `mergeChoice 的 ${scope} 不是本次的合并冲突（只能解决 plan 报出的 merge-persona 冲突）`, conflicts: impact.conflicts, revision }, 400);
+                return;
+              }
+              const candidates = conflict.candidates.map((item) => item.name);
+              if (name !== 'none' && !candidates.includes(name)) {
+                sendJson({ ok: false, error: `mergeChoice 的 ${scope} 只能选 ${[...candidates, 'none'].join(' / ')}`, conflicts: impact.conflicts, revision }, 400);
+                return;
+              }
+              resolvedConflicts.push({ scope, name });
+            }
+          }
+          const chosenScopes = new Set(resolvedConflicts.map((item) => item.scope));
+          if (chosenScopes.size > 0) {
+            // 先改 bindings 再**重算** impact：退役范围、rebindOnly 与 missing 都必须按用户
+            // 选定后的人格算，不能沿用「还没选」那一版的计划（apply 的落盘与退役都用它）。
+            // 拷贝一份再改：parsed.value.bindings 可能就是 snapshot.bindings 同一个对象，
+            // 原地赋值会把 before 也改掉，重算出来的影响永远是「零变化」。
+            const bindings = { ...after.bindings };
+            for (const { scope, name } of resolvedConflicts) {
+              bindings[scope] = name === 'none' ? { mode: 'none' } : { mode: 'card', name };
+            }
+            after.bindings = bindings;
+            impact = planRoleChanges(snapshot, after, { keys: roleBindingKeys() });
+          }
+          // role-binding.js 的合并判定比较的是**保存前**两组各自的生效人格（这是「这次合并
+          // 要不要用户拍板」的正确判据），它不读 after.bindings —— 所以显式选完之后这些
+          // scope 仍会出现在 conflicts 里。用户已经明确表态的那些按 resolvedConflicts 扣除，
+          // 剩下的才是「还没解决」的冲突（仍有 → 409 且零修改）。
+          const unresolved = impact.conflicts.filter((item) => !chosenScopes.has(item.scope));
+          if (unresolved.length > 0) {
             // 合并两组时人格不同：必须先选最终人格，未选则**零修改**（dev-doc §6）。
-            sendJson({ ok: false, error: '合并后的人格冲突还没解决，请先选择最终人格', conflicts: impact.conflicts, revision }, 409);
+            sendJson({ ok: false, error: '合并后的人格冲突还没解决，请先选择最终人格', conflicts: unresolved, revision }, 409);
             return;
           }
           if (impact.invalid.length > 0) {
@@ -8125,6 +8236,9 @@ async function main() {
               rebindOnly: impact.rebindOnly.map((item) => item.key),
               unchanged: impact.unchangedScopes.length,
             },
+            // 契约 §3.1：这次提交里由用户显式拍板的合并冲突（空数组 = 本次没有冲突）。
+            // 回给界面，才能把「已保存配置」和「哪几个人格是你选的」一起说明白。
+            resolvedConflicts: [...resolvedConflicts].sort((a, b) => (a.scope < b.scope ? -1 : a.scope > b.scope ? 1 : 0)),
             retire: retired,
             notes,
           });
@@ -8843,8 +8957,8 @@ async function main() {
             return;
           }
           const isV2 = currentMode === 'reserved2';
-          const roleState = readRoleState();
-          const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
+          // T-035 C3：这条后台提醒也按**该 key 的生效人格**取卡（不是全局默认人格）。
+          const roleLine = currentRoleLine(key);
           // 二代必须带会话令牌，否则 AI 调用任何 MCP 状态/发送工具都会被拒。
           let tokenLine = '';
           if (isV2) {
@@ -9202,7 +9316,6 @@ async function main() {
           if (cfg.socialV2?.sticker?.enabled !== false) {
             try { await syncStickerLibrary(false); } catch {}
           }
-          const roleState = readRoleState();
           const toolMap = {
             getPrompt: 'qq_get_prompt',
             getUnread: 'qq_get_unread_messages',
@@ -9334,7 +9447,24 @@ async function main() {
               userId: selfUserId || null,
               line: selfIdentityTextV2().trim() || null
             },
-            role: { name: roleState.role ?? null, hint: currentMode === 'reserved2' ? currentRoleHintV2() : currentRoleHint() },
+            // T-035 C3：role 段是**这个 key** 的生效人格（同组一致、组间不同），不是全局默认。
+            // 显式 none / 卡文件缺失时不注入正文（hint 为空串）、name 为 null，并用 source /
+            // missing 把原因说清楚 —— 界面与模型都要能分清「本来就不用人格卡」和「绑定的卡被删了」，
+            // 后者绝不能悄悄换成默认人格（dev-doc §8）。
+            role: (() => {
+              const resolved = roleFor(key);
+              const card = resolved.roleName ? readRoleCard(resolved.roleName) : null;
+              return {
+                name: card ? card.name : null,
+                hint: currentMode === 'reserved2' ? currentRoleHintV2(key) : currentRoleHint(key),
+                scope: resolved.scope,
+                source: resolved.source,
+                // 内容版本 = 生效内容摘要（`名@内容sha1前8` / `none` / `missing:名`），与
+                // sessionPolicy 里那一份同源，模型看到的版本和会话快照不会各说各话。
+                revision: roleContentRevision(resolved),
+                missing: Boolean(resolved.roleName) && !card,
+              };
+            })(),
             recommended: cfg.socialV2?.provideRecommendations === false ? null : {
               wake: cfg.socialV2?.wake ?? {},
               send: cfg.socialV2?.send ?? {},
@@ -14311,7 +14441,7 @@ async function main() {
     st.activeExitAt = now;
     // 先取消尚未触发的旧回复/补刀定时器，避免退场期间再冒出旧发言
     cancelSocialTimers(key);
-    const roleHint = currentRoleHint();
+    const roleHint = currentRoleHint(key);
     const promptText = buildActiveExitPrompt(key, roleHint);
     scheduleSocialReply(
       key, promptText,
@@ -14496,7 +14626,7 @@ async function main() {
               st.proactiveNextCheckAt = now + randInt(Number(cfg.social?.proactiveCheckMinMs ?? 2700000), Number(cfg.social?.proactiveCheckMaxMs ?? 5400000));
               if (Math.random() < Number(cfg.social?.proactiveProbability ?? 0.2)) {
                 enterActive(key);
-                const roleHint = currentRoleHint();
+                const roleHint = currentRoleHint(key);
                 const promptText = buildProactivePrompt(key, roleHint);
                 scheduleSocialReply(
                   key, promptText,
@@ -14612,7 +14742,7 @@ async function main() {
         log(`摘要投喂创建会话失败 (${k}): ${error?.message ?? error}`);
         continue;
       }
-      const roleHint = currentRoleHint();
+      const roleHint = currentRoleHint(k);
       const summaryText = `${roleHint ? roleHint + '\n\n' : ''}【群聊摘要】过去一段时间群里发生了这些（你未逐条参与）：\n${lines}\n\n【最近对话】\n${buildContextBlock(k)}\n\n你不需要回复，只需记住这些内容，后续聊天会更自然。`;
       const silentId = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
       social.silentTurns.set(sessionId, [...(social.silentTurns.get(sessionId) ?? []), { id: silentId, ts: Date.now() }]);
@@ -14654,50 +14784,141 @@ async function main() {
   // 定时器必须与它同作用域（放在这里会在回调里抛 ReferenceError，每 10 分钟崩一次）。
   // 注册点在 startConsoleServer 内、runAffectVent 之后。
 
-  // 当前角色扮演提示：读 state/current-role.json + roles/<角色>.md，
-  // 由桥接注入到 QQ 群消息（群友无法通过对话修改，只能由管理端写该文件）。
-  // 缓存 key 为两个文件的 mtime，mtime 未变时直接返回，避免每次同步读文件。
-  let roleHintCache = { key: '', raw: '' };
-  // 原始人格卡（按 mtime 缓存，不截断）。
-  function roleRawContent() {
-    try {
-      const rs = readRoleState();
-      if (!rs.role) return '';
-      // 读取点也必须校验人格名：写入点（控制台 /role 命令）都过 sanitizeRoleName，
-      // 但 state/current-role.json 是**用户可直接编辑**的文件。没有这道校验时，
-      // {"role":"../../../../Users/Public/x"} 会让 roles/ 之外的文件被读进来并注入每一条提示词。
-      const safeName = sanitizeRoleName(rs.role);
-      if (!safeName || safeName.includes('..')) return '';
-      const roleFile = path.join(ROLES_DIR, safeName + '.md');
-      const resolved = path.resolve(roleFile);
-      if (!resolved.startsWith(path.resolve(ROLES_DIR) + path.sep)) return '';
-      if (!fs.existsSync(resolved)) return '';
-      const stateStat = fs.statSync(ROLE_STATE_FILE);
-      const roleStat = fs.statSync(roleFile);
-      // 缓存 key 必须带上**文件名与文件大小**，不能只看 mtime：
-      // ① 有些文件系统 mtime 只有秒级粒度（或时钟回拨），同一 tick 内把角色卡重写成新人格，
-      //    两个 mtime 完全相同 → 缓存命中 → 注入的还是旧人格，而且是每条提示词都错；
-      //    带上名字后，切换角色（例如 a.md → b.md）永远不会误命中。
-      // ② 同名的原地重写若长度变了（大多数编辑都会变），size 变化也能击穿缓存。
-      // 代价只是多几次 stat，比"热注入路径上一直发旧人格"划算得多。
-      const cacheKey = `${safeName}:${stateStat.mtimeMs}:${stateStat.size}:${roleStat.mtimeMs}:${roleStat.size}`;
-      if (roleHintCache.key === cacheKey) return roleHintCache.raw;
-      const raw = fs.readFileSync(roleFile, 'utf8');
-      roleHintCache = { key: cacheKey, raw };
-      return raw;
-    } catch {
-      return '';
-    }
+  // ── 人格解析与注入（T-035 C3）────────────────────────────────────────────────
+  // 历史：这里原本只认「全局默认人格」（state/current-role.json），缓存也只缓存「上一次
+  // 那张卡的正文」。现在每个会话 key 都走同一条解析：role-binding.js 的 resolveRoleBinding
+  // （作用域显式绑定 → 全局默认 → 无人格）。**不要在这里另写一套组号/绑定判断** ——
+  // 两份规则一旦漂移，就会出现「同组三个会话显示不同人格」这种只在合并/迁移后才复现的错。
+  //
+  // 兼容：不传 key = 全局默认人格（控制台预览与旧调用点仍这么调）；运行时路径一律传 key。
+  let roleResolveCache = { signature: '', byKey: new Map() };
+  const ROLE_RESOLVE_CACHE_MAX = 512;
+  // 正文缓存按「卡名 + 内容 sha1 前 8 位」做键：同一张卡被多个作用域引用时只筛一次；
+  // 内容一变（哪怕同秒同长度重写）哈希就变，绝不会命中旧文本（dev-doc §5.1 / A10）。
+  // 解析结果按「分组 + 绑定 + 默认人格」的快照签名失效 —— 只缓存「上一次全局人格」时，
+  // 组 A / 组 B 交替取文本会串卡（A10 的 A/B/A 场景）。
+  const roleRawCardCache = new Map();  // `<名>@<digest>` → { name, digest, raw }
+  const roleHintTextCache = new Map(); // `<名>@<digest>|<模式>|<上限>` → 已筛好、已截断的注入文本
+  const ROLE_TEXT_CACHE_MAX = 32;
+
+  /** 有界 LRU-ish 写入：Map 的插入顺序就是淘汰顺序，命中时重插一遍。 */
+  function rememberRoleCache(cache, key, value, max) {
+    if (cache.has(key)) cache.delete(key);
+    cache.set(key, value);
+    while (cache.size > max) cache.delete(cache.keys().next().value);
   }
+
+  /**
+   * 会话 key → 生效人格（**唯一解析入口**：state/current-role.json 与 cfg.role.bindings 只在这里读）。
+   *
+   * 不传 key 时返回「全局默认人格」：scope=null、gid=0、source=default。这不是「0 号组」——
+   * 真正的 gid=0 会话各有各的 `isolated:<key>` 作用域，彼此独立（dev-doc §3.1）。
+   */
+  function roleFor(key) {
+    const bindings = normalizeRoleBindings(cfg.role?.bindings).bindings;
+    const groups = crossGroups();
+    const defaultRole = readRoleState().role ?? null;
+    const normalizedKey = typeof key === 'string' ? key.trim() : '';
+    if (!normalizedKey) {
+      return { key: '', scope: null, gid: 0, source: 'default', mode: 'inherit', roleName: defaultRole };
+    }
+    const signature = JSON.stringify([groups, bindings, defaultRole]);
+    if (roleResolveCache.signature !== signature) roleResolveCache = { signature, byKey: new Map() };
+    const hit = roleResolveCache.byKey.get(normalizedKey);
+    if (hit) return hit;
+    const record = { key: normalizedKey, ...resolveRoleBinding(normalizedKey, groups, bindings, defaultRole) };
+    rememberRoleCache(roleResolveCache.byKey, normalizedKey, record, ROLE_RESOLVE_CACHE_MAX);
+    return record;
+  }
+
+  /**
+   * 按卡名安全打开 roles/<卡名>.md（**唯一**的人格卡读取入口）。
+   *
+   * 安全边界不能因为「多了一层作用域解析」而放宽：卡名来自**用户可手改**的 config
+   * （role.bindings）与 state/current-role.json，所以照样过 sanitizeRoleName、必须落在
+   * roles/ 目录下、不存在（或不是普通文件）就当作没有 —— 既不抛错，也不越界读。
+   * 没有这道校验时，{"role":"../../../../Users/Public/x"} 会让 roles/ 之外的文件被读进来
+   * 并注入每一条提示词。
+   *
+   * @returns {{ name: string, path: string, digest: string, raw: string } | null}
+   */
+  function readRoleCard(roleName) {
+    const safeName = sanitizeRoleName(roleName);
+    if (!safeName || safeName.includes('..')) return null;
+    const roleFile = path.join(ROLES_DIR, safeName + '.md');
+    const resolved = path.resolve(roleFile);
+    if (!resolved.startsWith(path.resolve(ROLES_DIR) + path.sep)) return null;
+    let raw;
+    try { raw = fs.readFileSync(resolved, 'utf8'); } catch { return null; }
+    // 摘要必须是**内容哈希**，不能是 mtime+size：同一秒内同长度重写两个都不变，而注入
+    // 文本已经变了（dev-doc §5.1 / A10）。读 12KB + sha1 的代价远小于「一直发旧人格」。
+    const digest = crypto.createHash('sha1').update(raw, 'utf8').digest('hex').slice(0, 8);
+    const cacheKey = `${safeName}@${digest}`;
+    const card = roleRawCardCache.get(cacheKey) ?? { name: safeName, path: roleFile, digest, raw };
+    rememberRoleCache(roleRawCardCache, cacheKey, card, ROLE_TEXT_CACHE_MAX);
+    return card;
+  }
+
+  /**
+   * 生效内容摘要：`卡名@内容sha1前8` / `none` / `missing:卡名`。
+   *
+   * 复用 role-binding.js 的 effectiveRoleDigest，只喂**这张卡**的摘要：算整库摘要要读所有
+   * 卡，而会话策略快照是每条出站消息都要重算的（captureSendGuard）。
+   */
+  function roleContentRevision(role) {
+    if (!role || role.mode === 'none' || !role.roleName) return 'none';
+    const card = readRoleCard(role.roleName);
+    const digest = card
+      ? effectiveRoleDigest({ ...role, roleName: card.name }, { [card.name]: card.digest })
+      : effectiveRoleDigest(role, {});
+    // effectiveRoleDigest 对「卡缺失」给的是 `<名>@missing:<名>`，而接口契约 §3.1 写的版本
+    // 是 `missing:<名>`。同一个事实的两种写法，这里按契约收敛成后者（判定规则仍然只有那一份）。
+    const missingAt = digest.indexOf('@missing:');
+    return missingAt >= 0 ? digest.slice(missingAt + 1) : digest;
+  }
+
+  /** 原始人格卡正文（不截断）：该 key 没有生效卡（显式 none / 没配 / 卡缺失）→ 空串。 */
+  function roleRawContent(key) {
+    const role = roleFor(key);
+    if (!role.roleName) return '';
+    const card = readRoleCard(role.roleName);
+    return card ? card.raw : '';
+  }
+
   // 按仿真模式取用：先用标题里的 〔一代〕/〔二代〕 标记筛掉另一模式的专属小节，
   // **再**按上限截断——这样另一模式的内容不会白白占掉本次的注入预算。
-  function roleHintForMode(mode) {
-    const selected = selectRoleText(roleRawContent(), mode);
-    if (!selected) return '';
-    return selected.length > roleInjectMaxChars ? truncateText(selected, roleInjectMaxChars) : selected;
+  function roleHintForMode(mode, key) {
+    const role = roleFor(key);
+    if (!role.roleName) return '';
+    const card = readRoleCard(role.roleName);
+    if (!card) return '';
+    const cacheKey = `${card.name}@${card.digest}|${mode}|${roleInjectMaxChars}`;
+    const hit = roleHintTextCache.get(cacheKey);
+    if (hit !== undefined) {
+      rememberRoleCache(roleHintTextCache, cacheKey, hit, ROLE_TEXT_CACHE_MAX);
+      return hit;
+    }
+    const selected = selectRoleText(card.raw, mode);
+    const text = !selected ? '' : (selected.length > roleInjectMaxChars ? truncateText(selected, roleInjectMaxChars) : selected);
+    rememberRoleCache(roleHintTextCache, cacheKey, text, ROLE_TEXT_CACHE_MAX);
+    return text;
   }
-  function currentRoleHint() {
-    return roleHintForMode('v1');
+  function currentRoleHint(key) {
+    return roleHintForMode('v1', key);
+  }
+
+  /**
+   * 提示词开头的「【当前角色】…」那一行（唤醒 / 收尾提醒 / 后台提醒共用一份格式）。
+   *
+   * 只有该 key **确实有一张可读的卡**时才出现：显式 none、没配、卡缺失都是空串 ——
+   * 卡被删了却仍告诉模型「你是 X」等于让它照着一份不存在的设定说话。
+   */
+  function currentRoleLine(key) {
+    const role = roleFor(key);
+    if (!role.roleName) return '';
+    const card = readRoleCard(role.roleName);
+    if (!card) return '';
+    return `【当前角色】${card.name}（完整角色卡请调用 qq_get_prompt 查看）\n\n`;
   }
 
   // 二代仿真模式专用角色提示：去掉一代的 [SILENT] / 空格分句等状态机指令，避免与工具协议冲突。
@@ -14787,9 +15008,9 @@ async function main() {
     return `第 ${bad.join('，')} 条之间像是把同一句话拆开了；如果两条拼起来才完整，请合并成一条，或把断点移到完整句子的边界。`;
   }
 
-  function currentRoleHintV2() {
+  function currentRoleHintV2(key) {
     // 先按 〔二代〕/〔一代〕 标记筛小节；下面的逐行过滤只是给「没标记的老卡片」兜底。
-    const raw = roleHintForMode('v2');
+    const raw = roleHintForMode('v2', key);
     if (!raw) return '';
     // 一代仿真模式专用指令整行过滤，避免污染二代工具协议。
     // 用 role-card.js 导出的那份（文件顶部已 import）：这里原先又抄了一份同源正则，
@@ -15267,6 +15488,34 @@ async function main() {
       }
     }
     return { started, failed };
+  }
+
+  /**
+   * 读 `mergeChoice`（接口契约 §3.1）：`{ "<scope>": "<最终卡名>" | "none" }`。
+   *
+   * 这里只做**形状**校验（对象 / 值是非空字符串）；「这个 scope 是不是本次的 merge-persona
+   * 冲突」「这个名字是不是该冲突的候选」必须拿**这一次** plan 出来的 conflicts 才判得了，
+   * 留给 apply 的处理块（那里看得见 impact.conflicts 与候选列表）。
+   *
+   * 未提供（undefined / null）= 不解决任何冲突，行为与首版一致。
+   *
+   * @returns {{ ok: true, value: Record<string,string>|null } | { ok: false, error: string }}
+   */
+  function readMergeChoice(raw) {
+    if (raw === undefined || raw === null) return { ok: true, value: null };
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+      return { ok: false, error: 'mergeChoice 必须是对象（作用域 → 卡名 / "none"）' };
+    }
+    const value = {};
+    for (const [scope, name] of Object.entries(raw)) {
+      const key = String(scope).trim();
+      if (!key) return { ok: false, error: 'mergeChoice 的作用域不能为空' };
+      if (typeof name !== 'string' || !name.trim()) {
+        return { ok: false, error: `mergeChoice 的 ${key} 必须是卡名或 "none"` };
+      }
+      value[key] = name.trim();
+    }
+    return { ok: true, value };
   }
 
   /**
@@ -16304,8 +16553,7 @@ async function main() {
   }
 
   function buildWakePromptV2(key, reason) {
-    const roleState = readRoleState();
-    const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
+    const roleLine = currentRoleLine(key);
     const identityLine = selfIdentityTextV2();
     const st = getSocialV2State(key);
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
@@ -16408,8 +16656,7 @@ async function main() {
   }
 
   function buildWakeReminderPromptV2(key) {
-    const roleState = readRoleState();
-    const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
+    const roleLine = currentRoleLine(key);
     const identityLine = selfIdentityTextV2();
     const st = getSocialV2State(key);
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
@@ -17096,7 +17343,8 @@ async function main() {
     }
 
     // 角色扮演提示注入（仅注入给 agent，不影响群友之间的正常对话语义）
-    const roleHint = currentRoleHint();
+    // T-035 C3：按**本会话 key** 的生效人格取卡（同组一致、组间不同）。
+    const roleHint = currentRoleHint(key);
 
     // 群聊里带发送者信息，私聊不用；角色提示注入到消息开头（agent 可见）；
     // 管理员消息带身份标记（供 agent 识别，但其权限仍受工具面硬限制）
@@ -17164,7 +17412,7 @@ async function main() {
 
       // 触发成功：进入活跃，贴最近上下文 + 当前消息 + 人格（仅此一次），让 AI 回复
       enterActive(key);
-      const roleHint = currentRoleHint();
+      const roleHint = currentRoleHint(key);
       const currentLine = (isOwner && kind === 'private') ? `【管理员】${sender}：${textContent}` : `${sender}：${textContent}`;
       const directionHint = textContent.includes('[引用') ? DIRECTION_HINT + '\n' : '';
       const replyInstruction = direct
