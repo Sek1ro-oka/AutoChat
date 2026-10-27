@@ -6,31 +6,16 @@ import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { dshModulesDir } from './dsh-modules.mjs';
 
-// dsh-persona 的入口必须「真的存在」才算找到：dshModulesDir() 返回的是 profile 侧的
-// node_modules（如 %USERPROFILE%\.dsh\profiles\<profile>\node_modules），而 DSH Desktop
-// 从 0.2.x 起把核心包装在应用目录（…\Programs\DSH Desktop\resources\app\node_modules），
-// profile 侧只剩 js-yaml 之类的残留依赖 —— 只按 profile 反查会拿到一个没有 dsh-persona 的目录。
-// 所以这里逐个候选探测，宁可显式报错也不静默加载错版本。
-function resolvePersonaEntry() {
-  const rel = path.join('@deepseek-ai', 'dsh-persona', 'lib', 'index.js');
-  const candidates = [];
-  const override = process.env.DSH_INSTALL_MODULES || process.env.DSH_MODULES;
-  if (override) candidates.push(path.join(override, rel));
-  try { candidates.push(path.join(dshModulesDir(), rel)); } catch { /* 兜底候选继续尝试 */ }
-  const localApp = process.env.LOCALAPPDATA || '';
-  if (localApp) {
-    for (const app of ['DSH Desktop', 'dsh']) {
-      candidates.push(path.join(localApp, 'Programs', app, 'resources', 'app', 'node_modules', rel));
-    }
-  }
-  for (const file of candidates) if (fs.existsSync(file)) return file;
-  throw new Error('找不到 @deepseek-ai/dsh-persona 的入口文件，已尝试：\n'
-    + candidates.map((c) => `  ${c}`).join('\n')
-    + '\n  可用 DSH_INSTALL_MODULES=<DSH 安装目录>/node_modules 覆盖后重试。');
-}
-
+// dshModulesDir() 现在只返回「含 @deepseek-ai/dsh-* 的运行时树」（探测逻辑见 scripts/dsh-modules.mjs），
+// 所以 dsh-persona 的入口只需做一次存在性断言：缺了就直接把目录打出来，
+// 而不是让动态 import 变成一句没有上下文的 ERR_MODULE_NOT_FOUND。
 const DSH_MODULES = dshModulesDir();
-const persona = await import(pathToFileURL(resolvePersonaEntry()).href);
+const personaEntry = path.join(DSH_MODULES, '@deepseek-ai', 'dsh-persona', 'lib', 'index.js');
+if (!fs.existsSync(personaEntry)) {
+  throw new Error(`找不到 @deepseek-ai/dsh-persona 的入口文件：${personaEntry}\n`
+    + '  可用 DSH_INSTALL_MODULES=<DSH 安装目录>/node_modules 覆盖后重试。');
+}
+const persona = await import(pathToFileURL(personaEntry).href);
 
 let failed = 0;
 function check(label, fn) {

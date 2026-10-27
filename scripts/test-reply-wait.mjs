@@ -73,7 +73,12 @@ test('reply waits only for the remaining quiet time after model reading', () => 
   st.lastIncomingAt = Date.now() - 600;
   const result = await request('wait', { purpose: 'reply', timeoutMs: 1500, quietMs: 800 });
   assert.equal(result.data.quiet, true);
-  assert.ok(result.data.waitedMs >= 100 && result.data.waitedMs < 600, `remaining wait was ${result.data.waitedMs}ms`);
+  // 判据要「能区分」又「不怕抖动」：目标是 200ms（静默 800 − 已过去 600），
+  // 但 CI/全量审计并行跑时一次调度就可能吃掉几百毫秒（2026-10-27 全量审计里实测
+  // 680ms 被旧上界 600 判红，单独跑却稳定通过）。上界放到一个**完整静默窗口**
+  // 800ms：既给足抖动余量，又仍能抓住「不按已过去的时间抵扣、从此刻起等满 800ms」
+  // 那个真实缺陷（若那样实现，waitedMs 必然 ≥ 800）。
+  assert.ok(result.data.waitedMs >= 100 && result.data.waitedMs < 800, `remaining wait was ${result.data.waitedMs}ms`);
 }));
 
 test('a message between snapshot and wait is returned without duplicate snapshot content', () => fixture(async ({ h, key, st, request, append }) => {

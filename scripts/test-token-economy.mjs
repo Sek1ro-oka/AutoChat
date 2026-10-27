@@ -161,15 +161,22 @@ await test('a full quiet observation allows a single combined close', async ({ h
   assert.deepEqual(seqs(st.unread), []);
 }, { observe: true });
 
-await test('wait exposes new messages and grants only their actually observed cursor', async ({ st, request, append }) => {
+await test('wait exposes new messages and grants only their actually observed cursor', async ({ h, st, request, append }) => {
+  // 观察窗口必须**长于**快车道的静默下限（fastQuietMs，默认 1200ms）：否则等待会一路等到
+  // 「安静满窗口」，走 preSleepWaitSatisfied 分支并把 observedAt 清掉（satisfied 优先于
+  // observed，见 src/bridge.js 的 11337-11352）。本用例要覆盖的是「看见新消息、但没安静
+  // 满窗口」这条路径。约束：preSleepWaitMs ≤ wait.maxMs，且 timeoutMs ≥ preSleepWaitMs
+  // 才算一次观察尝试。
+  h.cfg.socialV2.wake.preSleepWaitMs = 2000;
   append('message before wait');
   await request('unread');
-  const waiting = request('wait', { body: { timeoutMs: 1000, quietMs: 0 } });
+  const waiting = request('wait', { body: { timeoutMs: 2000, quietMs: 0 } });
   const timer = setTimeout(() => append('message during observation'), 60);
   let waited;
   try { waited = await waiting; } finally { clearTimeout(timer); }
   assert.equal(waited.status, 200);
   assert.equal(waited.data.arrived, true);
+  assert.equal(waited.data.preSleepWaitSatisfied, false);
   assert.equal(waited.data.preSleepWaitObserved, true);
   assert.deepEqual(seqs(waited.data.newMessages), [2]);
   assert.equal(waited.data.readThroughSeq, 2);

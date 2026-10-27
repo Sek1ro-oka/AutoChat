@@ -68,7 +68,8 @@ const LOCAL_EXECUTION_TOOLS = [
   'send_message', 'interrupt_agent', 'list_agents',
   'workflow', 'ralph',
   'cordis_inspect_list', 'cordis_inspect_query',
-  'dsh_snapshot', 'dsh_rollback', 'incident_resolved',
+  // dsh_snapshot / dsh_rollback / incident_resolved 只随可选插件 dsh-plugin-guard 出现，
+  // 2026-10-27 起与 codex/claude-code 一样归入 OPTIONAL_BUNDLE_TOOLS（见下）。
   'job_list', 'job_output', 'job_kill', 'skill', 'present',
   'get_goal', 'create_goal', 'update_goal',
   'dev_mode_set', 'dev_mode_status', 'dev_mode_subagent',
@@ -88,8 +89,15 @@ const LOCAL_EXECUTION_TOOLS = [
   'subagent_codex', 'subagent_claude_code',
 ];
 
-/** 0.2.1 起 Codex / Claude Code 改为按需安装：这组名字默认扫不到，不算拼错假名。 */
-const OPTIONAL_BUNDLE_TOOLS = new Set(['subagent_codex', 'subagent_claude_code']);
+/**
+ * 只在「可选插件装上时」才注册的名字：默认安装扫不到，不算拼错假名。
+ *   ① 0.2.1 起 Codex / Claude Code 改为按需安装的组合包；
+ *   ② dsh-plugin-guard（第三方可选插件）的 dsh_snapshot / dsh_rollback / incident_resolved。
+ */
+const OPTIONAL_BUNDLE_TOOLS = new Set([
+  'subagent_codex', 'subagent_claude_code',
+  'dsh_snapshot', 'dsh_rollback', 'incident_resolved',
+]);
 
 /**
  * 工具名 → 真实存在与否。抽取实现在 `scripts/dsh-tool-names.mjs`（唯一实现，

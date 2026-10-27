@@ -132,8 +132,8 @@ const LOCAL_EXECUTION_TOOLS = [
   'workflow', 'ralph',
   // 插件/cordis 运行期检查：能读宿主状态（0.1.7 起只有这两个名字）
   'cordis_inspect_list', 'cordis_inspect_query',
-  // 本机文件 + 进程：plugin-guard 会改写配置并 spawn pnpm
-  'dsh_snapshot', 'dsh_rollback', 'incident_resolved',
+  // （plugin-guard 的 dsh_snapshot / dsh_rollback / incident_resolved 2026-10-27 移入
+  //   OPTIONAL_BUNDLE_TOOL_NAMES：它们只随可选插件 dsh-plugin-guard 注册，DSH 自带包里没有。）
   // 会话/交付/任务面
   // 注意：`todo_write` 与 `ask_user_question` **故意不在**此名单——它们是下面
   // SAFE_EXACT 允许的无害模型侧工具，两边不能自相矛盾。
@@ -164,19 +164,29 @@ const LOCAL_EXECUTION_TOOLS = [
 ]
 
 /**
- * 0.2.1 起改为「按需安装」的可选能力包里才会注册的全局工具名。
+ * 「只在可选插件装上时才存在」的全局工具名。
  *
- * 它们默认**不存在**于安装树里（0.2.0 时写在 `dsh-web-app/presets/*.patch.yml`），
- * `tools.restrict()` 对它们必然抛错——守卫逐个 try/catch 正是为这种名字设计的。
- * 保留的收益：用户装上 Codex / Claude Code 组合包后，名字回到全局层时**立刻**被挡，
- * 不必等下一次对账。
+ * 两类来源，共同点：默认安装里**不存在**，`tools.restrict()` 对它们必然抛错
+ * （守卫逐个 try/catch 正是为这种名字设计的），但装上之后名字就回到全局层，必须立刻被挡。
+ *   ① DSH 0.2.1 起改为按需安装的 Codex / Claude Code 组合包；
+ *   ② `dsh-plugin-guard` 这类**第三方可选插件**（不在 `@deepseek-ai/dsh-*` 里）：
+ *      它改写 package.json/lockfile/patch 并 spawn pnpm。2026-08-29 的一次 qq-chat-v2
+ *      仿真会话记录里 `dsh_snapshot`/`dsh_rollback`/`incident_resolved` **真的进过 schema**，
+ *      所以不能删名单——只是本地默认没装，扫描器扫不到。
+ *
+ * 保留的收益：用户装上这些包后，名字回到全局层时**立刻**被挡，不必等下一次对账。
  *
  * 扫描器与测试用这一组把「可选项」和「拼错的假名」区分开：只有不在本组、又扫不到的
  * 名字才判成假名。
  */
 export const OPTIONAL_BUNDLE_TOOL_NAMES = Object.freeze([
+  // 0.2.1 起 Codex / Claude Code 改成按需安装的组合包（0.2.0 时写在 dsh-web-app/presets/*.patch.yml）
   'subagent_codex',
   'subagent_claude_code',
+  // dsh-plugin-guard（web profile 的可选插件）注册的三个工具：改配置 + spawn pnpm
+  'dsh_snapshot',
+  'dsh_rollback',
+  'incident_resolved',
 ])
 
 const KNOWN_DANGEROUS_GLOBAL_TOOLS = [
