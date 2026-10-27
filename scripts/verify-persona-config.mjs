@@ -6,9 +6,31 @@ import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { dshModulesDir } from './dsh-modules.mjs';
 
-const DSH_MODULES = dshModulesDir();
+// dsh-persona 的入口必须「真的存在」才算找到：dshModulesDir() 返回的是 profile 侧的
+// node_modules（如 %USERPROFILE%\.dsh\profiles\<profile>\node_modules），而 DSH Desktop
+// 从 0.2.x 起把核心包装在应用目录（…\Programs\DSH Desktop\resources\app\node_modules），
+// profile 侧只剩 js-yaml 之类的残留依赖 —— 只按 profile 反查会拿到一个没有 dsh-persona 的目录。
+// 所以这里逐个候选探测，宁可显式报错也不静默加载错版本。
+function resolvePersonaEntry() {
+  const rel = path.join('@deepseek-ai', 'dsh-persona', 'lib', 'index.js');
+  const candidates = [];
+  const override = process.env.DSH_INSTALL_MODULES || process.env.DSH_MODULES;
+  if (override) candidates.push(path.join(override, rel));
+  try { candidates.push(path.join(dshModulesDir(), rel)); } catch { /* 兜底候选继续尝试 */ }
+  const localApp = process.env.LOCALAPPDATA || '';
+  if (localApp) {
+    for (const app of ['DSH Desktop', 'dsh']) {
+      candidates.push(path.join(localApp, 'Programs', app, 'resources', 'app', 'node_modules', rel));
+    }
+  }
+  for (const file of candidates) if (fs.existsSync(file)) return file;
+  throw new Error('找不到 @deepseek-ai/dsh-persona 的入口文件，已尝试：\n'
+    + candidates.map((c) => `  ${c}`).join('\n')
+    + '\n  可用 DSH_INSTALL_MODULES=<DSH 安装目录>/node_modules 覆盖后重试。');
+}
 
-const persona = await import(pathToFileURL(path.join(DSH_MODULES, '@deepseek-ai/dsh-persona/lib/index.js')).href);
+const DSH_MODULES = dshModulesDir();
+const persona = await import(pathToFileURL(resolvePersonaEntry()).href);
 
 let failed = 0;
 function check(label, fn) {
@@ -37,9 +59,20 @@ check('新配置 {prefix, suffix} 通过（suffix 可为空）', () => {
     suffix: '',
   });
   if (v.suffix !== '') throw new Error('suffix 未保留');
+});
+check('新配置 {prefix, suffix} 通过（schema 仍接受 suffix）', () => {
+  const v = persona.Config({
+    prefix: 'You are a coding agent powered by the {{model}} model.',
+    suffix: 'Your working directory is shown in the runtime context.',
+  });
+  if (!v.suffix.includes('runtime context')) throw new Error('suffix 未保留');
   if (v.complete !== false) throw new Error('complete 默认值异常');
   if (v.includeRuntimeContext !== true) throw new Error('includeRuntimeContext 默认值异常');
 });
+
+// DSH 0.2.1 起 agent loop 只注册 provider / model 两个提示词变量（0.2.0 还有 cwd）。
+// 未知变量是 fail loud：system prompt 装配直接抛错，回合在 turn/start 后立刻 error。
+const DSH_PROMPT_VARIABLES = new Set(['provider', 'model']);
 
 // 校验仓库里两个 preset 的 persona 配置块
 const YAML = await import(pathToFileURL(path.join(DSH_MODULES, 'js-yaml/index.js')).href);
@@ -58,13 +91,11 @@ for (const preset of ['qq-chat', 'qq-chat-v2']) {
   check('保留了 {{model}} 变量', () => {
     if (!/\{\{model\}\}/.test(row.config.prefix)) throw new Error('prefix 缺少 {{model}}');
   });
-  check('只用 DSH 已注册的提示词变量（provider / model）', () => {
-    const text = `${row.config.prefix}\n${row.config.suffix ?? ''}`;
-    const unknown = [...new Set([...text.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1]))]
-      .filter((name) => !['provider', 'model'].includes(name));
-    if (unknown.length > 0) {
-      throw new Error(`出现未注册变量：${unknown.map((n) => `{{${n}}}`).join(' ')}（会让每轮装配抛 unknown prompt variable）`);
-    }
+  check('只引用 DSH 已注册的提示词变量（{{cwd}} 在 0.2.1 已不存在）', () => {
+    const used = [...new Set([...JSON.stringify(row.config).matchAll(/\{\{([a-z][a-z0-9_]*)\}\}/g)].map((m) => m[1]))];
+    const unknown = used.filter((v) => !DSH_PROMPT_VARIABLES.has(v));
+    if (unknown.length > 0) throw new Error(`未知变量会让回合直接 error：${unknown.join(', ')}`);
+    if (!used.includes('model')) throw new Error('prefix 缺少 {{model}}');
   });
   check('不再包含已废弃的 text 字段', () => {
     if (Object.hasOwn(row.config, 'text')) throw new Error('仍有 text 字段');

@@ -217,6 +217,14 @@ const tests = [
   // 相等 + 继承默认 → 只改写基线、不退役、不换 token），以及任一不满足都必须照旧退役
   // （显式绑卡 / 显式 none / preset 或模式变了），外加幂等与「不动别的状态字段」。
   'test-role-policy-migration.mjs',
+  // DSH 0.2.1（上游 v0.2.1-r1 合并）：0.2.1 的六处真实变化各自一条回归网——
+  //   media-normalize（图片进模型前的体积/长边/动图抽帧归一化）、sticker-http-fallback
+  //   （WS 挂掉时收藏表情走 OneBot HTTP）、tool-surface（工具开关与 v2 群成员工具的注册面）、
+  //   time-awareness（消息带 at/ago、快照带 now/newestAgo，模型才判得出"这条多久以前发的"）、
+  //   wait-backlog（短等待不算沉睡前观察，canSleepNow/hint 是闸门的第一手结论）、
+  //   tool-restrict-guard（守卫的 restrict 重试与执行期白名单，L7 的第二层兜底）。
+  'test-media-normalize.mjs', 'test-sticker-http-fallback.mjs', 'test-tool-surface.mjs',
+  'test-time-awareness.mjs', 'test-wait-backlog.mjs', 'test-tool-restrict-guard.mjs',
 ];
 let failed = 0;
 for (const test of tests) {
