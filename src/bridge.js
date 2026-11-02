@@ -74,6 +74,27 @@ import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
 import { createTokenLedger, usageOfEvent } from './token-ledger.js';
+import { probeFfmpeg } from './voice-core.js';
+
+// 本机 ffmpeg 探测（只跑一次，结果缓存到进程退出）：媒体降级必须能被看见。
+// 2026-11-02 复盘里的「9 次媒体降级」全都是这种形态 —— 能力缺了、图还是发出去了，
+// 只有一行日志，控制台和 /api/status 上什么也看不出来。
+// 注意：cfg 是 main() 里的局部变量，这里只能接收调用方传进来的配置对象（写成闭包读 cfg
+// 会在测试夹具里炸成 `cfg is not defined`，/api/status 直接 500）。
+let ffmpegProbeMemo = null;
+function ffmpegStatus(cfgLike = null) {
+  if (!ffmpegProbeMemo) {
+    ffmpegProbeMemo = probeFfmpeg({
+      ffmpegPath: process.env.FFMPEG_PATH || cfgLike?.socialV2?.voice?.ffmpegPath || null
+    });
+    if (ffmpegProbeMemo.ok) {
+      log(`[media] ffmpeg 可用：${ffmpegProbeMemo.detail}`);
+    } else {
+      log(`[media] 本机没有可用的 ffmpeg（${ffmpegProbeMemo.detail}）：大图不再压缩、动图只提供首帧。装 ffmpeg 或设置 FFMPEG_PATH / config.json 的 socialV2.voice.ffmpegPath 可恢复`);
+    }
+  }
+  return ffmpegProbeMemo;
+}
 import {
   loadSlang,
   saveSlang,
@@ -619,7 +640,8 @@ function roleWarnings(content, mode = 'v2') {
   if (GEN1_ROLE_LINE_RE.test(untagged)) {
     warnings.push('未标记的小节里含一代仿真专用指令（[SILENT] / 空格分句 / 自动转发…），二代下这些行会被兜底过滤——建议把它们移到带 〔一代〕 标记的小节里');
   }
-  if (/回复示例/.test(untagged) && /[\u4e00-\u9fff]\s+[\u4e00-\u9fff]/.test(untagged)) {
+  // 只认行内空白：多行示例天然跨行，用 \s+ 会把每张带换行的卡都误报（2026-11-02 修）。
+  if (/回复示例/.test(untagged) && /[\u4e00-\u9fff][ \t\u3000]+[\u4e00-\u9fff]/.test(untagged)) {
     warnings.push('“回复示例”节里的中文空格会被自动改写成逗号（二代不用空格分条），建议直接写逗号，或把该节标记为 〔一代〕');
   }
   return warnings;
@@ -6253,7 +6275,10 @@ async function main() {
             activity: readActivityTail(100),
             // 会话永久繁忙看门狗的观测视图：suspect 会话的 key、已静默多久、当前为什么忙。
             // 与上面的上游健康同权限 —— 属于排障信息，只给操作者，不进会话级智能体视图。
-            watchdog: stallWatchdog.snapshot()
+            watchdog: stallWatchdog.snapshot(),
+            // 本机 ffmpeg 是否可用（只探一次）：没有它时大图不压缩、动图只给首帧，
+            // 过去这种降级只散落在运行日志里，控制台上看不出「这台机器缺件」。
+            media: { ffmpeg: ffmpegStatus(cfg) }
           });
           return;
         }
@@ -13825,6 +13850,7 @@ async function main() {
             lastReadThroughSeq: Number.isSafeInteger(val.lastReadThroughSeq) && val.lastReadThroughSeq >= 0
               ? Math.min(val.lastReadThroughSeq, Number(val.lastUnreadSeq) || 0) : 0,
             wakeSeq: Number(val.wakeSeq) || 0,
+            wakesSinceReply: Number(val.wakesSinceReply) || 0,
             crossHintTs: Number(val.crossHintTs) || 0,
             crossHintWake: Number(val.crossHintWake) || 0,
             modelSeenSeqs: new Set(),
@@ -13917,6 +13943,8 @@ async function main() {
           lastUnreadSeq: st.lastUnreadSeq || 0,
           lastReadThroughSeq: st.lastReadThroughSeq || 0,
           wakeSeq: st.wakeSeq || 0,
+          // 沉默唤醒闸的计数（醒来却什么都没发）：只用于调制主动开口概率，见 scheduleProactiveCheckV2
+          wakesSinceReply: st.wakesSinceReply || 0,
           crossHintTs: st.crossHintTs || 0,
           crossHintWake: st.crossHintWake || 0,
           activeTopics: Array.isArray(st.activeTopics) ? st.activeTopics.slice(-50) : [],
@@ -15147,7 +15175,7 @@ async function main() {
     let out = '';
     for (let i = 0; i < chars.length; i++) {
       const ch = chars[i];
-      if (ch === ' ' || ch === '\t') {
+      if (ch === ' ' || ch === '\t' || ch === '\u3000') {
         const prev = chars[i - 1];
         const next = chars[i + 1];
         const prevCjk = !!prev && isCjkLikeChar(prev);
@@ -17051,6 +17079,9 @@ async function main() {
     st.wakeConfig.sleepUntil = null;
     st.wakeConfig.lastWakeAt = now;
     st.wakeConfig.wakeCount = (st.wakeConfig.wakeCount || 0) + 1;
+    // 沉默唤醒闸的计数：醒来一次 +1；之后只要真的发过消息，下一次主动检查会因为
+    // lastAiReplyAt >= lastWakeAt 判为「有回应」而把它清零（见 scheduleProactiveCheckV2）。
+    st.wakesSinceReply = (Number(st.wakesSinceReply) || 0) + 1;
     st.lastWakeReason = reason;
     // 跨会话通知的轮次计数：只在真实唤醒时 +1（繁忙/限频的提前 return 不算轮）。
     st.wakeSeq = (Number(st.wakeSeq) || 0) + 1;
@@ -17307,17 +17338,24 @@ async function main() {
       void sendWakePromptV2(key, 'timeout').catch((error) => log(`[reserved2] 睡眠到期唤醒异常 ${key}:`, error?.message ?? error));
       return;
     }
-    // Node setTimeout 超过 2^31-1ms 会按 1ms 触发；远未来定时器先等一小段后重新续期，
-    // 而不是提前唤醒。这里刻意用 100 秒级的小步长（而不是 24 天的上限）：
-    // 每次续期都会用 Date.now() 重新算剩余时间，系统时钟被校正/跳变时能很快纠正过来。
-    const MAX_TIMEOUT_MS = 100009;
-    if (delay > MAX_TIMEOUT_MS) {
+    // Node setTimeout 超过 2^31-1ms 会按 1ms 触发；远未来定时器先等一段后重新续期，
+    // 而不是提前唤醒。这里刻意用「小步长 + 每次用 Date.now() 重算剩余时间」，
+    // 系统时钟被校正/跳变时能很快纠正过来。
+    // 步长 30 分钟（2026-11-02 前是 100 秒）：100 秒意味着「离睡觉还有 20 小时」的单会话
+    // 一天要空转 864 次、刷 864 行同样的日志——复盘里 private:2432829808 连发 40 分钟就是它。
+    const RENEW_STEP_MS = 30 * 60 * 1000;
+    if (delay > RENEW_STEP_MS) {
       st.sleepTimer = setTimeout(() => {
         st.sleepTimer = null;
         setupSleepTimerV2(key);
-      }, MAX_TIMEOUT_MS);
+      }, RENEW_STEP_MS);
       st.sleepTimer.unref?.();
-      log(`[reserved2] 设置远未来有限潜水定时器 ${key}，首段 ${Math.round(MAX_TIMEOUT_MS / 1000)} 秒后续期`);
+      // 同一个 sleepUntil 的连续续期只记一次，日期变了才重新记
+      const stamp = String(wc.sleepUntil);
+      if (st.sleepTimerLoggedFor !== stamp) {
+        st.sleepTimerLoggedFor = stamp;
+        log(`[reserved2] 设置远未来有限潜水定时器 ${key}，剩余 ${Math.round(delay / 60000)} 分钟，每 ${RENEW_STEP_MS / 60000} 分钟续期一次`);
+      }
       return;
     }
     st.sleepTimer = setTimeout(() => {
@@ -17360,6 +17398,27 @@ async function main() {
       const recent = Array.isArray(st.recentMessages) ? st.recentMessages : [];
       const aiCount = recent.filter((m) => m && m.isSelf && Date.now() - Number(m.time || 0) < 60 * 60 * 1000).length;
       if (aiCount >= 5) prob *= 0.3;
+      // 沉默唤醒闸（2026-11-02 复盘 P1③）：同一个会话连续「醒了却什么都没发」越多，主动开口
+      // 的概率越低。复盘实测近两天 198 次真实发送 vs 509 次空转（沉默率 72%），6 个私聊
+      // 近一天 0~1 条发送却各有 25~34 次唤醒 —— 这些唤醒的输入 token 全在打水漂。
+      // 只用两个既有时间戳 + 一个自增计数，不动任何发送路径：wakesSinceReply 在
+      // sendWakePromptV2 里 +1，这里一旦看到「上次唤醒之后有过发送」就把计数清零。
+      // 参数可用 config.json 的 socialV2.proactive.silenceGate* 微调，默认 3 次起、对半衰减、地板 0.15。
+      const gateAfter = Math.max(1, Math.round(Number(cfg.socialV2?.proactive?.silenceGateAfter ?? 3)));
+      const gateFactor = Math.min(0.9, Math.max(0.1, Number(cfg.socialV2?.proactive?.silenceGateFactor ?? 0.5)));
+      const gateFloor = Math.min(0.9, Math.max(0.01, Number(cfg.socialV2?.proactive?.silenceGateFloor ?? 0.15)));
+      const wakesSinceReply = Number(st.wakesSinceReply) || 0;
+      const lastWakeAt = Number(st.wakeConfig?.lastWakeAt) || 0;
+      const repliedAfterWake = !!st.lastAiReplyAt && Number(st.lastAiReplyAt) >= lastWakeAt;
+      if (repliedAfterWake && wakesSinceReply > 0) {
+        st.wakesSinceReply = 0;
+      } else if (!repliedAfterWake && wakesSinceReply >= gateAfter) {
+        const gateBefore = prob;
+        prob = Math.max(0, prob * Math.max(gateFloor, gateFactor ** (wakesSinceReply - gateAfter + 1)));
+        if (prob !== gateBefore) {
+          log(`[reserved2] 沉默唤醒闸 ${key}：连续 ${wakesSinceReply} 次醒来没发消息，主动概率 ${gateBefore.toFixed(2)} → ${prob.toFixed(2)}`);
+        }
+      }
       // 情绪加成（T-012 第六步）：气头上/正高兴时更愿意主动开口。强度取衰减后四维的最大值，
       // 系数 1 + 0.6 * I（I=1 时 +60%），结果仍夹在 1 以内。情绪模块关掉时不加，
       // 上面的 enabled / paused / 模式 / 空闲门槛一概不动 —— 这里只调制「掷骰子的概率」。
@@ -18756,6 +18815,9 @@ async function main() {
     log(`SnowLuma 首次连接未成功（将在后台自动重连并尝试自愈 WS token）: ${error?.message ?? error}`);
   });
   log('桥接已启动。按 Ctrl+C 退出。');
+  // 媒体能力自检：没有 ffmpeg 时整条媒体链路会静默降级（大图不压缩、动图只给首帧），
+  // 复盘时这类降级只以「找不到 ffmpeg」的形式散落在运行日志里，不主动报一次就没人知道。
+  ffmpegStatus(cfg);
   // 预热表情库：启动时同步一次 QQ 收藏表情，失败不阻塞（AI 首次调用工具时还会再试）。
   if (cfg.socialV2?.sticker?.enabled !== false) {
     syncStickerLibrary(true).catch((error) => log('启动预热表情库失败:', error?.message ?? error));

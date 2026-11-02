@@ -5,6 +5,37 @@
 
 ## [Unreleased]
 
+### 复盘欠账清理（2026-11-02，`PROJECT-RETROSPECTIVE-2026-11-02.md` §9/§10）
+
+- **磁盘清理有了工具**：新增 `scripts/prune-state.mjs`（+ `scripts/test-prune-state.mjs` 34 条断言，已登记 `test-audit`）+ npm 脚本 `prune` / `prune:dry`。默认删 `state/device/` 里 7 天前的截图（按文件名时间戳，mtime 只兜底）、`--archive-usage` 把 `state/token-usage.jsonl` 的旧月份按自然月切到 `state/archive/`。两道闸：`--dry-run` 绝不下手；`--archive-usage` 发现 `state/bridge.lock` 里的进程还活着就跳过并说明原因（`--force` 才硬来）。首跑回收 **110.39 MB**（`state/` 116.7 MB → 6.3 MB，38 张截图清空）。
+- **记账口径不再倒挂**：`token-ledger.sessionView()` 的「已归属」原来取 `entry.allCost`（全部采样，含 `seq <= baseline.seq` 的重放），比 `cost`（只算 live + 基线 + 已淘汰）还大 —— 账本上是 `cost ¥142.73 / attributedCost ¥160.98`。改成 `entry.liveCost`，并删掉随之成为死代码的 `allCost` / `allByTier`。不变式回归：`attributedCost + unattributedCost == cost`、`attributedCost <= cost`。`test-token-usage` 里那条恒等式断言（`unattributed = cost - attributed`）换成三条真断言，才能抓住倒挂。
+- **100 秒续期噪音**：`setupSleepTimerV2()` 的远未来潜水定时器原来用 `MAX_TIMEOUT_MS = 100009`（100 秒）反复续期且每次都写日志，单个会话一天刷 864 行。改成 `RENEW_STEP_MS = 30 分钟`，并对同一个 `sleepUntil` 只记一行（「还剩 N 分钟，每 30 分钟续期一次」）。
+- **沉默唤醒闸**：新增会话内计数 `wakesSinceReply`（进 `saveSocialV2State()` 白名单、`loadSocialV2State` 水合、`sendWakePromptV2()` 自增）。`scheduleProactiveCheckV2()` 里连续 `silenceGateAfter`（默认 3）次醒来都没发消息后，主动概率按 `silenceGateFactor ** k` 递减、下限 `silenceGateFloor`（默认 0.15）；一旦有回复就清零。**只调制「主动检查」的概率**，被 @ / 被点名唤醒的路径不受影响。背景：复盘里近两天 198 次发送 vs 509 次内部空转。
+- **ffmpeg 缺件可见了**：`voice-core.js` 新增 `probeFfmpeg()` / `resetFfmpegProbe()`（`spawnSync <ffmpeg> -version` 判 `/ffmpeg version/i`，结果进程内缓存），`send-voice-lib.js` 同步转发（薄转发层必须覆盖 voice-core 全部导出，有测试钉着）。桥接启动时探一次并写一行结论日志，`/api/status` 新增 `media.ffmpeg`。这台机器现在会明确记「本机没有可用的 ffmpeg（spawnSync ffmpeg ENOENT）：大图不再压缩、动图只提供首帧」，而不是等降级发生时散落一遍。新增 `scripts/test-ffmpeg-probe.mjs`（9 断言）。
+- **MCP block 自愈改成「验过才算修好」**：`scripts/dsh-web-supervisor.mjs` 的 `repairMcpBlock()` 自己 `spawnSync` 跑 `setup-dsh.mjs web` 并捕获输出，**修完必须复核 `mcpBlockEntryCount()`**：条目仍是 0 就只记 `repair ineffective`（带 patch 文件 mtime/size），不重启 DSH —— 过去「修没修成都先 kill 一次」等于白停 20 秒。修好才记 `entries A->B`。调查结论：DSH 的插件开关（`dsh-plugin-manager` 的 `writePluginEnabled`）会跳过带 `insert` 的条目，所以抹掉我们这 7 条 MCP 的不是开关路径，来源仍待下次触发时依据新日志定位。
+- **文档账**：新增 `docs/guides/SOCIAL-CHAINS.md`（四个模式 × 三条链：状态存哪、改哪个开关才生效、排障对照；明确一代社交状态只在内存 `social.states`、二代才是 `state/social-v2.json`）。`docs/README.md` 重写索引，死链 **23 → 0**（全仓库 5 → 0），并修掉 `BILI.md` / `SECURITY_BASELINE.md` 的 `../RULES.md`（应为 `../../RULES.md`）、`README.en.md` 两处指向已 gitignore 目录的链接、`README.md` 里 `../voice-tool/` 的失效链接；`docs/FOLDER_MAP.md` 的 `scripts/` 文件数更新为 143（139 `.mjs` + 4 JSON，含 `test-*.mjs` 106 个）。
+- **人格卡保存时的假阳性警告**：`roleWarnings` 的「回复示例里有中文空格」正则原来用 `\s+`，把换行也算进去，于是任何多行示例卡都恒报一条。改成 `[ \t\u3000]+` 只认行内空白；`convertExampleSpacesToComma()` 同步补上全角空格（`\u3000`）——原来它不会被改写却在警告里算数。`POST /api/roles/update` 保存 `roles/小鲸鱼-南溟.md` 现在返回 `warnings: []`。
+- 结果：`test-audit` **84/84**（新增 `test-prune-state`、`test-ffmpeg-probe`）。
+
+### 人格卡「小鲸鱼-南溟」（2026-11-02）
+
+- 新卡 `roles/小鲸鱼-南溟.md`（**5,899 字符 / 12 节**，正文一行一段，标题独立成行），由控制台「人格与角色」建卡后随仓库入库。内容为「DeepSeek 小鲸鱼」群友版的南溟定制稿：傲娇嘴硬、去 AI 味、表情包与说说纪律。
+- 绑定口径：挂到 **互通组 1（`cross:1`）** —— `group:119212385`（Minecraft 群）与 5 个私聊共享同一张卡；`cross:2`（deepsleep 群）与 `isolated:private:1691642607` 保持原卡不动。apply 一次重建 6 个会话，旧映射全部 `retire` 成功。
+- **按二代仿真口径改写**（一代的「文本会被自动转发 / 空格分条 / `send_sticker` 只填分类」在新卡里全部作废）：分条改成「`qq_send_message` 的 `messages` 数组，一个数组元素=一个气泡」；表情改成「`qq_list_stickers` 选图（可按备注/标签搜）→ `qq_send_sticker` 一次一张、不能带文字 → 想说话用 `qq_send_message` 单独发」；潜水改成「不调用任何发送工具，直接结束这次处理」。
+- 排版修正：原文是一整行（0 个换行）的 12 段标题挤正文，重建为标题 + 分条；两处标题笔误 `## 单六、` → `## 六、`、`## 十一自己长啥样` → `## 十一、自己长啥样`；删掉 §十 结尾的残留串「、知道」；§七 示例里的中文空格改成 `｜` 表示「拆成两条」，示例本身不再含任何中文空格。
+- 正文刻意避开 `role-card.js` 的 `GEN1_ROLE_LINE_RE`（「用空格」「自动转发」「[SILENT]」等词会让整行在二代被丢弃），最终 `selectRoleText(card,'v2')` 与原文等长、丢弃 0 行。
+
+### 门禁转绿：两个长期红灯（2026-10-27，`dafe9e3`）
+
+- **`scan-dsh-tool-names` 报的 59 个「假名」不是名单脏，是 `dshModulesDir()` 定位错了**：DSH Desktop 0.2.x 起把 `@deepseek-ai/dsh-*` 留在应用安装目录（`…\Programs\DSH Desktop\resources\app\node_modules`），profile 侧只剩 js-yaml / cosmokit 这类残留依赖；`PROBE_SPECIFIERS` 一命中 js-yaml 就返回那个残缺目录，于是「扫到 0 个包」、59 个真实工具名全被判成假名，`verify-persona-config` 也跟着 `ERR_MODULE_NOT_FOUND`。
+- `scripts/dsh-modules.mjs` 的候选必须含至少一个 `@deepseek-ai/dsh-*`（`looksLikeDshModules`）才算数，再补各平台已知安装目录兜底；`verify-persona-config` 改用同一解析。`plugins/qq-agent-presets/qq-tool-restrict.mjs` 把 `dsh_snapshot` / `dsh_rollback` / `incident_resolved` 归入 `OPTIONAL_BUNDLE_TOOL_NAMES`（默认装不到但实测进过 schema，名单不删），运行期行为不变。
+- **`test-token-economy` 的 wait 用例是真缺陷**：观察窗口 1000ms 短于快车道静默下限（代码默认 1200ms），等待会一路安静到满窗口，`preSleepWaitSatisfied` 抢在 `preSleepWaitObserved` 之前把 observed 清掉 → 改成 `preSleepWaitMs=2000 / timeoutMs=2000` 并显式断言 `satisfied:false` / `observed:true`。`test-reply-wait` 的上界从 600ms 放宽到 800ms（全量审计并行时 680ms 会被误判）。
+- 结果：**`test-audit` 82/82**（`test-token-economy` 36/36、`test-reply-wait` 35/35、`test-preset-local-tools` 7/7、`test-tool-restrict-guard` 4/4）；`scan-dsh-tool-names` 守卫名单 82 个名字 / 悬空 0 / 未覆盖危险名 0。
+
+### 人格卡「小鲸鱼-嘴臭豆腐心」（2026-10-27，`31da56d`）
+
+- 由控制台「人格与角色」创建的本机人格卡（中式嘴臭、江湖气、刀子嘴豆腐心，387 行），随仓库入库以免丢失；`roles/` 目录里的卡是产品内容，不是运行时数据。
+
 ### 按互通组配置人格卡（2026-10-25，T-035）
 
 - **产品规则**：人格卡从「全局唯一」改成「按互通组解析」。编号 > 0 的会话作用域是 `cross:<gid>`（组内群聊与私聊共享一张卡），编号 0 是 `isolated:<会话key>`（各自独立，绝不聚合成「0 号组」）。三种选项：继承默认人格（**不落记录**）/ 指定人格卡（`{"mode":"card","name":…}`）/ 不使用人格卡（`{"mode":"none"}`）；解析顺序 作用域 → 默认 → 无人格，不拼接多张卡。默认人格仍在 `state/current-role.json`，不复制进 config。
@@ -15,7 +46,7 @@
 - **会话策略与在途隔离**：`sessionPolicy()` 增加「作用域 + 生效内容摘要」，`captureSendGuard` 自动拦住旧回合的发送 / 语音 / 图片（不另造机制）；不含 `source`，所以「继承 ↔ 显式同名同内容卡」不会误杀。
 - **迁移**：`adoptLegacySessionPolicy()` 只对「旧 3 元组策略 + 继承默认」的就地采纳成新五元组，升级后第一次启动**不再一次性退役所有既有会话**（dev-doc §9）；显式绑卡 / `none` / 模式·preset·ownerQQ 真变了的照常重建。
 - **控制台**：「跨渠道互通」页新增吸顶的互通组总览（编号 / 成员 / 生效人格三态 / 内容版本 / 状态）、「+ 新增互通组（编号 N）」「清除闲置绑定」；会话编号改成下拉（`0（不共享）` + 各组）；底部「未保存变更 / 预览影响 / 保存 / 重置」，保存是**一次** apply，409 只提示刷新不重试，500 保留草稿；人格卡折叠区支持查看 / 复制到组 / 编辑原卡 / 删除（被引用时先拦下并列出引用清单）。人格页只保留默认人格与卡库。
-- **测试**：新增 `test-role-binding`（73 断言）、`test-role-bindings-endpoints`（13 组隔离 HTTP 用例）、`test-role-injection`（8 用例）、`test-role-policy-migration`（5 用例），`test-console-cross` 重写；均已登记 `test-audit`。`test-audit` 现为 **75/76**，唯一红灯仍是既有的 `test-token-economy` 观察语义用例。
+- **测试**：新增 `test-role-binding`（73 断言）、`test-role-bindings-endpoints`（13 组隔离 HTTP 用例）、`test-role-injection`（8 用例）、`test-role-policy-migration`（5 用例），`test-console-cross` 重写；均已登记 `test-audit`。`test-audit` 当时为 **75/76**（唯一红灯是既有的 `test-token-economy` 观察语义用例，2026-10-27 由 `dafe9e3` 修真，见上方条目；现为 **82/82**）。
 - **文档**：新增 `docs/guides/ROLE-BINDING.md`；设计与接口见 `work/agent-tasks/T-035/`（dev-doc、addendum-r2、api-contract、demo、验收记录）。
 
 ### 语气档位：`qq_speak` 能「演出情绪」了（2026-10-23，T-034）

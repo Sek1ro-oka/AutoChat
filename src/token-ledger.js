@@ -516,8 +516,6 @@ export function createTokenLedger({
           liveBuckets: { ...ZERO_BUCKETS },
           liveCost: 0,
           liveByTier: { peak: 0, off: 0 },
-          allCost: 0,
-          allByTier: { peak: 0, off: 0 },
           estimated: false,
           turns: new Map(),
           models: new Set()
@@ -528,8 +526,6 @@ export function createTokenLedger({
       const isLive = !base || s.seq > base.seq;
       const p = priceUsage(s.buckets, { model: s.model, at: s.t || now(), table: priceTable });
       entry.estimated ||= p.rates.estimated;
-      entry.allCost += p.cost.total;
-      entry.allByTier[p.rates.tier] += p.cost.total;
       if (isLive) {
         entry.liveBuckets = addBuckets(entry.liveBuckets, s.buckets);
         entry.liveCost += p.cost.total;
@@ -615,8 +611,16 @@ export function createTokenLedger({
         }
         view.turns += entry.turns.size;
       }
-      // 能拆到具体某一轮的花费 = 所有采样的花费之和；差额是只剩累计值的历史。
-      const attributed = entry?.allCost ?? 0;
+      // 能拆到具体某一轮的花费 = 内存里还留着逐轮明细的采样（`liveCost`，只含基线之后的采样）。
+      // 落在「未逐轮归属」的是两类：投影基线本身（桥接启动前的累计值），
+      // 以及被压缩淘汰掉的旧回合（只剩汇总、行已经没了）。
+      // 这里**不能用「全部采样之和」**（原实现是 entry.allCost）：基线范围内的重放采样
+      // 也在其中，而它们只进逐轮明细、不进权威总量（见 buildIndex 的 isLive 判断），
+      // 用了会让「已归属」反超总额、两条数对不上账
+      //（2026-11-02 复盘实测：cost ¥142.73 vs attributedCost ¥160.98）；也不能把 gone.cost
+      // 算进来——那部分恰恰是不再有逐轮明细的部分。三条数必须满足
+      // `attributedCost + unattributedCost == cost`。
+      const attributed = entry?.liveCost ?? 0;
       view.attributedCost += attributed;
       view.unattributedCost += Math.max(0, cost - attributed);
     }

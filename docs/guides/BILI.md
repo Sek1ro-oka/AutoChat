@@ -9,7 +9,7 @@ QQ 侧的 agent 可以真的去看一个 B站视频——不是凭记忆编，�
 ## 为什么不用 agent-reach skill
 
 agent-reach 是一个 **DSH skill**，它的用法是让 agent 通过 shell 调 `opencli` / `yt-dlp` / `bili` 这些命令行。
-而 QQ 会话的 preset 刻意**不给 agent 命令执行能力**（见 [RULES.md](../RULES.md) 的「QQ 会话 agent 的硬边界」），
+而 QQ 会话的 preset 刻意**不给 agent 命令执行能力**（见 [RULES.md](../../RULES.md) 的「QQ 会话 agent 的硬边界」），
 所以把 skill 挂上去也用不了。这里改成把同一个 CLI 包成三个只读 MCP 工具，能力等价、攻击面更小。
 
 ## 工具

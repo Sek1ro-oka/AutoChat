@@ -12,7 +12,7 @@
  *
  * 单实例：state/dsh-web-supervisor.pid 记录 pid，已在跑就直接退出。
  */
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -132,19 +132,46 @@ function mcpBlockEntryCount() {
   }
 }
 
+// 每次体检顺带记下 patch 文件的「谁在什么时候改的」：区块被抹掉时，
+// 这条时间戳是唯一能把「DSH 自己重写了 profile」和「有人手工编辑」区分开的证据。
+function patchStamp() {
+  try {
+    const st = fs.statSync(PATCH_FILE);
+    return `${st.mtime.toISOString()} (${st.size}B)`;
+  } catch {
+    return 'missing';
+  }
+}
+
 let lastRepairAt = 0;
+
+// setup-dsh 内部会跑 `dsh plugin --profile web install`，它失败时只打一行退出码、
+// 原因被吞掉（历史上长期报「返回退出码 1」，没人知道为什么）。这里改成自己捕获
+// stdout+stderr，把第一行有信息量的错误写进 supervisor 日志。
 function repairMcpBlock(reason) {
   if (Date.now() - lastRepairAt < 120000) return false;
   lastRepairAt = Date.now();
-  try {
-    const out = execFileSync('node', [path.join(ROOT, 'scripts', 'setup-dsh.mjs'), 'web'], { cwd: ROOT, encoding: 'utf8' });
-    const tail = out.trim().split(/\r?\n/).slice(-2).join(' | ');
-    log(`MCP block repaired (${reason}): ${tail}`);
-    return true;
-  } catch (error) {
-    log(`MCP block repair failed (${reason}): ${error?.message ?? error}`);
+  const before = mcpBlockEntryCount();
+  const stamp = patchStamp();
+  const result = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'setup-dsh.mjs'), 'web'], {
+    cwd: ROOT, encoding: 'utf8', timeout: 180000,
+  });
+  const out = `${result.stdout ?? ''}${result.stderr ?? ''}`.trim();
+  const noise = /^\s*$/;
+  const detail = out.split(/\r?\n/).filter((line) => !noise.test(line)).slice(-3).join(' | ');
+  if (result.error || result.status !== 0) {
+    log(`MCP block repair failed (${reason}, entries ${before}->?): status=${result.status ?? 'n/a'} ${result.error?.message ?? ''} | ${detail}`);
     return false;
   }
+  // 修完必须复核：setup-dsh 可能「跑成功了但区块还是空」（例如 install 那步失败），
+  // 这种时候再 SIGKILL DSH 只会白停 20 秒，QQ 侧依旧一个工具都没有。
+  const after = mcpBlockEntryCount();
+  if (after <= 0) {
+    log(`MCP block repair ineffective (${reason}): entries still ${after}; patch=${stamp} | ${detail}`);
+    return false;
+  }
+  log(`MCP block repaired (${reason}): entries ${before}->${after}, patch was ${stamp} | ${detail}`);
+  return true;
 }
 
 function killDshWeb(reason) {
@@ -213,6 +240,8 @@ setInterval(() => {
   const count = mcpBlockEntryCount();
   if (count > 0) return;
   log(`MCP block empty (entries=${count}) -> repairing`);
+  // 只有「复核过、条目真的回来了」才值得重启；否则重启完仍然没有工具，
+  // 只是白白多一次 20 秒的不可用窗口（历史日志里这两件事一直混在一起）。
   if (!repairMcpBlock('watcher')) return;
   killDshWeb('MCP reload');
 }, 60000).unref();

@@ -25,6 +25,10 @@ export {
   LOUDNESS_TARGETS,
   resolveAudioProcessing,
   resolveFfmpeg,
+  // ffmpeg 探针：桥接启动时用它判断这台机器到底能不能压图/抽帧（缺件要能被看见），
+  // 挂在薄转发层里是为了和 resolveFfmpeg 一起走同一个出口，不另开引用路径。
+  probeFfmpeg,
+  resetFfmpegProbe,
   processAudioVolume,
   cleanupTemp
 } from './voice-core.js';

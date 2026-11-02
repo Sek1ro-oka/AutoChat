@@ -38,7 +38,7 @@ DSH/                         ← 工作区根（不是仓库根）
 
 ## 二、`scripts/` 命名约定
 
-脚本共 87 个文件（83 个 `.mjs` + 4 个 JSON 基线，另有 `fixtures/` 目录）。按前缀区分用途：
+脚本共 143 个文件（139 个 `.mjs` + 4 个 JSON 基线，另有 `fixtures/` 目录；其中 `test-*.mjs` 106 个）。按前缀区分用途：
 
 | 前缀 / 形态 | 含义 | 归宿 |
 | --- | --- | --- |
@@ -57,6 +57,7 @@ DSH/                         ← 工作区根（不是仓库根）
 | `audit-bridge-harness.mjs` | 虚拟网关 + 沙箱化的桥接行为审计脚手架（被 `test-audit-bridge.mjs` 使用） | 保留 |
 | `harden-state-acl.mjs` | 收紧 `state/` 目录权限（Windows 上 `mode 0o600` 是空操作，必须动 ACL）。直接试 → 失败提权重试 → 仍失败则打印可复制命令；**任何路径都以 0 退出，绝不阻断启动**。被 `start.bat` 调用 | 保留（`start.bat` 依赖） |
 | `diagnose-acl.mjs` | 只读盘点：列出仓库里所有被**切断 ACL 继承**的路径，分「有意收紧（`state/`、`config.json`）」与「非预期收紧」两类，并对后者打印恢复继承的命令。背景见 [guides/SECURITY_BASELINE.md](guides/SECURITY_BASELINE.md) §2.6：DSH 沙箱的写权限只靠继承下发能力 SID，切断继承 ⇒ 沙箱里写不进去。**必须在无沙箱终端跑**（沙箱禁止以管道 stdio 拉起 icacls） | 保留（`npm run diagnose:acl`） |
+| `prune-state.mjs` | **运行时垃圾清理**（`npm run prune` / `prune:dry`）：删 `state/device/` 里超期的截图（默认 7 天，按文件名里的 `shot-<epoch ms>` 判年龄，mtime 被改写也不影响）、可选清 `work/tmp`、把 `state/token-usage.jsonl` 里「上月之前」的行归档到 `state/archive/token-usage-YYYY-MM.jsonl`（账本到 20,000 行会自己丢最旧的行，归档是为了留住历史）。`--dry-run` 只打印计划；`--archive-usage` 要求桥接已停（读 `state/bridge.lock` 探活），否则必须显式 `--force` | 保留；建议每月初跑一次 `--archive-usage` |
 | `dsh-modules.mjs` | 小工具：按路径加载 DSH 安装内的模块 | 保留 |
 | `check-onebot-status.mjs` | 手工排查：查 OneBot 连通性 | 保留（运维常用） |
 | `patch-*.mjs` | **补丁**（含 `postinstall` 的 `patch-snowluma-sdk.mjs`：修 `@snowluma/sdk` 的 ESM 打包 bug） | `patch-snowluma-sdk.mjs` **必须保留**（postinstall 依赖）；其余见第四节 |

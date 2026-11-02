@@ -158,7 +158,14 @@ assert(c.buckets.output === 600, '基线输出计入总量');
 const expectCost = (5000 / 1e6) * 1 + (50000 / 1e6) * 0.02 + (500 / 1e6) * 4 + (1000 / 1e6) * 1 + (100 / 1e6) * 4;
 assert(near(c.cost, expectCost, 1e-9), `花费 = 基线 + 增量，实得 ${c.cost.toFixed(8)} 期望 ${expectCost.toFixed(8)}`);
 assert(c.turns === 2, '基线范围内的回合仍出现在逐轮明细里（共 2 轮）');
-assert(near(c.unattributedCost, Math.max(0, c.cost - c.attributedCost), 1e-9), '未逐轮归属差额自洽');
+// 归账口径（2026-11-02 复盘修）：已归属 + 未逐轮归属 = 总额，已归属绝不能超过总额。
+// 「已归属」只算基线之后的采样（这里就是 seq 120 那轮）；基线本身（seq ≤ 100）没有逐轮明细，
+// 落在未逐轮归属里。旧实现拿「全部采样之和」当已归属，重放采样被重复计入，
+// 真实账本上出现过 attributed ¥160.98 > cost ¥142.73 的倒挂。
+const liveCost = (1000 / 1e6) * 1 + (100 / 1e6) * 4;
+assert(near(c.attributedCost, liveCost, 1e-9), `已归属 = 基线之后的采样花费（实得 ${c.attributedCost.toFixed(8)} 期望 ${liveCost.toFixed(8)}）`);
+assert(near(c.attributedCost + c.unattributedCost, c.cost, 1e-9), '已归属 + 未逐轮归属 = 总额（钱要对得上账）');
+assert(c.attributedCost <= c.cost + 1e-9, '已归属不超过总额（不许倒挂）');
 assert(near(sum.totals.cost, c.cost, 1e-9), '全局合计 = 各会话之和');
 assert(sum.totals.cacheHitRate > 0.85, `缓存命中率按输入桶计算（${(sum.totals.cacheHitRate * 100).toFixed(1)}%）`);
 

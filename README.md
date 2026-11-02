@@ -303,8 +303,9 @@ qq-bridge/
   state/                # 运行时数据（不入库）
 ```
 
-> 🎤 **独立的「发语音」工具不在这里**：它是仓库上一级的 [`../voice-tool/`](../voice-tool/)（`voice-cli.mjs` /
-> `voice-gui.mjs` / `public/voice.html` / `发语音.cmd`）。图形界面双击上一级的「发语音-图形界面.cmd」。
+> 🎤 **独立的「发语音」工具不在这里**：它在仓库上一级的 `../voice-tool/` 目录（`voice-cli.mjs` /
+> `voice-gui.mjs` / `public/voice.html` / `发语音.cmd`），**不随本仓库分发**，单独部署时记得一并拷贝；本机当前没有这个目录。
+> 图形界面双击上一级的「发语音-图形界面.cmd」。
 > 它只依赖 SnowLuma，共享内核仍由本仓库 `src/voice-core.js` / `src/snowluma-conn.js` 提供（单一实现）。
 >
 > ```bash

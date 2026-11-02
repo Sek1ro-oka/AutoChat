@@ -225,6 +225,13 @@ const tests = [
   //   tool-restrict-guard（守卫的 restrict 重试与执行期白名单，L7 的第二层兜底）。
   'test-media-normalize.mjs', 'test-sticker-http-fallback.mjs', 'test-tool-surface.mjs',
   'test-time-awareness.mjs', 'test-wait-backlog.mjs', 'test-tool-restrict-guard.mjs',
+  // state/ 清理（scripts/prune-state.mjs）：阈值线严格小于、设备截图优先认文件名里的
+  // epoch ms、账本按自然月归档且保留当月+上月、解析不了的行不许丢、桥接在跑时拒绝重写账本。
+  // 全在临时目录里造真文件，不碰本机 state/。
+  'test-prune-state.mjs',
+  // ffmpeg 探针：不存在的显式路径不许被当成可执行文件；探测要真跑、要缓存、失败要给原因。
+  // 复盘里「9 次媒体降级」之所以没人发现，就是因为缺件只在处理图片时才冒一行日志。
+  'test-ffmpeg-probe.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

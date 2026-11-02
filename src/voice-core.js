@@ -11,7 +11,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 /** 网关能直接吃进去的音频扩展名（SnowLuma 会自动转 SILK）。 */
 export const AUDIO_EXTS = [
@@ -348,6 +348,40 @@ export function resolveFfmpeg({ ffmpegPath = null, envVar = 'FFMPEG_PATH' } = {}
   }
   // PATH 里找（不真正执行，交给 spawn 时再报错）；绝不再回退到不存在的候选路径。
   return 'ffmpeg';
+}
+
+/**
+ * 这台机器上到底有没有能用的 ffmpeg（探一次，结果缓存在模块里）。
+ *
+ * 2026-11-02 复盘：没有 ffmpeg 时媒体链路是**静默降级**的 —— 大图不再压缩、动图只给首帧，
+ * 每次都是图片已经进了工具结果才蹦出一行「找不到 ffmpeg」，既看不出是环境缺件，也不知道
+ * 该装什么。这里给一个可以主动查询的探针：桥接启动时打一条日志、并放进 /api/status，
+ * 让「能力缺失」变成看得见的状态，而不是散落在运行日志里的事故。
+ * @param opts ffmpegPath / envVar 与 resolveFfmpeg 一致；force 表示忽略缓存重探。
+ * @returns {{ ok: boolean, command: string, detail: string, checkedAt: number }}
+ */
+let ffmpegProbeCache = null;
+export function probeFfmpeg({ ffmpegPath = null, envVar = 'FFMPEG_PATH', force = false } = {}) {
+  if (!force && ffmpegProbeCache) return ffmpegProbeCache;
+  const command = resolveFfmpeg({ ffmpegPath, envVar });
+  let ok = false;
+  let detail = '';
+  try {
+    const run = spawnSync(command, ['-version'], { encoding: 'utf8', timeout: 5000, windowsHide: true });
+    ok = run.status === 0 && /ffmpeg version/i.test(String(run.stdout ?? ''));
+    detail = ok
+      ? String(run.stdout).split(/\r?\n/)[0].trim().slice(0, 120)
+      : (run.error?.message ?? `exit=${run.status}`);
+  } catch (error) {
+    detail = error?.message ?? String(error);
+  }
+  ffmpegProbeCache = { ok, command, detail, checkedAt: Date.now() };
+  return ffmpegProbeCache;
+}
+
+/** 清掉探针缓存（测试用；改了 ffmpegPath 之后也可以强制重探）。 */
+export function resetFfmpegProbe() {
+  ffmpegProbeCache = null;
 }
 
 /**
