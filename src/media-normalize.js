@@ -35,6 +35,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { resolveFfmpeg } from './voice-core.js';
+import { renderGifSheet, renderGifStill } from './gif-read.js';
 
 /** 默认值集中一处，bridge.js 只做 config 覆盖（见 modelMediaLimits）。 */
 export const MEDIA_DEFAULTS = Object.freeze({
@@ -373,6 +374,22 @@ export async function normalizeImageForModel(buf, mimeType, opts = {}) {
     if (plan.action === 'animate') {
       const layout = planAnimation(info, opts);
       const tileWidth = clampInt(opts.gifTile, 64, 400, MEDIA_DEFAULTS.gifTile);
+      // GIF 先走自带解码器（gif-read.js）：本机没 ffmpeg 时这是唯一能让模型看见动图内容的路；
+      // 有 ffmpeg 时也优先用它——纯内存、不落临时文件、不 spawn，快一个数量级。
+      let jsError = '';
+      if (info.format === 'gif') {
+        const sheet = renderGifSheet(buf, {
+          sample: layout.sampleFrames,
+          cols: layout.cols,
+          rows: layout.rows,
+          tileWidth,
+          maxBytes
+        });
+        if (sheet.ok) {
+          return { ok: true, buffer: sheet.buffer, mimeType: sheet.mimeType, note: sheet.note };
+        }
+        jsError = sheet.reason;
+      }
       const outFile = path.join(dir, 'strip.jpg');
       const vf = `fps=${layout.fps},scale=${tileWidth}:-1:flags=lanczos,` +
         `tile=${layout.cols}x${layout.rows}:padding=4:margin=4:color=white`;
@@ -392,22 +409,24 @@ export async function normalizeImageForModel(buf, mimeType, opts = {}) {
           note: `动图 ${layout.totalFrames} 帧/${seconds}s，已抽 ${layout.sampleFrames} 帧拼成 ${layout.cols}×${layout.rows} 网格，行优先 左上→右下；原图 ${(bytes / 1024 / 1024).toFixed(2)}MB`
         };
       }
-      // 拼图失败（没 ffmpeg / 超时 / 还是太大）：退化到「能看多少算多少」。
+      // 拼图失败（JS 解码失败 + 没 ffmpeg / 超时 / 还是太大）：退化到「能看多少算多少」。
+      const why = [jsError ? `JS 解码：${jsError}` : '', run.ok ? '输出仍超限' : run.error].filter(Boolean).join('；');
       if (bytes <= maxBytes) {
         return {
           ok: true,
           buffer: buf,
           mimeType: mimeType || 'image/gif',
-          note: `动图 ${layout.totalFrames} 帧（抽帧拼图失败：${run.ok ? '输出仍超限' : run.error}，只提供首帧）`
+          note: `动图 ${layout.totalFrames} 帧（抽帧拼图失败：${why}，只提供首帧）`
         };
       }
-      return { ok: false, error: `动图 ${(bytes / 1024 / 1024).toFixed(2)}MB 无法压缩（${run.ok ? '输出仍超限' : run.error}）` };
+      return { ok: false, error: `动图 ${(bytes / 1024 / 1024).toFixed(2)}MB 无法压缩（${why}）` };
     }
 
     // action === 'shrink'：静态图降采样 + 重编码，最多试三轮（逐步缩小尺寸/降质量）。
     const outExt = pickOutputExt(info);
     let edge = maxLongEdge;
     let lastError = '';
+    let ffmpegWorked = false;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const scale = Math.min(1, edge / Math.max(info.width, info.height));
       const width = Math.max(2, Math.round(info.width * scale) & ~1);
@@ -417,8 +436,12 @@ export async function normalizeImageForModel(buf, mimeType, opts = {}) {
       if (outExt === '.jpg') args.push('-q:v', String(3 + attempt * 3));
       args.push(outFile);
       const run = await runFfmpeg(ffmpeg, args, { timeoutMs: opts.timeoutMs });
-      if (!run.ok) { lastError = run.error; }
-      else {
+      if (!run.ok) {
+        lastError = run.error;
+        // 没装 ffmpeg：GIF 还能自己解一帧出来，不必把整张大图丢掉。
+        if (info.format === 'gif' && /找不到 ffmpeg/.test(run.error)) break;
+      } else {
+        ffmpegWorked = true;
         const out = readIfExists(outFile);
         if (out && out.length <= maxBytes) {
           return {
@@ -431,6 +454,11 @@ export async function normalizeImageForModel(buf, mimeType, opts = {}) {
         lastError = '压缩后仍超限';
       }
       edge = Math.max(320, Math.round(edge * 0.7));
+    }
+    // 静态 GIF 兜底：ffmpeg 不可用时自己解第 1 帧重编码。过去这类大 GIF 只有「整张拒绝」一条路。
+    if (info.format === 'gif' && !ffmpegWorked) {
+      const still = renderGifStill(buf, { maxLongEdge, maxBytes });
+      if (still.ok) return { ok: true, buffer: still.buffer, mimeType: still.mimeType, note: still.note };
     }
     // 压不动：小图照发，大图明确拒绝（绝不发注定被 DSH 丢掉的东西）。
     if (bytes <= maxBytes) return { ok: true, buffer: buf, mimeType, note: `压缩失败（${lastError}），按原图提供` };

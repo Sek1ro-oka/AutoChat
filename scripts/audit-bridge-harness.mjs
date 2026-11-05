@@ -315,6 +315,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     sniffImage: mediaNormalize.sniffImage,
     planNormalization: mediaNormalize.planNormalization,
     planAnimation: mediaNormalize.planAnimation,
+    // 启动自检那行日志会引用 gifFrames 上限（缺了它 /api/status 直接 500）。
+    MEDIA_DEFAULTS: mediaNormalize.MEDIA_DEFAULTS,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),

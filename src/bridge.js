@@ -66,7 +66,7 @@ import {
 import { CONSOLE_COOKIE_NAME, buildSessionCookie, isPagePath, parseCookieHeader, resolveRequestToken } from './console-auth.js';
 import { compactModelMessage, describeAge } from './qq-model-view.js';
 import { safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
-import { normalizeImageForModel } from './media-normalize.js';
+import { MEDIA_DEFAULTS, normalizeImageForModel } from './media-normalize.js';
 import { AUDIO_EXTS, cleanupTemp, describeAudio, formatBytes, formatDuration, inspectAudio, listAudioFiles, parseTargetKey, processAudioVolume, resolveAudioProcessing, resolveAudioSource, safeJoinLibrary } from './send-voice-lib.js';
 import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken } from './snowluma-conn.js';
 import { TtsError, resolveTtsSettings, resolveTtsTone, resolveTtsVoice, sanitizeSpeakText, synthesizeEdge, synthesizeSapi } from './tts-core.js';
@@ -90,7 +90,7 @@ function ffmpegStatus(cfgLike = null) {
     if (ffmpegProbeMemo.ok) {
       log(`[media] ffmpeg 可用：${ffmpegProbeMemo.detail}`);
     } else {
-      log(`[media] 本机没有可用的 ffmpeg（${ffmpegProbeMemo.detail}）：大图不再压缩、动图只提供首帧。装 ffmpeg 或设置 FFMPEG_PATH / config.json 的 socialV2.voice.ffmpegPath 可恢复`);
+      log(`[media] 本机没有可用的 ffmpeg（${ffmpegProbeMemo.detail}）：大图不再压缩、动图改走自带 GIF 解码器（抽帧网格，最多 ${MEDIA_DEFAULTS.gifFrames} 帧）。装 ffmpeg 或设置 FFMPEG_PATH / config.json 的 socialV2.voice.ffmpegPath 可恢复大图压缩`);
     }
   }
   return ffmpegProbeMemo;
@@ -6276,7 +6276,7 @@ async function main() {
             // 会话永久繁忙看门狗的观测视图：suspect 会话的 key、已静默多久、当前为什么忙。
             // 与上面的上游健康同权限 —— 属于排障信息，只给操作者，不进会话级智能体视图。
             watchdog: stallWatchdog.snapshot(),
-            // 本机 ffmpeg 是否可用（只探一次）：没有它时大图不压缩、动图只给首帧，
+            // 本机 ffmpeg 是否可用（只探一次）：没有它时大图不压缩、动图走自带 GIF 解码器。
             // 过去这种降级只散落在运行日志里，控制台上看不出「这台机器缺件」。
             media: { ffmpeg: ffmpegStatus(cfg) }
           });
@@ -18815,7 +18815,7 @@ async function main() {
     log(`SnowLuma 首次连接未成功（将在后台自动重连并尝试自愈 WS token）: ${error?.message ?? error}`);
   });
   log('桥接已启动。按 Ctrl+C 退出。');
-  // 媒体能力自检：没有 ffmpeg 时整条媒体链路会静默降级（大图不压缩、动图只给首帧），
+  // 媒体能力自检：没有 ffmpeg 时大图会静默降级（不压缩），动图改走自带 GIF 解码器，
   // 复盘时这类降级只以「找不到 ffmpeg」的形式散落在运行日志里，不主动报一次就没人知道。
   ffmpegStatus(cfg);
   // 预热表情库：启动时同步一次 QQ 收藏表情，失败不阻塞（AI 首次调用工具时还会再试）。

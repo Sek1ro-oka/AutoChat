@@ -232,6 +232,10 @@ const tests = [
   // ffmpeg 探针：不存在的显式路径不许被当成可执行文件；探测要真跑、要缓存、失败要给原因。
   // 复盘里「9 次媒体降级」之所以没人发现，就是因为缺件只在处理图片时才冒一行日志。
   'test-ffmpeg-probe.mjs',
+  // 自带 GIF 解码器（src/gif-read.js）：没装 ffmpeg 也能让模型看见动图。LZW 与独立编码器
+  // 逐字节对拍、透明/处置方式/隔行扫描的合成、抽样与预算、PNG 编码、以及接进 media-normalize
+  // 之后的出口（动图 → 网格 PNG；静态大 GIF → 缩图，不再整张退回）。
+  'test-gif-read.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

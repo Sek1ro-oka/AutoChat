@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+### 读 GIF：没装 ffmpeg 也能看见动图（2026-11-05）
+
+- **新增 `src/gif-read.js`（约 640 行，零依赖，只用 `node:zlib`）**：自带 GIF 解码器 + PNG 编码器。解析 GIF87a/89a 的全局/局部颜色表、图形控制扩展、应用扩展；LZW 解码（含 KwKwK 自引用串、码长增长、字典满即停）；按 disposal 1/2/3 与透明索引逐帧合成；支持隔行扫描（0,8/4/2/1 行序）；按时间轴抽样而不是按下标等分（长定格占权重）；画布 16Mi 像素 / 400 帧 / 总像素工作量 160Mi 的硬预算，超了明确拒绝而不是把进程解死。
+- **`normalizeImageForModel()` 的动图分支改成「先 JS、再 ffmpeg」**：`info.format === 'gif'` 时先 `renderGifSheet()` 出网格 PNG（纯内存、不落临时文件、不 spawn），失败才回落到原来的 ffmpeg `tile` 滤镜，两者都不可用时退回首帧，note 里同时写清两层原因（`抽帧拼图失败：JS 解码：…；找不到 ffmpeg（…），只提供首帧`）。
+- **静态大 GIF 也不再整张退回**：没有 ffmpeg 时 `shrink` 分支一发现是 GIF 就跳出重试，改用 `renderGifStill()` 解第 1 帧、按 `maxLongEdge` 缩小后以 PNG 交出（原来是把 2MB 的 GIF 原样丢给模型或直接拒绝）。
+- **真值校验**：拿本机一张 900×255 / 10 帧的真 GIF，与 GDI+（`System.Drawing`）解的同一帧逐像素比对，**25,500 个采样点 0 差异**；`scripts/test-gif-read.mjs` 14 条断言（含与独立编码器逐字节对拍、透明+disposal=2、隔行扫描、预算拒绝、坏字节、PNG/IHDR 完整性、接进 `normalizeImageForModel` 的两个出口），已登记 `test-audit`（84 → 85 个脚本）。
+- 顺带修掉 `scripts/test-media-normalize.mjs` 里靠 `timeoutMs: 1` 触发「退回首帧」的用例 —— JS 解码成功后那条路径不再可达，改成用「画布 5000×5000 超预算」的 GIF 触发真正的失败路径。
+- 启动日志与 `/api/status` 的措辞同步：缺 ffmpeg 时不再说「动图只提供首帧」，改成「动图改走自带 GIF 解码器（抽帧网格，最多 6 帧）」。
+
 ### 复盘欠账清理（2026-11-02，`PROJECT-RETROSPECTIVE-2026-11-02.md` §9/§10）
 
 - **磁盘清理有了工具**：新增 `scripts/prune-state.mjs`（+ `scripts/test-prune-state.mjs` 34 条断言，已登记 `test-audit`）+ npm 脚本 `prune` / `prune:dry`。默认删 `state/device/` 里 7 天前的截图（按文件名时间戳，mtime 只兜底）、`--archive-usage` 把 `state/token-usage.jsonl` 的旧月份按自然月切到 `state/archive/`。两道闸：`--dry-run` 绝不下手；`--archive-usage` 发现 `state/bridge.lock` 里的进程还活着就跳过并说明原因（`--force` 才硬来）。首跑回收 **110.39 MB**（`state/` 116.7 MB → 6.3 MB，38 张截图清空）。

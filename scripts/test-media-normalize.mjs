@@ -199,16 +199,21 @@ await test('真实大图（3000×2000）→ 降采样到长边上限以内', asy
   assert.match(out.note, /→/);
 });
 
-await test('抽帧失败（ffmpeg 超时/不可用）也不崩：退回首帧 + 说明', async () => {
+await test('解码失败（超预算 + 没 ffmpeg）也不崩：退回首帧 + 说明', async () => {
   // 注意：不能靠「把 ffmpegPath 指到不存在的文件」来模拟不可用 —— resolveFfmpeg 在候选路径
-  // 都不存在时会回退到 PATH 里的 ffmpeg（这是语音功能就有的既定行为）。这里用 1ms 硬超时
-  // 让调用必然失败，验证的是**失败路径的契约**：不抛异常、小图按原样提供、note 说清原因。
-  const out = await normalizeImageForModel(GIF_2, 'image/gif', {
-    ...MEDIA_DEFAULTS, tmpDir: tmp, timeoutMs: 1
-  });
+  // 都不存在时会回退到 PATH 里的 ffmpeg（这是语音功能就有的既定行为）。
+  // 这里改成「自带解码器拒绝解码」：把画布改成 5000×5000（>16Mi 预算），字节仍然只有几十字节。
+  // 验证的是**失败路径的契约**：不抛异常、小图按原样提供、note 说清两层原因。
+  const huge = Buffer.from(GIF_2);
+  huge.writeUInt16LE(5000, 6);
+  huge.writeUInt16LE(5000, 8);
+  assert.equal(sniffImage(huge)?.frames, 2, '夹具仍应被认成 2 帧动图');
+
+  const out = await normalizeImageForModel(huge, 'image/gif', { ...MEDIA_DEFAULTS, tmpDir: tmp });
   assert.equal(out.ok, true);
-  assert.equal(out.buffer, GIF_2, '压不动时小图按原样提供（不阻断对话）');
+  assert.equal(out.buffer, huge, '压不动时小图按原样提供（不阻断对话）');
   assert.match(out.note, /只提供首帧/);
+  assert.match(out.note, /解码预算/, 'note 里要写清是哪一层失败的');
 });
 
 // ── 5. 桥接集成：出图出口会归一化，收藏表情仍拿原始字节 ────────────────────
