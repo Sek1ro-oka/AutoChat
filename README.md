@@ -234,6 +234,10 @@ npm start          # 或双击 start.bat（守护模式：崩溃自动重启，�
 - 桥接异常/消息无反应时：双击 `restart.bat`（自动杀旧实例 → 清理锁 → 重新启动守护）
 - **重启 DSH 通常不需要动桥接**：每 5 秒探活，DSH 不可用期间收到的 QQ 消息在桥接进程内排队（最多 50 条/会话，满后丢最旧项），恢复后尝试补投。桥接进程退出会丢失内存队列；断线期间已经结束的回复暂不保证补发。
 - 修改 `config.json` / `roles/` / `state/current-role.json` 后重启桥接生效；修改 `dsh/agent-presets/`（改完要跑 `node scripts/build-agent-preset-patches.mjs` 重新生成 bundle patch）或 MCP 配置后重启 DSH 生效
+- **DSH（3080）交给计划任务常驻**：`scripts/dsh-web-supervisor.mjs` 会探活 3080、必要时重建 DSH、并把被抹掉的 MCP 区块补回去，但它自己被杀之后没人管——2026-11-05 就因此静默停了 30 小时（桥接一直是 `dshReady=false`，日志里每 30 秒一条「DSH 事件流已结束（本次收到 0 帧）」）。现在分两层：
+  - `AutoChat DSH supervisor`：登录后 30 秒启动 supervisor（隐藏窗口、常驻、单实例）；
+  - `AutoChat DSH supervisor keeper`：每 2 分钟跑 `scripts/ensure-dsh-supervisor.mjs`，发现 `state/dsh-web-supervisor.pid` 里的进程不在了就 `schtasks /Run` 把上面那个任务重新接上；**活着时一行日志都不写**，只有真去拉了才往 `logs/dsh-supervisor-keeper.log` 记一行。
+  - 重装机器时跑一次 `node scripts/install-dsh-tasks.mjs` 即可重建这两个任务（默认只补缺，`--force` 覆盖，`--dry-run` 只看 XML）。任务计划自带的 `RestartOnFailure` **不能**替代这一层：实测外部杀死进程时它不触发，还会连子进程一起收走。
 
 日志示例：
 

@@ -38,7 +38,7 @@ DSH/                         ← 工作区根（不是仓库根）
 
 ## 二、`scripts/` 命名约定
 
-脚本共 145 个文件（141 个 `.mjs` + 4 个 JSON 基线，另有 `fixtures/` 目录；其中 `test-*.mjs` 108 个）。按前缀区分用途：
+脚本共 147 个文件（143 个 `.mjs` + 4 个 JSON 基线，另有 `fixtures/` 目录；其中 `test-*.mjs` 108 个）。按前缀区分用途：
 
 | 前缀 / 形态 | 含义 | 归宿 |
 | --- | --- | --- |
@@ -48,6 +48,7 @@ DSH/                         ← 工作区根（不是仓库根）
 | `test-console-ui.mjs` + `console-ui-*.json` / `console-ui-fixture.mjs` / `fixtures/` | 控制台**离线浏览器回归**与基线（`npm run test:console-ui` / `npm run preview:console`），说明见 [guides/CONSOLE-UI-TESTING.md](guides/CONSOLE-UI-TESTING.md) | 保留（基线只在后端契约真变时才重录） |
 | `send-*.mjs` | 面向 SnowLuma/QQ 的**真发送**小工具（`send-voice.mjs` 走桥接；`send-test-group.mjs` 发测试群） | 保留，但注意会真的发消息 |
 | `setup-*.mjs` | **安装/初始化**：把 preset、MCP 挂载写进目标设备的 DSH（`setup-dsh.mjs`，幂等） | 保留 |
+| `ensure-*.mjs` / `install-dsh-tasks.mjs` | **常驻与自愈**：`ensure-dsh-supervisor.mjs` 是计划任务每 2 分钟跑一次的看门人——读 `state/dsh-web-supervisor.pid`，进程还活着就静默退出，不在了就 `schtasks /Run "AutoChat DSH supervisor"` 让任务计划重新拉起 supervisor（supervisor 再负责 3080 与 MCP 区块）。`install-dsh-tasks.mjs` 生成并安装这两个任务（XML 必须是 UTF-16 + BOM，否则 schtasks 报「无法切换编码」；默认只补缺，`--force` 才覆盖） | 保留（`install-dsh-tasks.mjs` 在重装机器时跑一次即可） |
 | `verify-*.mjs` | **一致性校验**：`verify-dsh-021-adaptation.mjs`（DSH 适配；`npm run verify:adaptation`）、`verify-persona-config.mjs`（人格配置） | 保留 |
 | `probe-*.mjs` | **探针**：用来问 DSH/SnowLuma「实际支持什么」（RPC 形状、工具清单、事件流、工作区、模型、协议帧、settings 命名空间）。鉴权统一走 `probe-auth.mjs` | 保留，按需重跑 |
 | `probe-020-protocol.mjs` / `probe-020-settings.mjs` | 0.2.0 版探针：前者采样 `session/control` baseline、`session/projections`、`session/follow`、`$events`、`session/cancel` 的**原始帧结构**；后者列 settings 命名空间并**幂等写回**验证 `qq-mode` 可写。控制台「改模式不生效」时的第一手诊断 | 保留（`npm run probe:protocol` / `probe:settings`） |

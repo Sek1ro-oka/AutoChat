@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+### DSH 失联 30 小时后：常驻改成计划任务 + 2 分钟看门人（2026-11-06）
+
+- **事故**：11-05 11:23 之后 DSH Web（3080）和 supervisor 一起消失，桥接一直在 `dshReady=false` / `mode=chat` 里每 30 秒重连一次（`state/bridge.log` 里 13:00–17:00 每小时正好 120 条「DSH 事件流已结束（本次收到 0 帧）」），直到 11-06 17:45 才被手工拉起。机器没重启（`LastBootUpTime` 仍是 10/23），`Get-WinEvent Application` 里没有 node.exe / DSH 的 WER 记录，`logs/dsh-web.out` 停在 11-05 11:23:14 → 不是崩溃，是**整棵进程树被作业对象收走**：supervisor 当时是从会话 shell 里 `Start-Process` 起的。
+- **顺带坐实了 MCP 区块又被抹**：新 supervisor 启动时打出 11-02 写的复核逻辑第一次真正生效的日志 —— `MCP block repaired (before start): entries 0->6, patch was 2026-11-05T13:08:13.775Z (7856B)`，即 11-05 21:08 区块被清到 0 条、没人复核。现在 `cordis.patch.yml` 的 BEGIN/END 之间稳定 6 条。
+- **新增 `scripts/ensure-dsh-supervisor.mjs`（61 行）**：读 `state/dsh-web-supervisor.pid`，`process.kill(pid, 0)` 活着就**静默退出**；不在了才 `schtasks /Run "AutoChat DSH supervisor"`，并往 `logs/dsh-supervisor-keeper.log` 记一行。刻意不回显 schtasks 的 stdout（中文控制台是 GBK，写进 UTF-8 日志就是乱码）。
+- **新增 `scripts/install-dsh-tasks.mjs`**：幂等生成并安装两个计划任务（`--dry-run` 只打印 XML、`--force` 覆盖、`--only=` 单装一个）。XML 必须 **UTF-16 + BOM 且声明 `encoding="UTF-16"`**，否则 schtasks 报「无法切换编码 / The task XML is malformed」。
+- **两层常驻**：`AutoChat DSH supervisor`（登录后 30 秒、`InteractiveToken`、`IgnoreNew`、`Hidden`、`ExecutionTimeLimit PT0S`）跑 supervisor；`AutoChat DSH supervisor keeper`（`Repetition PT2M`、`PT5M` 上限、`IgnoreNew`、`Hidden`）跑看门人。切过去之后 supervisor 的父进程是 `svchost.exe`，不再挂任何 shell。
+- **实测否掉两条想当然**：① 任务计划的 `RestartOnFailure` 对「进程被外部杀掉」不触发（`Stop-Process` 之后任务直接变 Ready，75 秒内没重启）；② 任务实例一结束，它拉起的子进程会被一起收走（DSH 也跟着死）。所以看门人必须走 `schtasks /Run` 重新下单，不能自己 spawn、也不能指望任务自愈。
+- **仍未覆盖**：桥接自己还是靠 `cmd /c start.bat` 的守护循环（pid 随登录会话，注销/重启后就没了），SnowLuma 同样不在自启列表里 —— 这次只修了 DSH 这一段。
+
 ### 读 GIF：没装 ffmpeg 也能看见动图（2026-11-05）
 
 - **新增 `src/gif-read.js`（约 640 行，零依赖，只用 `node:zlib`）**：自带 GIF 解码器 + PNG 编码器。解析 GIF87a/89a 的全局/局部颜色表、图形控制扩展、应用扩展；LZW 解码（含 KwKwK 自引用串、码长增长、字典满即停）；按 disposal 1/2/3 与透明索引逐帧合成；支持隔行扫描（0,8/4/2/1 行序）；按时间轴抽样而不是按下标等分（长定格占权重）；画布 16Mi 像素 / 400 帧 / 总像素工作量 160Mi 的硬预算，超了明确拒绝而不是把进程解死。
