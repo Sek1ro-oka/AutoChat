@@ -5,6 +5,22 @@
 
 ## [Unreleased]
 
+### SnowLuma 失联 4h38m 之后：网关与桥接各加一层常驻，唤醒不再丢（2026-11-09）
+
+- **事故**：14:26:34 之后 SnowLuma 的 node 进程消失（自身日志停在一条正常 `get_status`，无崩溃栈）。Windows System 日志在 14:21:03 / 14:26:21 各有一条 `Microsoft-Windows-Resource-Exhaustion-Detector` Id 2004「low virtual memory condition」——机器提交上限 49.7GB、当时空闲虚拟内存 9.1GB，前台 WindowsTerminal / DSH Desktop 各占 2.9GB / 1.9GB，网关是被内存压力收走的。桥接（pid 未变）从 14:27:03 起每 30 秒 `SnowLuma 连接断开（code=1006）` + `token 自愈失败…连不上 OneBot HTTP API`，一直空转到 19:05 才被手工拉起，**4h38m**。期间 agent 仍在醒、仍在写回复，只是发不出去（`state/qq-activity.log` 里 16:38–18:37 一串「QQ 发送失败 … fetch failed」）；`historySync` 关着，那段群/私聊消息没有回补。
+- **根因不是桥接**：桥接的重连逻辑没错，错在**没有任何东西看住网关**——计划任务里只有 DSH 的两个。
+- **新增 `scripts/snowluma-supervisor.mjs`**：每 15 秒探 `127.0.0.1:3001`；没监听就按 `config.json` 的 `snowluma.homeDir` 调 SnowLuma **自己的** `launcher.bat`（不代装、不分发，只是调用你已装好的那份）。已有 `node … index.mjs` 进程时只等不双开（双开会 double-hook 同一个 QQ，表现为 `send_group_msg` 卡满 15 秒），真出现两个实例保留最早、结束后起的；进程在但端口 20 分钟不开判卡死，结束后重拉；连续 3 次拉不起来歇 5 分钟。`state/snowluma-supervisor.pause` 存在时只记录不动手。
+- **新增 `scripts/ensure-snowluma-supervisor.mjs` + `scripts/install-snowluma-tasks.mjs`**：与 DSH 那套同构的两层（`AutoChat SnowLuma supervisor` / `… keeper`，keeper 每 2 分钟 `schtasks /Run` 兜底，活着时一行日志都不写）。装的时候踩到一个坑：**非管理员权限下 `schtasks /Create` 装带 `<LogonTrigger>` 的任务必定 `ERROR: Access is denied`**（与 XML 其它设置无关，去掉 `<Delay>` 也一样），所以这两个任务改用 `CalendarTrigger`（每天 0 点起、每 5 分钟重复、`IgnoreNew` 忽略重叠、`ExecutionTimeLimit PT0S` 常驻）；DSH 那两个是当初用管理员权限装的。
+- **新增 `scripts/bridge-supervisor.mjs` + 同名 keeper / installer**：桥接这半边原来只有 `start.bat` 的 `:loop`，兜得住「node 崩了」，兜不住「整棵进程树没了」（关窗口、注销、`taskkill /T`）——那时 QQ 还连着、消息还在进来，只是没人应答。supervisor 每 60 秒探 3100，整棵树没了就按仓库自己的 `start.bat` 拉起；端口没开但桥接进程还在时只等、不双开（双开会抢 `state/`）；进程在却 10 分钟不开端口判卡死。任务名 `AutoChat Bridge supervisor` / `… keeper`。
+- **实测**：`Stop-Process` 掉 SnowLuma（19:33:24 检出 → 19:33:25.985 端口恢复 → 桥接 19:33:40 打出 `SnowLuma 已连接`，中断约 15 秒）；`taskkill /T` 掉整棵桥接进程树（20:43:37 检出 → 20:43:40 监听 3100，**3 秒**，随后 `机器人昵称: 南溟`、`DSH 已就绪（模式: reserved2）`）。
+- **唤醒不再「暂存即丢」**：`sendWakePromptV2` 在会话忙时把 reason 塞进 `st.pendingWakeReasons` 就返回，而补发只在回合结束时走一次 `replayPendingWakeReasonsV2`——那次回合要是没正常收尾（被杀、卡在限流里），这条原因就永远埋着。现在：① `pendingWakeReasons` 进 `loadSocialV2State` / `saveSocialV2State` 白名单（原来只在内存，桥接一重启就没了）；② 新增 `schedulePendingWakeDrainV2()`，暂存后 60 秒自己再试一次，不忙就 `replay`，仍忙就按 `busyReasonV2` 的变化各记一行；③ `armPendingWakeLease` 的 30 分钟租约到期释放 key 时，若有积压立刻排空；④ `replay` 开头过滤非对象项——`[null]` 会一直占着队头让队列永远「非空」。
+- **首次唤醒不再吞掉操作者说明**：`firstWake` 时桥接会把 reason 强制升级成 `bootstrap`（否则新会话没有初始提示词），自定义说明只留在日志里。现在 `buildWakePromptV2(key, reason, options)` 收 `options.requestedReason`（`sendWakePromptV2` 用 `st.pendingBootstrapNote` 中转，跨多次重试仍在），bootstrap 分支末尾拼「【操作者补充说明】本次唤醒的原始请求：…」，用完清空。
+- **限流告诉模型「还要等多久」**：发送限流分支原来只回一句「发送频率超限」，模型只会换参数硬试（11-09 19:59–20:07 连试 4 次、卡了十分钟）。现在算出 `retryAfterMs`（分钟/小时窗口取大、下限 1 秒）跟 `{ok:false, layer:'rate', reason:'rate_limit'}` 一起返回，文案改成「约 N 秒后才能再发；这一轮别再连试，先把想说的话攒着」。`src/mcp-snowluma-safe.js` 早已把 `body.retryAfterMs` 挂到 error 上，不用改。
+- **发送配额上调**：`socialV2.send` 的 `maxSendPerMinute` / `maxSendPerHour` **8/60 → 12/120**（`config.json`、`config.example.json`、`src/bridge.js` 默认值三处同步）。`POST /api/socialV2/config` 走的是 merge + `atomicWriteJson` + 内存热替换，改完立即生效、不用重启。
+- **`启动全部.cmd`**：SnowLuma 与桥接两段都改成「先叫守护任务，轮询 60 秒没起来才自己直接 start」——避免启动脚本和守护同时各开一个（双开网关会 double-hook，抢 `state/` 也一样）。
+- **仍未覆盖**：`historySync` 关着，网关掉线期间的消息不会回补（要补得开 SnowLuma 的 historySync 或在桥接侧做离线队列）；`pendingWakeReasons` 现在能落盘，但「正在跑的那一轮」本身仍在内存里，桥接被杀会丢。
+- **门禁**：`node --check src/bridge.js` 通过；`scripts/test-audit.mjs` **87/88**（唯一红灯是 `test-media-normalize.mjs` 的「动图拼图必须是 JPEG」，属本机上另一批未提交 WIP，与本次改动无关，实测它期望 `image/jpeg` 而当前 WIP 出的是 `image/png`）。
+
 ### DSH 失联 30 小时后：常驻改成计划任务 + 2 分钟看门人（2026-11-06）
 
 - **事故**：11-05 11:23 之后 DSH Web（3080）和 supervisor 一起消失，桥接一直在 `dshReady=false` / `mode=chat` 里每 30 秒重连一次（`state/bridge.log` 里 13:00–17:00 每小时正好 120 条「DSH 事件流已结束（本次收到 0 帧）」），直到 11-06 17:45 才被手工拉起。机器没重启（`LastBootUpTime` 仍是 10/23），`Get-WinEvent Application` 里没有 node.exe / DSH 的 WER 记录，`logs/dsh-web.out` 停在 11-05 11:23:14 → 不是崩溃，是**整棵进程树被作业对象收走**：supervisor 当时是从会话 shell 里 `Start-Process` 起的。

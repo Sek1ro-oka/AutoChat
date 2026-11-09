@@ -230,7 +230,7 @@ npm start          # 或双击 start.bat（守护模式：崩溃自动重启，�
 
 **⚠️ 重要**：
 - **桥接只能运行一个实例**（有单实例锁，重复启动会被拒绝并提示"已有实例在运行"）
-- **用 start.bat 启动**（守护模式），窗口别关——桥接崩溃会在 5 秒后自动拉起
+- **用 start.bat 启动**（守护模式）——桥接崩溃会在 5 秒后自动拉起；整个窗口被关掉/杀掉的情况由计划任务 `AutoChat Bridge supervisor` 兜底（见下）
 - 桥接异常/消息无反应时：双击 `restart.bat`（自动杀旧实例 → 清理锁 → 重新启动守护）
 - **重启 DSH 通常不需要动桥接**：每 5 秒探活，DSH 不可用期间收到的 QQ 消息在桥接进程内排队（最多 50 条/会话，满后丢最旧项），恢复后尝试补投。桥接进程退出会丢失内存队列；断线期间已经结束的回复暂不保证补发。
 - 修改 `config.json` / `roles/` / `state/current-role.json` 后重启桥接生效；修改 `dsh/agent-presets/`（改完要跑 `node scripts/build-agent-preset-patches.mjs` 重新生成 bundle patch）或 MCP 配置后重启 DSH 生效
@@ -238,6 +238,16 @@ npm start          # 或双击 start.bat（守护模式：崩溃自动重启，�
   - `AutoChat DSH supervisor`：登录后 30 秒启动 supervisor（隐藏窗口、常驻、单实例）；
   - `AutoChat DSH supervisor keeper`：每 2 分钟跑 `scripts/ensure-dsh-supervisor.mjs`，发现 `state/dsh-web-supervisor.pid` 里的进程不在了就 `schtasks /Run` 把上面那个任务重新接上；**活着时一行日志都不写**，只有真去拉了才往 `logs/dsh-supervisor-keeper.log` 记一行。
   - 重装机器时跑一次 `node scripts/install-dsh-tasks.mjs` 即可重建这两个任务（默认只补缺，`--force` 覆盖，`--dry-run` 只看 XML）。任务计划自带的 `RestartOnFailure` **不能**替代这一层：实测外部杀死进程时它不触发，还会连子进程一起收走。
+- **SnowLuma（OneBot 网关）也交给计划任务常驻**：`scripts/snowluma-supervisor.mjs` 每 15 秒探一次 `127.0.0.1:3001`，没监听就按 `config.json` 的 `snowluma.homeDir` 调 SnowLuma **自己的** `launcher.bat` 拉起来（不代装、不分发它的任何代码，只是调用你已装好的那份）。2026-11-09 就是没人管它：14:26 系统低内存把 SnowLuma 收走（System 日志 `Resource-Exhaustion-Detector` Id 2004），桥接从 14:27 一路 `code=1006` 重连到 19:04（4h38m），这期间的群/私聊消息全部丢失（`historySync` 关着，没有回补）。同样两层：
+  - `AutoChat SnowLuma supervisor`：常驻探活 + 拉起（输出写 `logs/snowluma.out`，动作写 `logs/snowluma-supervisor.log`）。已有 SnowLuma 进程（`node … index.mjs`）时只等不双开——双开会 double-hook 同一个 QQ，表现为 `send_group_msg` 卡满 15 秒超时；真出现两个实例时保留最早的那个、结束后起的。进程在但 3001 连续 20 分钟不开，判定卡死，结束后重拉。
+  - `AutoChat SnowLuma supervisor keeper`：每 2 分钟跑 `scripts/ensure-snowluma-supervisor.mjs`，supervisor 不在就 `schtasks /Run` 把它拉回来；活着时一行日志都不写（`logs/snowluma-supervisor-keeper.log`）。
+  - 安装：`node scripts/install-snowluma-tasks.mjs`（`--force` 覆盖、`--dry-run` 只打印 XML）。它用的是 `CalendarTrigger`（每天 0 点起、每 5 分钟重复一次，`IgnoreNew` 忽略重叠触发），**不是** `LogonTrigger`：非管理员执行 `schtasks /Create` 装带 `LogonTrigger` 的任务会被拒绝（`ERROR: Access is denied`），DSH 那两个是当初用管理员权限装的。
+  - 想临时关掉 bot：先 `echo > state\snowluma-supervisor.pause`（守护只记录、不重启），再停 SnowLuma / 桥接；删掉 `pause` 即恢复自动守护。`启动全部.cmd` 现在先叫守护任务拉起 SnowLuma，60 秒还没监听才自己直接 `start launcher.bat`（避免两边同时开一个网关）。
+- **桥接本身（3100）同样交给计划任务常驻**：`start.bat` 的 `:loop` 只兜得住「node 崩了」——窗口被关、注销登录会话、或被 `taskkill /T` 连树杀掉之后，桥接就彻底停了；这时 QQ 那边还连着、消息还在进来，只是没人应答，看起来和「断连」一模一样。`scripts/bridge-supervisor.mjs` 补上这一层：每 60 秒探一次 `127.0.0.1:3100`，整个进程树没了就按仓库自己的 `start.bat` 拉起来（输出写 `logs/bridge.out`，动作写 `logs/bridge-supervisor.log`）；**端口没开但桥接进程还在时只等、不双开**（双开会抢 `state/`）；进程在却连续 10 分钟不开端口则判卡死，结束它再重拉。两层：
+  - `AutoChat Bridge supervisor`：常驻探活 + 拉起（`CalendarTrigger` 每天 0 点起、每 5 分钟重复一次，`IgnoreNew` 忽略重叠触发）；
+  - `AutoChat Bridge supervisor keeper`：每 2 分钟跑 `scripts/ensure-bridge-supervisor.mjs`，`state/bridge-supervisor.pid` 里的进程不在了就 `schtasks /Run` 把上面那个任务重新接上；**活着时一行日志都不写**，只有真去拉了才往 `logs/bridge-supervisor-keeper.log` 记一行。
+  - 安装：`node scripts/install-bridge-tasks.mjs`（`--force` 覆盖、`--dry-run` 只打印 XML、`--only=supervisor|keeper`）。实测：`taskkill /T` 掉整棵桥接进程树后 **3 秒**恢复（supervisor 检出 → 起 `start.bat` → 3100 监听 → `SnowLuma 已连接`）。
+  - 想停桥接：先 `echo > state\bridge-supervisor.pause`（守护只记录、不重启），再停进程；删掉 `pause` 即恢复。`启动全部.cmd` 第 3 段也是先叫守护任务，60 秒没起才自己直接 `start.bat`。
 
 日志示例：
 

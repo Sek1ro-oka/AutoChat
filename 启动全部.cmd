@@ -27,15 +27,30 @@ echo [%DATE% %TIME%] launcher start >> "%LAUNCHER_LOG%" 2>&1
 :: it verifies the BEGIN/END block every 60s, rewrites it via setup-dsh.mjs and
 :: restarts DSH when it is empty.
 
-:: 1) SnowLuma -- only if OneBot 3001 is not already listening. A second instance
-::    would hook the same QQ process twice (the second one falls back to WebUI 5101),
-::    and two hooks racing on one QQ pipe is what made send_group_msg hang forever
-::    (bridge then reports "QQ send failed: 15000ms timeout").
+:: 1) SnowLuma -- the watchdog task ("AutoChat SnowLuma supervisor") owns the
+::    lifecycle now: it probes 127.0.0.1:3001 and restarts the gateway through
+::    launcher.bat. So nudge the task first and wait for the port. Starting
+::    launcher.bat here while the watchdog does the same is exactly how you end up
+::    with two gateways hooking one QQ (the duplicate falls back to WebUI 5101, and
+::    two hooks racing on one QQ pipe made send_group_msg hang for 15s). The direct
+::    start below stays as the fallback for installs without the task.
 set "SNOWLUMA_DIR="
 for /f "usebackq delims=" %%i in (`node "%ROOT%\scripts\print-config.mjs" snowluma.homeDir 2^>nul`) do set "SNOWLUMA_DIR=%%i"
 
 netstat -ano | findstr /r /c:"127.0.0.1:3001 .*LISTENING" >nul 2>&1
 if not errorlevel 1 goto snowluma_running
+if not defined SNOWLUMA_DIR goto snowluma_nodir
+schtasks /Query /TN "AutoChat SnowLuma supervisor" >nul 2>&1
+if errorlevel 1 goto snowluma_direct
+echo [%DATE% %TIME%] asking watchdog task to bring SnowLuma up >> "%LAUNCHER_LOG%" 2>&1
+schtasks /Run /TN "AutoChat SnowLuma supervisor" >nul 2>&1
+for /l %%n in (1,1,30) do (
+  ping -n 3 127.0.0.1 >nul
+  netstat -ano | findstr /r /c:"127.0.0.1:3001 .*LISTENING" >nul 2>&1
+  if not errorlevel 1 goto snowluma_running
+)
+echo [%DATE% %TIME%] watchdog did not open 3001 in 60s - starting launcher.bat directly >> "%LAUNCHER_LOG%" 2>&1
+:snowluma_direct
 if not defined SNOWLUMA_DIR goto snowluma_nodir
 echo [%DATE% %TIME%] starting SnowLuma (%SNOWLUMA_DIR%) >> "%LAUNCHER_LOG%" 2>&1
 start "SnowLuma" /min /d "%SNOWLUMA_DIR%" cmd /c launcher.bat
@@ -55,10 +70,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "Star
 :: Wait for DSH (ping instead of timeout: timeout aborts when stdin is redirected)
 ping -n 13 127.0.0.1 >nul
 
-:: 3) Bridge -- same guard: the bridge refuses to start twice anyway (exit 2),
-::    but skipping keeps the log clean.
+:: 3) Bridge -- the watchdog task ("AutoChat Bridge supervisor") owns the lifecycle
+::    now: it probes 127.0.0.1:3100 and restarts the bridge through start.bat, and
+::    start.bat itself keeps the :loop for plain node crashes. So nudge the task
+::    first and wait for the port; the direct start stays as the fallback for
+::    installs without the task (and the bridge refuses to run twice anyway: exit 2).
 netstat -ano | findstr /r /c:"127.0.0.1:3100 .*LISTENING" >nul 2>&1
 if not errorlevel 1 goto bridge_running
+schtasks /Query /TN "AutoChat Bridge supervisor" >nul 2>&1
+if errorlevel 1 goto bridge_direct
+echo [%DATE% %TIME%] asking watchdog task to bring Bridge up >> "%LAUNCHER_LOG%" 2>&1
+schtasks /Run /TN "AutoChat Bridge supervisor" >nul 2>&1
+for /l %%n in (1,1,30) do (
+  ping -n 3 127.0.0.1 >nul
+  netstat -ano | findstr /r /c:"127.0.0.1:3100 .*LISTENING" >nul 2>&1
+  if not errorlevel 1 goto bridge_running
+)
+echo [%DATE% %TIME%] watchdog did not open 3100 in 60s - starting start.bat directly >> "%LAUNCHER_LOG%" 2>&1
+:bridge_direct
 echo [%DATE% %TIME%] starting Bridge >> "%LAUNCHER_LOG%" 2>&1
 start "Bridge" /min /d "%ROOT%" cmd /c "start.bat >> logs\bridge.out 2>&1"
 goto bridge_done

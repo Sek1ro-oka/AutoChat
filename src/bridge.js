@@ -10,7 +10,7 @@ import os from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import yaml from 'js-yaml';
 import { extractPresetPrefix, presetPromptBlockers, presetPromptWarnings, renderPresetPromptYaml } from './preset-prompt.js';
 import { GEN1_ROLE_LINE_RE, parseRoleSections, roleCharStats, roleSectionReport, selectRoleText } from './role-card.js';
@@ -70,11 +70,19 @@ import { MEDIA_DEFAULTS, normalizeImageForModel } from './media-normalize.js';
 import { AUDIO_EXTS, cleanupTemp, describeAudio, formatBytes, formatDuration, inspectAudio, listAudioFiles, parseTargetKey, processAudioVolume, resolveAudioProcessing, resolveAudioSource, safeJoinLibrary } from './send-voice-lib.js';
 import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken } from './snowluma-conn.js';
 import { TtsError, resolveTtsSettings, resolveTtsTone, resolveTtsVoice, sanitizeSpeakText, synthesizeEdge, synthesizeSapi } from './tts-core.js';
+// 唱歌（singV2）：旋律解析/拍长/滤镜串都在 sing-core 里，bridge 只负责真跑 ffmpeg 与发送，
+// 这样音准算法可以脱离"发一条语音"单独测。
+import { SING_SAMPLE_RATE, pitchFilter, resolveSingRequest, silenceFilter } from './sing-core.js';
+import { buildShareCard } from './share-card.js';
 import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
 import { createTokenLedger, usageOfEvent } from './token-ledger.js';
-import { probeFfmpeg } from './voice-core.js';
+import { probeFfmpeg, resolveFfmpeg } from './voice-core.js';
+// 语音转文字（ASR）：解码/重采样交给 ffmpeg，识别交给 E:\tools\asr 里的 faster-whisper
+// （CPU int8，不装 torch）。asr-core 只依赖 node 内置、所有失败都收敛成 ok:false，
+// 所以它能脱离桥接单独测，也不会把异常带进消息主循环。
+import { normalizeAsrConfig, resolveAsrBinary, silkToWav, sniffAudioFormat, transcribe as transcribeAudio } from './asr-core.js';
 
 // 本机 ffmpeg 探测（只跑一次，结果缓存到进程退出）：媒体降级必须能被看见。
 // 2026-11-02 复盘里的「9 次媒体降级」全都是这种形态 —— 能力缺了、图还是发出去了，
@@ -384,6 +392,16 @@ const IMAGE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 // 取图端点前缀。它同时出现在三处判定里（路由匹配、slice 出 id、agent 白名单用的
 // `/api/images/` 前缀），所以只在这里写一次字面量。
 const IMAGE_GET_PREFIX = '/api/images/generated/';
+
+// 视频出站点（T-061）：MCP 侧用 yt-dlp / ffmpeg 把片段落到这里，再用**纯文件名**调
+// POST /api/send/video。为什么不走请求体：桥接的 MAX_BODY_BYTES 是 1MB，base64 视频
+// 根本塞不进去。为什么不接受任意路径：那等于把桥接变成"读本机任意文件并发出去"的通道。
+// 只认 `^[A-Za-z0-9._-]{1,80}\.mp4$` 的文件名，拼接后必须仍在该目录内（防穿越）。
+const OUTBOX_DIR = path.join(STATE_DIR, 'outbox');
+const OUTBOX_NAME_RE = /^[A-Za-z0-9._-]{1,80}\.mp4$/;
+// QQ 群视频的实际可发送量比文件小得多；25MB 是"够发一两分钟 720p"与"别把网关拖死"的折中。
+const OUTBOX_VIDEO_MAX_BYTES = 25 * 1024 * 1024;
+
 
 /**
  * 模式拼写的**唯一**归一入口（输入边界）。
@@ -1146,8 +1164,8 @@ function loadConfig() {
         longGapProbability: 0.2,
         longGapMinMs: 5000,
         longGapMaxMs: 10000,
-        maxSendPerMinute: 8,
-        maxSendPerHour: 60,
+        maxSendPerMinute: 12,
+        maxSendPerHour: 120,
         maxMessageChars: 500,
         maxGapMs: 10000,
         gapBaseMs: 800,
@@ -1258,6 +1276,9 @@ function loadConfig() {
     // TTS（T-032）：把一句话合成语音条再发。默认**开**，但语音库总开关
     // socialV2.voice.enabled 仍是关的 —— 两道闸门任一关掉都发不出去。
     speak: true,
+    // 唱歌（T-062）：把旋律唱成语音条。和 speak 一样默认开，但最终仍受
+    // socialV2.voice.enabled 与语音库额度约束 —— 这只是"工具露不露出来"那一道。
+    sing: true,
     ...(cfg.socialV2.tools ?? {})
   };
 
@@ -1698,7 +1719,7 @@ function withTimeout(promise, ms, label) {
 }
 
 async function segmentsToText(segments, options = {}) {
-  const { resolveAtName, resolveReply, includeReply = true } = options ?? {};
+  const { resolveAtName, resolveReply, resolveRecord, includeReply = true } = options ?? {};
   // 有些 OneBot 实现直接把纯文本消息放在 message 字段里（string）
   if (typeof segments === 'string') return segments.trim();
   const out = [];
@@ -1721,7 +1742,22 @@ async function segmentsToText(segments, options = {}) {
       // 市场表情（mface）在部分网关实现里出现：有 summary 就用它，别让模型只看到 "[mface]"。
       case 'mface': out.push(`[表情${d.summary ? `:${d.summary}` : ''}]`); break;
       case 'image': out.push('[图片]'); break;
-      case 'record': out.push('[语音]'); break;
+      case 'record': {
+        // 语音：只有传了 resolveRecord 才尝试转写（拼文本时 await 它，转写结果才能
+        // 落在语音原本的位置上）。整条链路自己带「大小/时长/超时」三重上限并自带降级，
+        // 这里再兜一层 try —— 一条语音绝不该把整条消息弄丢，哪怕 ASR 整个挂了。
+        let voiceText = '';
+        if (resolveRecord) {
+          try {
+            // index 用「已经拼过几条语音」算：同一条消息里有多段语音时文件名不会互相覆盖。
+            voiceText = await resolveRecord(d, { index: out.filter((s) => s.startsWith('[语音]')).length });
+          } catch (error) {
+            log(`语音转写异常（已降级为占位符）：${error?.message ?? error}`);
+          }
+        }
+        out.push(voiceText ? `[语音] ${voiceText}` : '[语音]');
+        break;
+      }
       case 'video': out.push('[视频]'); break;
       case 'file': out.push(`[文件${d.name ?? ''}]`); break;
       case 'reply': {
@@ -2458,6 +2494,249 @@ function fileHintFor(saved) {
   if (!Array.isArray(saved) || saved.length === 0) return '';
   const list = saved.map((item) => `${item.name}（${(item.bytes / 1024).toFixed(1)}KB）`).join('、');
   return `\n【文件】本条消息含文件，已存入托管目录：${list}。需要内容时调用 mcp__file-safe__file_read（PDF 只能抽取文本层）。`;
+}
+
+// ── 语音（ASR）：收到的语音在拼 prompt 之前就变成文字 ─────────────────────────
+// 结构照抄「收到的文件」（fetchIncomingFileBytes → saveIncomingFiles）：按天分桶落盘、
+// 大小/时长/超时三重上限、每一步失败都只记日志不抛。差别只有一处 —— 文件是等模型
+// 自己去托管目录读，语音必须在**进模型之前**翻成文字，否则模型永远只看到一个
+// [语音] 占位符（segmentsToText 原本就是这样）。
+//
+// 为什么不能自己解码：**实测 95 个真 QQ 语音（Tencent Files 的 Ptt 缓存）全部是 SILK**
+// —— 文件名写着 .amr，内容却是 0x02 + "#!SILK_V3"，而 ffmpeg 根本没有 silk 解码器。
+// SnowLuma 的 native/ffmpeg/ffmpegAddon 里带 NTSILK 解码器，所以唯一可行的路是让
+// **网关**先把语音转成 mp3（get_record 的 out_format），我们只处理转码后的常规音频。
+const VOICE_INBOX_DIR = path.join(STATE_DIR, 'voice-inbox');
+// 转写文本进 prompt 的字数上限：60 秒中文语音大约 200~300 字，400 已经留了余量。
+// 再长的部分没有信息量，只会挤掉真正的对话上下文。
+const VOICE_TEXT_MAX_CHARS = 400;
+// 直链下载只认**QQ 自己的 CDN**（以及网关自身）。record 段的 url 是消息发送方可以
+// 间接影响的内容，无条件 fetch 等于把「去哪抓文件」交给群友：内网探测、打满磁盘、
+// 拖住主循环都只是副作用。主路径是网关 action（get_record），根本用不到这个 url。
+const VOICE_URL_HOST_SUFFIXES = ['.qq.com', '.qq.com.cn', '.gtimg.com', '.myqcloud.com', '.qpic.cn'];
+
+// 配置归一化按「对象身份」记缓存：loadConfig 每次返回新对象 ⇒ 配置一改就自动失效，
+// 既不用重启，也不必每收到一条语音都把十几个字段重新钳一遍。
+let voiceAsrMemo = null;
+function voiceAsrConfig(cfg) {
+  const raw = cfg?.socialV2?.asr;
+  if (voiceAsrMemo && voiceAsrMemo.raw === raw) return voiceAsrMemo.value;
+  const value = normalizeAsrConfig(raw);
+  voiceAsrMemo = { raw, value };
+  return value;
+}
+
+// 同一条「不可用」原因 10 分钟只记一次：环境没配好是**可预期**的问题，不该让
+// 每一条语音都往日志里灌一行（那样真正的错误反而被埋掉）。
+let voiceAsrWarned = { key: '', at: 0 };
+function warnVoiceAsrUnavailable(decision) {
+  if (!decision || decision.ok) return;
+  const key = `${decision.reason}|${decision.pythonPath}|${decision.modelsDir}`;
+  const now = Date.now();
+  if (voiceAsrWarned.key === key && now - voiceAsrWarned.at < 10 * 60 * 1000) return;
+  voiceAsrWarned = { key, at: now };
+  log(`语音转写不可用，本条降级为 [语音]：${decision.reason}`);
+}
+
+// resolveAsrBinary 要 stat 一串路径（python / 脚本 / 模型目录），每收一条语音都做一次
+// 纯属浪费；结果缓存 60 秒就够了（装完模型最坏等一分钟自动生效，不用重启桥接）。
+// allowDownload 一律 false：桥接绝不在消息链路上顺手拉几百 MB 模型。
+let voiceAsrResolve = null;
+function voiceAsrReady(asrCfg) {
+  const key = [asrCfg.pythonPath, asrCfg.scriptPath, asrCfg.modelsDir, asrCfg.model].join('|');
+  const now = Date.now();
+  const hit = voiceAsrResolve;
+  if (hit && hit.key === key && now - hit.at < 60000) {
+    warnVoiceAsrUnavailable(hit.value);
+    return hit.value;
+  }
+  const value = resolveAsrBinary({ configured: asrCfg, env: process.env, allowDownload: false });
+  voiceAsrResolve = { at: now, key, value };
+  warnVoiceAsrUnavailable(value);
+  return value;
+}
+
+function voiceInboxDay(now = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+// 落盘文件名只允许安全字符：message_id 可能是负数或字符串，一律滤掉分隔符 ——
+// 否则 `../` 之类的东西能让语音写到 voice-inbox 外面去。
+function voiceFileStem(messageRef, index) {
+  const safe = String(messageRef ?? '').replace(/[^0-9A-Za-z]/g, '_').slice(0, 48) || 'voice';
+  return Number(index) > 0 ? `${safe}_${Number(index)}` : safe;
+}
+
+function voiceUrlAllowed(url, cfg) {
+  let host = '';
+  try { host = new URL(url).hostname.toLowerCase(); } catch { return false; }
+  let gatewayHost = '';
+  try { gatewayHost = new URL(String(cfg?.snowluma?.httpUrl || '')).hostname.toLowerCase(); } catch {}
+  if (gatewayHost && host === gatewayHost) return true;
+  return VOICE_URL_HOST_SUFFIXES.some((suffix) => host === suffix.slice(1) || host.endsWith(suffix));
+}
+
+async function fetchVoiceUrl(url, cfg, maxBytes, timeoutMs) {
+  if (!voiceUrlAllowed(url, cfg)) {
+    let host = '';
+    try { host = new URL(url).hostname; } catch { host = String(url).slice(0, 40); }
+    throw new Error(`语音直链域名不在白名单，拒绝抓取（${host}）`);
+  }
+  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+  if (!res.ok) throw new Error(`语音下载失败 HTTP ${res.status}`);
+  return readBufferedBody(res, maxBytes);
+}
+
+// 从网关 action 的结果里捞语音字节。三种形状都见过：
+//  • data.base64 —— get_record 带 out_format 时的转码结果（**主路径**，silk/amr 都能出）
+//  • data.file 是本地绝对路径 —— 网关把语音落到自己目录时给的是路径，不是 url
+//  • data.url —— QQ CDN 直链，rkey 有时效，过期就是 404
+async function readVoiceBytesFromAction(cfg, action, params, { maxBytes, timeoutMs }) {
+  const { body, data } = await oneBotActionNested(cfg, action, params, timeoutMs);
+  const retcode = Number(body?.retcode ?? 0);
+  if (body?.status === 'failed' || (Number.isFinite(retcode) && retcode !== 0)) {
+    throw new Error(`${action}：${String(body?.wording ?? body?.message ?? `retcode ${retcode}`).slice(0, 120)}`);
+  }
+  const b64 = String(data?.base64 ?? '');
+  if (b64) {
+    // 兼容 data URL / base64:// 两种前缀，纯 base64 也照收。
+    const bytes = Buffer.from(b64.replace(/^data:[^,]*,/, '').replace(/^base64:\/\//, ''), 'base64');
+    if (bytes.length === 0) throw new Error(`${action} 返回的 base64 解不出字节`);
+    if (bytes.length > maxBytes) throw new Error(`语音超过上限（${bytes.length} 字节 > ${maxBytes}）`);
+    return { bytes, via: `${action}:base64` };
+  }
+  const localPath = String(data?.file ?? '');
+  if (localPath && !/^https?:\/\//i.test(localPath)) {
+    try {
+      if (fs.statSync(localPath).isFile()) {
+        const size = fs.statSync(localPath).size;
+        if (size > maxBytes) throw new Error(`语音超过上限（${size} 字节 > ${maxBytes}）`);
+        return { bytes: fs.readFileSync(localPath), via: `${action}:local` };
+      }
+    } catch (error) {
+      if (String(error?.message ?? '').includes('超过上限')) throw error;
+    }
+  }
+  const url = String(data?.url || (/^https?:\/\//i.test(localPath) ? localPath : ''));
+  if (url) return { bytes: await fetchVoiceUrl(url, cfg, maxBytes, timeoutMs), via: `${action}:url` };
+  throw new Error(`${action} 没有给出可用的语音来源（字段：${Object.keys(data ?? {}).join(',') || '空'}）`);
+}
+
+// 语音内容进 prompt 以前必须「去形」：转写文本是**不可信输入**（谁都能对着麦克风说一段
+// 指令），换行和控制字符还能伪造 prompt 结构（比如假装自己是一条新的系统消息）。
+// 所以压成一行、去掉控制字符、再截断。
+function sanitizeVoiceText(text) {
+  const flat = String(text ?? '')
+    .replace(/[\u0000-\u001f\u007f\u200b-\u200f\u2028\u2029]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return truncateText(flat, VOICE_TEXT_MAX_CHARS).trim();
+}
+
+/**
+ * 把一条进来的语音变成一句能塞进 prompt 的中文。**永不抛**：任何失败都返回 ''
+ * （调用方自己退回 [语音] 占位符），并留一行可诊断的日志。
+ *
+ * @param data record 段的 data（{ file, file_id, url, ... }）
+ * @param ctx  { cfg, kind, id, messageRef, index }
+ */
+async function transcribeIncomingRecord(data, ctx = {}) {
+  const cfg = ctx.cfg ?? {};
+  const asrCfg = voiceAsrConfig(cfg);
+  if (!asrCfg.enabled) return '';
+  const decision = voiceAsrReady(asrCfg);
+  if (!decision.ok) return '';
+
+  // 一条语音的**总预算**（含下载+转码+识别）：timeoutMs 到了就放弃这条，
+  // 绝不把主循环一直吊在那（语音只是附加信息，晚 30 秒到达的文本没有价值）。
+  const deadline = Date.now() + Math.max(5000, asrCfg.timeoutMs);
+  const budget = (reserveMs = 0) => Math.max(1000, deadline - Date.now() - reserveMs);
+  const file = String(data?.file ?? '').trim();
+  const fileId = String(data?.file_id ?? data?.fileId ?? file).trim();
+  const label = `${ctx.kind ?? '?'}:${ctx.id ?? '?'} msg=${ctx.messageRef ?? '?'}`;
+  const ffmpegPath = resolveFfmpeg({ ffmpegPath: asrCfg.ffmpegPath || cfg?.socialV2?.voice?.ffmpegPath || '' });
+
+  // ① 取字节：转码版优先，直链兜底（直链里多半是 silk，本地解不了，只是最后一试）。
+  const attempts = [];
+  if (asrCfg.preferGatewayTranscode !== false && (file || fileId)) {
+    attempts.push([`get_record(${asrCfg.gatewayOutFormat || 'mp3'})`, () => readVoiceBytesFromAction(cfg, 'get_record', {
+      file, file_id: fileId, out_format: asrCfg.gatewayOutFormat || 'mp3'
+    }, { maxBytes: asrCfg.maxBytes, timeoutMs: budget(20000) })]);
+  }
+  if (file || fileId) {
+    attempts.push(['get_record', () => readVoiceBytesFromAction(cfg, 'get_record', { file, file_id: fileId }, {
+      maxBytes: asrCfg.maxBytes, timeoutMs: budget(20000)
+    })]);
+    attempts.push(['get_file', () => readVoiceBytesFromAction(cfg, 'get_file', { file, file_id: fileId }, {
+      maxBytes: asrCfg.maxBytes, timeoutMs: budget(20000)
+    })]);
+  }
+  if (data?.url) {
+    attempts.push(['data.url', async () => ({
+      bytes: await fetchVoiceUrl(String(data.url), cfg, asrCfg.maxBytes, budget(20000)),
+      via: 'data.url'
+    })]);
+  }
+  let fetched = null;
+  const reasons = [];
+  for (const [name, run] of attempts) {
+    try {
+      const got = await run();
+      if (got?.bytes?.length) { fetched = got; break; }
+      reasons.push(`${name}: 拿到空字节`);
+    } catch (error) {
+      reasons.push(`${name}: ${error?.message ?? error}`);
+    }
+  }
+  if (!fetched) {
+    log(`语音下载失败（${label}），本条保留 [语音]：${reasons.join('；') || '没有可用的来源'}`);
+    return '';
+  }
+
+  // ② 落盘：按天分桶，扩展名照**文件头**来（QQ 的文件名写着 .amr，内容却常是 silk）。
+  const sniffed = sniffAudioFormat(fetched.bytes);
+  const ext = String(sniffed.ext || '.bin').replace(/^\./, '');
+  const dayDir = path.join(VOICE_INBOX_DIR, voiceInboxDay());
+  const stem = voiceFileStem(ctx.messageRef, ctx.index ?? 0);
+  const srcPath = path.join(dayDir, `${stem}.${ext}`);
+  const wavPath = path.join(dayDir, `${stem}.16k.wav`);
+  try {
+    fs.mkdirSync(dayDir, { recursive: true });
+    fs.writeFileSync(srcPath, fetched.bytes);
+  } catch (error) {
+    log(`语音落盘失败（${label}）：${error?.message ?? error}`);
+    return '';
+  }
+
+  // ③ 转 16k 单声道 PCM wav：whisper 只吃这个形状（同时也是时长上限的地方）。
+  const conv = await silkToWav(srcPath, {
+    ffmpegPath, outPath: wavPath, maxSeconds: asrCfg.maxSeconds, timeoutMs: budget(5000)
+  });
+  if (!conv.ok) {
+    log(`语音转 wav 失败（${label}，via ${fetched.via}，格式 ${sniffed.format}）：${conv.reason}`);
+    return '';
+  }
+
+  // ④ 识别。
+  const out = await transcribeAudio(conv.path, {
+    pythonPath: decision.pythonPath,
+    scriptPath: decision.scriptPath,
+    modelPath: decision.modelPath,
+    modelDir: decision.modelsDir,
+    model: asrCfg.model,
+    language: asrCfg.language,
+    timeoutMs: budget(500),
+    maxSeconds: asrCfg.maxSeconds,
+    beamSize: asrCfg.beamSize
+  });
+  const text = sanitizeVoiceText(out.text);
+  if (!out.ok || !text) {
+    log(`语音转写失败（${label}，${Number(conv.duration || 0).toFixed(1)}s，via ${fetched.via}）：${out.ok ? '识别结果为空（静音/噪声）' : out.reason}`);
+    return '';
+  }
+  log(`语音已转写（${label}，${Number(conv.duration || 0).toFixed(1)}s，${out.model}，${out.elapsedMs}ms，via ${fetched.via}）：${text.slice(0, 60)}`);
+  return text;
 }
 
 function allowed(kind, id, cfg) {
@@ -3433,6 +3712,251 @@ async function main() {
     }
   }
 
+  // ── 唱歌（T-062）：把一段旋律按音符唱成一条语音 ─────────────────────────────
+  // 和 speakV2 的关系：上游完全一样（同一个语音库、同一套额度、同一个 sendVoiceForV2），
+  // 区别只在"音频怎么来" —— speak 是一整句 TTS，sing 是「每个音节合成一次 → 逐音符变调 + 补静音
+  // → 按拍拼起来」。所以这里没有任何新的发送逻辑，失败原因也沿用 TtsError 的 code 口径。
+  const singInFlight = new Map();
+
+  /** 唱歌的几个安全上限：都是"防模型把整首歌词倒进来"的，不是音质参数。 */
+  function singCfg() {
+    const s = cfg.socialV2?.sing ?? {};
+    const raw = Math.round(Number(s.maxSyllables));
+    return {
+      // 一个不同音节 = 一次 edge-tts（约 0.6~1.5s），再加上几十次 ffmpeg。
+      // 24 个已经接近客户端等一个路由响应的耐心上限；再多应该让模型先唱一句。
+      maxSyllables: Number.isFinite(raw) ? Math.min(64, Math.max(1, raw)) : 24,
+      // 歌词是自由文本：80 字够一句主歌。超长直接拒，不静默截断（截断会让音节与音符错位）。
+      maxLyricsChars: 80
+    };
+  }
+
+  /**
+   * 歌词清洗：**只**压成单行 + 限长，一个字都不删。
+   * 为什么不用 sanitizeSpeakText：那个函数是按"整句朗读"设计的，会归一标点、删 @ 与链接；
+   * 而唱歌时每个字符都要对应一个音符，删字会让后面的音节整体错位（听感就是越唱越歪）。
+   */
+  function cleanSingLyrics(raw, { maxChars = 80 } = {}) {
+    const text = String(raw ?? '')
+      .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!text) return '';
+    const length = [...text].length;
+    if (length > maxChars) {
+      throw new TtsError(
+        'bad_args',
+        `歌词太长（${length} 字，上限 ${maxChars} 字）：先唱一句短的；不想写字就别传 lyrics，缺的音节会自动补「啦」`
+      );
+    }
+    return text;
+  }
+
+  /**
+   * 找 ffprobe：环境变量 → 配置里 ffmpeg 同目录的 ffprobe → 裸 'ffprobe'。
+   * 为什么唱歌要自己找：inspectAudio 默认只认 PATH 里的 ffprobe，而本机是"配置了 ffmpeg 绝对路径、
+   * PATH 里什么都没有"。探测不到时长时 inspectAudio 会退化成"放行不校验"，
+   * 对一首几十段拼起来、可能超过语音条上限的成品来说，这个校验不能没有。
+   */
+  function singFfprobePath(vc) {
+    const fromEnv = String(process.env.FFPROBE_PATH ?? '').trim();
+    if (fromEnv) return fromEnv;
+    const ffmpegPath = String(vc?.ffmpegPath ?? '').trim();
+    if (ffmpegPath && path.isAbsolute(ffmpegPath)) {
+      const guess = path.join(path.dirname(ffmpegPath), process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe');
+      try { if (fs.statSync(guess).isFile()) return guess; } catch {}
+    }
+    return 'ffprobe';
+  }
+
+  /** ffmpeg 的 stderr 只留最后一段：真正的错因在末尾，前面全是版本横幅和进度。 */
+  function tailText(text, max = 240) {
+    const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
+    return flat.length > max ? `…${flat.slice(-max)}` : flat;
+  }
+
+  /**
+   * 跑一次 ffmpeg，返回 { ok, code, stderr }。用 spawn 而不是 execFileSync：
+   * 唱歌一条歌要串几十个 ffmpeg 进程，同步调用会把整个桥接（含消息收发）卡住，
+   * 而这首歌本来就该是异步的。超时直接 SIGKILL —— 不能让一个坏文件把路由挂在 60 秒×N。
+   */
+  function runFfmpeg(args, { cwd = null, timeoutMs = 60000 } = {}) {
+    return new Promise((resolve) => {
+      const vc = voiceCfg();
+      let child;
+      try {
+        child = spawn(resolveFfmpeg({ ffmpegPath: vc.ffmpegPath }), args, { cwd, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+      } catch (error) {
+        resolve({ ok: false, stderr: String(error?.message ?? error) });
+        return;
+      }
+      let stderr = '';
+      let settled = false;
+      const finish = (payload) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(payload);
+      };
+      const timer = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch {}
+        finish({ ok: false, stderr: `${stderr}\n[ffmpeg ${timeoutMs}ms 超时，已终止]` });
+      }, timeoutMs);
+      child.stderr.on('data', (chunk) => {
+        if (stderr.length < 4000) stderr += chunk.toString();
+      });
+      child.on('error', (error) => finish({ ok: false, stderr: String(error?.message ?? error) }));
+      child.on('close', (code) => finish({ ok: code === 0, code, stderr }));
+    });
+  }
+
+  /**
+   * 合成 + 发送一首歌。返回 { source, seconds, plannedSeconds, segments, syllables, notes, voice, file, messageId }。
+   * 失败一律抛（路由按 error.code 挑状态码）。临时目录在 finally 里删；没真发出去的 mp3 也删。
+   */
+  async function singV2(key, { song = '', notes = '', lyrics = '', bpm = null, voice = '' } = {}) {
+    const vc = voiceCfg();
+    if (!vc.enabled) throw new Error('语音功能已关闭（socialV2.voice.enabled=false）');
+    const scopeKey = String(key ?? '').trim();
+    if (!scopeKey) throw new Error('key 不能为空（格式 group:群号 或 private:QQ号）');
+    const tts = ttsCfg();
+    const sing = singCfg();
+    const resolved = resolveSingRequest({ song, notes, lyrics: cleanSingLyrics(lyrics, { maxChars: sing.maxLyricsChars }), bpm });
+    if (resolved.error) throw new TtsError('bad_args', resolved.error);
+    const plan = resolved.plan;
+    if (!plan.segments.length) throw new TtsError('bad_args', '这段旋律里一个能唱的音都没有');
+    if (plan.syllables.length > sing.maxSyllables) {
+      throw new TtsError(
+        'bad_args',
+        `这首歌要去重合成 ${plan.syllables.length} 个音节（上限 ${sing.maxSyllables}）：唱短一点，或者把重复的音写多些（同一个字只合成一次）`
+      );
+    }
+    // 音色只认三支女声，和 speakV2 同一份白名单；认不出就拒绝，绝不悄悄换普通话。
+    const wantedVoice = String(voice ?? '').trim();
+    const pickedVoice = wantedVoice ? resolveTtsVoice(wantedVoice) : null;
+    if (wantedVoice && !pickedVoice) {
+      throw new TtsError(
+        'bad_voice',
+        `只支持 ${tts.voicesText}；「${wantedVoice}」不在名单里`,
+        { allowed: (tts.voices ?? []).map((item) => item.id) }
+      );
+    }
+    const synthVoice = pickedVoice ? pickedVoice.id : tts.voice;
+    const voiceLang = pickedVoice ? pickedVoice.lang : tts.lang;
+    // 唱歌只走 edge-tts：SAPI 没有音高控制，把字念成"平调"再靠 asetrate 硬搬，
+    // 出来是走音的朗诵，不如不发。所以这里不回落，如实说"现在唱不了"。
+    if (voiceLang === 'cantonese' && tts.engine === 'sapi') {
+      throw new TtsError('tts_unavailable', '粤语只有在线合成（edge-tts），这台机器只配了 SAPI，唱不了粤语；换个普通话音色');
+    }
+    if (singInFlight.has(scopeKey)) throw new TtsError('busy', '上一首还在唱，等它唱完再点下一首');
+    // 额度先查后合成：一首歌要跑 N 次 TTS + 几十次 ffmpeg，额度不够就不该白跑。
+    // 记账不在这里做 —— sendVoiceForV2 内部会 voiceBudgetCommit，重复记会白扣一条。
+    voiceBudgetCheck(scopeKey, vc);
+    const python = resolveTtsPython();
+    const stamp = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const tmpDir = path.join(ROOT, 'state', 'tmp', 'sing', stamp);
+    fs.mkdirSync(tmpDir, { recursive: true });
+    // 产物落在语音库里（sendVoiceForV2 只认库内文件），名字带 pid + 时间戳，天然不重名。
+    fs.mkdirSync(vc.dir, { recursive: true });
+    const outName = `sing-${process.pid}-${Date.now()}.mp3`;
+    const outPath = path.join(vc.dir, outName);
+    singInFlight.set(scopeKey, Date.now());
+    let delivered = false;
+    try {
+      // ① 去重后的每个音节只合成一次：同一句里「的」出现十次也只花一次 TTS。
+      // 音高/语速一律中性（rate 0 / pitch 0 / volume 0）：变调是 ffmpeg 干的唯一变量；
+      // 让 TTS 自己也升个调，会跟 asetrate 的倍数叠在一起，音准和拍长就都算不准了。
+      const syllableFiles = new Map();
+      for (let i = 0; i < plan.syllables.length; i += 1) {
+        const syllable = plan.syllables[i];
+        const file = path.join(tmpDir, `syl-${i}.mp3`);
+        try {
+          await synthesizeEdge(syllable, {
+            voice: synthVoice,
+            rate: 0,
+            pitch: 0,
+            volume: 0,
+            outFile: file,
+            pythonPath: python,
+            timeoutMs: tts.timeoutMs
+          });
+        } catch (error) {
+          const reason = error?.message ?? String(error);
+          const code = error instanceof TtsError && error.code === 'tts_unavailable' ? 'tts_unavailable' : 'tts_failed';
+          throw new TtsError(code, `音节「${syllable}」没合成出来：${reason}`);
+        }
+        syllableFiles.set(syllable, file);
+      }
+      // ② 逐段落成 wav：音符走 pitchFilter（变调 + 截到拍长），休止符用 anullsrc 生成等长静音。
+      const listLines = [];
+      for (const seg of plan.segments) {
+        const file = path.join(tmpDir, `seg-${seg.index}.wav`);
+        const args = ['-y', '-nostdin', '-hide_banner', '-loglevel', 'error'];
+        if (seg.rest) {
+          args.push('-f', 'lavfi', '-i', `anullsrc=r=${SING_SAMPLE_RATE}:cl=mono`,
+            '-af', silenceFilter({ seconds: seg.seconds }));
+        } else {
+          // apad 不能省：一个汉字的 TTS 通常只有 0.4~0.6 秒，而 100bpm 的一拍就是 0.6 秒、两拍 1.2 秒。
+          // atrim 只能截长不能补短，少了 apad，短音就会把后面的拍子整体往前挤（越唱越快）。
+          args.push('-i', syllableFiles.get(seg.syllable),
+            '-af', `${pitchFilter({ ratio: seg.ratio, seconds: seg.seconds })},apad`);
+        }
+        // -t 再钉一次总长：apad 是无限补静音，atrim 是截断，两个都要靠 -t 收口。
+        args.push('-t', Number(seg.seconds).toFixed(3),
+          '-ac', '1', '-ar', String(SING_SAMPLE_RATE), '-c:a', 'pcm_s16le', file);
+        const done = await runFfmpeg(args, { timeoutMs: 60000 });
+        if (!done.ok) {
+          throw new TtsError('tts_failed', `第 ${seg.index + 1} 段（${seg.rest ? '休止' : `音节 ${seg.syllable}`}）处理失败：${tailText(done.stderr)}`);
+        }
+        listLines.push(`file 'seg-${seg.index}.wav'`);
+      }
+      // ③ concat demuxer 拼成一整条。每段都是 44.1k / 单声道 / s16，参数一致才不会在接缝处爆音。
+      const listFile = path.join(tmpDir, 'list.txt');
+      fs.writeFileSync(listFile, `${listLines.join('\n')}\n`, 'utf8');
+      const merged = await runFfmpeg([
+        '-y', '-nostdin', '-hide_banner', '-loglevel', 'error',
+        '-f', 'concat', '-safe', '0', '-i', listFile,
+        '-c:a', 'libmp3lame', '-b:a', '64k', '-ac', '1', '-ar', String(SING_SAMPLE_RATE),
+        outPath
+      ], { cwd: tmpDir, timeoutMs: 120000 });
+      if (!merged.ok) throw new TtsError('tts_failed', `拼接失败：${tailText(merged.stderr)}`);
+      // ④ 时长/体积硬校验（复用 speak 那条现成函数）：超了就删文件并拒绝，绝不偷偷裁剪。
+      const probe = await inspectAudio(outPath, { maxBytes: vc.maxBytes, maxSeconds: vc.maxSeconds, ffprobePath: singFfprobePath(vc) });
+      if (!probe.ok) {
+        const detail = probe.duration != null && Number.isFinite(Number(probe.duration))
+          ? `唱出来 ${Math.round(Number(probe.duration))} 秒，超过上限 ${Math.round(vc.maxSeconds)} 秒：唱短一点`
+          : (probe.error || '合成出来的音频不合规');
+        throw new TtsError('too_long', detail);
+      }
+      const seconds = probe.duration != null && Number.isFinite(Number(probe.duration)) ? Number(probe.duration) : plan.totalSeconds;
+      // ⑤ 发送：只传库内文件名，闸门/审计/额度/回读全在 sendVoiceForV2 里，这里不重复实现。
+      const sent = await sendVoiceForV2(scopeKey, outName, { label: 'sing', audio: null });
+      delivered = true;
+      const title = resolved.source?.title ?? '自定义旋律';
+      log(`[sing] 唱完《${title}》${seconds.toFixed(1)}s / ${plan.segments.length} 段 / ${plan.syllables.length} 个音节（${synthVoice}）→ ${scopeKey}`);
+      appendActivity(`${scopeKey} [sing] 唱歌《${title}》（${seconds.toFixed(1)}s，${plan.segments.length} 段）`);
+      return {
+        source: resolved.source,
+        seconds,
+        plannedSeconds: plan.totalSeconds,
+        segments: plan.segments.length,
+        syllables: plan.syllables.length,
+        notes: resolved.realNotes,
+        voice: synthVoice,
+        file: outName,
+        bytes: probe.size ?? null,
+        messageId: sent.messageId ?? null,
+        verified: sent.verification?.confirmed === true
+      };
+    } finally {
+      singInFlight.delete(scopeKey);
+      // 临时目录无条件删：一首歌几十个中间 wav，留着一天就是几百 MB。
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      // 没真发出去就别在语音库留垃圾 —— 否则 qq_list_voices 里会堆一列没人用过的 sing-*.mp3。
+      if (!delivered) { try { fs.rmSync(outPath, { force: true }); } catch {} }
+    }
+  }
+
   // 发送一个收藏表情（按 emoji_id/url/md5 解析，发图片段）。
   async function sendStickerV2(key, stickerRef, options = {}) {
     const assertSendAllowed = captureSendGuard(key);
@@ -3544,6 +4068,107 @@ async function main() {
           },
           body: JSON.stringify(params),
           signal: AbortSignal.timeout(15000)
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
+          const hint = res.status === 426 ? '（HTTP 426：snowluma.httpUrl 可能指向了 WebSocket 端口，请检查 config.json 的 snowluma.httpUrl 是否为 OneBot HTTP API 地址）' : '';
+          throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}${hint}`);
+        }
+        sendResolve(body.data);
+      } catch (error) {
+        sendReject(error);
+      }
+    });
+    const data = await sendResult;
+    return { messageId: data?.message_id ?? null };
+  }
+
+  /**
+   * 发一段本地视频到会话（POST /api/send/video 的发送腿）。
+   *
+   * 与 sendImageV2 同构（共用 sendChain / assertSendAllowed），两点不同：
+   * 1. 超时给到 120s —— 视频要过网关的转码 + 上传，15s 会在稍大一点的片段上必然超时；
+   * 2. 载体仍是 base64（`base64://…`），**不把本地路径交给网关**，理由同 sendImageV2
+   *    的注释：那等于给远程网关开一个读本机任意文件的通道。
+   *
+   * 之所以能让调用方先把文件落到 state/outbox 再由这里读：桥接 HTTP 的请求体上限是
+   * 1MB（MAX_BODY_BYTES），视频走 JSON body 根本塞不进去。落地目录由调用方限制，
+   * 这里只接受 outbox 下的纯文件名，杜绝路径穿越。
+   */
+  async function sendVideoV2(key, buffer, options = {}) {
+    const assertSendAllowed = typeof options.assertSendAllowed === 'function' ? options.assertSendAllowed : captureSendGuard(key);
+    const [kind, id] = String(key).split(':');
+    const segments = [{ type: 'video', data: { file: 'base64://' + buffer.toString('base64') } }];
+    const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
+    const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
+    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+    let sendResolve;
+    let sendReject;
+    const sendResult = new Promise((resolve, reject) => {
+      sendResolve = resolve;
+      sendReject = reject;
+    });
+    sendChain = sendChain.then(async () => {
+      try {
+        // 视频比图片更"重"，真人也会多停一下才发出去。1500–3200ms 比图片那档更明显。
+        await sleep(randInt(1500, 3200));
+        assertSendAllowed();
+        const res = await fetch(`${httpUrl}/${action}`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
+          },
+          body: JSON.stringify(params),
+          signal: AbortSignal.timeout(120000)
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
+          const hint = res.status === 426 ? '（HTTP 426：snowluma.httpUrl 可能指向了 WebSocket 端口，请检查 config.json 的 snowluma.httpUrl 是否为 OneBot HTTP API 地址）' : '';
+          throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}${hint}`);
+        }
+        sendResolve(body.data);
+      } catch (error) {
+        sendReject(error);
+      }
+    });
+    const data = await sendResult;
+    return { messageId: data?.message_id ?? null };
+  }
+
+  /**
+   * 发一张结构化卡片（ark json 段）。
+   *
+   * 为什么单独一个发送函数而不是复用文字发送：卡片是 `json` 段，
+   * 里面的 data 是一整串 ark JSON，塞进文字通道会被转义得面目全非。
+   * 延时空档取 800–1800ms：卡片比视频轻，但比纯文字"重"，真人分享链接时也是先看一眼再发。
+   */
+  async function sendCardV2(key, ark, options = {}) {
+    const assertSendAllowed = typeof options.assertSendAllowed === 'function' ? options.assertSendAllowed : captureSendGuard(key);
+    const [kind, id] = String(key).split(':');
+    const payload = typeof ark === 'string' ? ark : JSON.stringify(ark);
+    const segments = [{ type: 'json', data: { data: payload } }];
+    const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
+    const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
+    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+    let sendResolve;
+    let sendReject;
+    const sendResult = new Promise((resolve, reject) => {
+      sendResolve = resolve;
+      sendReject = reject;
+    });
+    sendChain = sendChain.then(async () => {
+      try {
+        await sleep(randInt(800, 1800));
+        assertSendAllowed();
+        const res = await fetch(`${httpUrl}/${action}`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
+          },
+          body: JSON.stringify(params),
+          signal: AbortSignal.timeout(60000)
         });
         const body = await res.json().catch(() => ({}));
         if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
@@ -4263,6 +4888,13 @@ async function main() {
       pendingWakeKeys.delete(key);
       pendingWakeArmAt.delete(key);
       pendingWakeLeaseTimers.delete(key);
+      // 租约到期说明这次唤醒始终没等到 turn/end。此时若还压着暂存的唤醒原因，必须主动排空：
+      // 它们原本只在回合结束时被补发，而这里恰好没有回合会结束（实测能躺 10 分钟以上）。
+      const st = getSocialV2State(key);
+      if (Array.isArray(st.pendingWakeReasons) && st.pendingWakeReasons.length) {
+        log(`[reserved2] ${key} 唤醒租约到期释放，积压 ${st.pendingWakeReasons.length} 条原因，立即尝试排空`);
+        schedulePendingWakeDrainV2(key);
+      }
     }, 30 * 60 * 1000);
     timer.unref?.();
     pendingWakeLeaseTimers.set(key, timer);
@@ -5465,11 +6097,24 @@ async function main() {
       const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
       const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
       if ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour)) {
+        // 只回一句「超限」的话，模型只会一直硬试（2026-11-09 19:59–20:07 连试 4 次、
+        // 卡了十分钟）。把「还要等多久」算出来一起给它，它才知道该收手。
+        const minuteTimes = (st.sendTimes || []).filter((t) => now - t < 60000).sort((a, b) => a - b);
+        const hourTimes = (st.sendTimes || []).filter((t) => now - t < 3600000).sort((a, b) => a - b);
+        let retryAfterMs = 0;
+        if (maxPerMinute > 0 && recentMinute + 1 > maxPerMinute && minuteTimes.length) {
+          retryAfterMs = Math.max(retryAfterMs, 60000 - (now - minuteTimes[0]));
+        }
+        if (maxPerHour > 0 && recentHour + 1 > maxPerHour && hourTimes.length) {
+          retryAfterMs = Math.max(retryAfterMs, 3600000 - (now - hourTimes[0]));
+        }
+        retryAfterMs = Math.max(1000, Math.round(retryAfterMs) || 1000);
         return {
           ok: false,
           layer: 'rate',
           reason: 'rate_limit',
-          error: `发送频率超限（${maxPerMinute}/分、${maxPerHour}/时）`
+          retryAfterMs,
+          error: `发送频率超限（${maxPerMinute}/分、${maxPerHour}/时），约 ${Math.ceil(retryAfterMs / 1000)} 秒后才能再发；这一轮别再连试，先把想说的话攒着`
         };
       }
       try {
@@ -7478,6 +8123,106 @@ async function main() {
             saveSocialV2State();
             log(`[images] 发图失败 ${key}：${error?.message ?? error}`);
             sendJson({ ok: false, reason: 'send_failed', error: `发图失败：${error?.message ?? error}` }, 502);
+          }
+          return;
+        }
+
+        // ③-b 把 outbox 里的一段视频发到会话（T-061）。闸门与 /api/send/image 同构：
+        //      会话 key 形状 → 令牌 → 静默 → 发送守卫 → 文件名形状 → 存在且不超限 → 频率
+        //      → 串进 sendChain 真发。文件不管发送成败都在 finally 里删掉：outbox 是
+        //      一次性中转区，留着就是磁盘漏勺。
+        if (req.method === 'POST' && url.pathname === '/api/send/video') {
+          const body = await readImageBody(req);
+          if (!body) return;
+          const key = String(body.key ?? '').trim();
+          if (!/^(group|private):\d{1,20}$/.test(key)) {
+            sendJson({ ok: false, reason: 'bad_key', error: 'key 必须形如 group:群号 或 private:QQ号' }, 400);
+            return;
+          }
+          const name = String(body.name ?? '').trim();
+          if (!OUTBOX_NAME_RE.test(name)) {
+            sendJson({ ok: false, reason: 'bad_video', error: 'name 必须是 outbox 里的 .mp4 文件名（不含路径）' }, 400);
+            return;
+          }
+          if (imageAuthFailed(req, key)) return;
+          if (shouldBlockSilentReply(key)) {
+            sendJson({ ok: false, reason: 'silent', error: '静默模式已开启，当前不允许发送' }, 403);
+            return;
+          }
+          const videoCfg = cfg.socialV2?.video ?? {};
+          if (videoCfg.enabled === false) {
+            sendJson({ ok: false, reason: 'disabled', error: '发视频已关闭（socialV2.video.enabled = false）' }, 403);
+            return;
+          }
+          // 守卫要在读盘之前建好：读盘期间模式被切走的话，sendVideoV2 里的
+          // assertSendAllowed() 会抛，视频不发。
+          const assertSendAllowed = captureSendGuard(key);
+          try {
+            assertSendAllowed();
+          } catch {
+            sendJson({ ok: false, reason: 'session_not_allowed', error: '目标不在当前模式允许范围内' }, 403);
+            return;
+          }
+          const videoPath = path.join(OUTBOX_DIR, name);
+          // path.join 已经把 '..' 归一了，再比一次父目录是最后一道闸（宁可多判一次）。
+          if (path.dirname(videoPath) !== OUTBOX_DIR) {
+            sendJson({ ok: false, reason: 'bad_video', error: '路径非法' }, 400);
+            return;
+          }
+          let buffer;
+          try {
+            await fs.promises.mkdir(OUTBOX_DIR, { recursive: true });
+            buffer = await fs.promises.readFile(videoPath);
+          } catch {
+            sendJson({ ok: false, reason: 'not_found', error: `outbox 里没有 ${name}（先落盘再发或用 url 模式）` }, 404);
+            return;
+          }
+          const maxBytes = Number(videoCfg.maxBytes) || OUTBOX_VIDEO_MAX_BYTES;
+          if (buffer.length > maxBytes) {
+            await fs.promises.rm(videoPath, { force: true }).catch(() => {});
+            sendJson({ ok: false, reason: 'too_large', error: `视频太大（${(buffer.length / 1048576).toFixed(1)}MB），上限 ${(maxBytes / 1048576).toFixed(1)}MB；请用更短的片段或更低分辨率` }, 400);
+            return;
+          }
+          const st = getSocialV2State(key);
+          const now = Date.now();
+          const sendCfg = cfg.socialV2?.send ?? {};
+          try {
+            const maxPerMinute = Number(videoCfg.maxPerMinute) || Number(sendCfg.maxSendPerMinute) || 0;
+            const maxPerHour = Number(videoCfg.maxPerHour) || Number(sendCfg.maxSendPerHour) || 0;
+            const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
+            const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
+            if ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour)) {
+              sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
+              return;
+            }
+            st.sendTimes.push(now);
+            if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
+            let sent;
+            try {
+              sent = await sendVideoV2(key, buffer, { assertSendAllowed });
+            } catch (error) {
+              const at = st.sendTimes.indexOf(now);
+              if (at >= 0) st.sendTimes.splice(at, 1);
+              saveSocialV2State();
+              throw error;
+            }
+            st.lastAiReplyAt = now;
+            st.lastActionAt = now;
+            if (st.wakeConfig) st.wakeConfig.noActionCount = 0;
+            // recentMessages 里只留一句 '[视频]'：下一轮 prompt 里的"自己说过的话"要像真人，
+            // 真人也不会把一段视频的字节记在脑子里。
+            recordSentMessagesV2(key, ['[视频]'], crossSendSourceV2(key, req));
+            saveSocialV2State();
+            log(`[video] 已发送 ${name}（${(buffer.length / 1048576).toFixed(1)}MB）→ ${key} (message_id=${sent.messageId ?? '-'})`);
+            appendActivity(`${key} AI 发了一段视频`);
+            scheduleReplyCheckV2(key);
+            sendJson({ ok: true, key, name, messageId: sent.messageId, bytes: buffer.length });
+          } catch (error) {
+            saveSocialV2State();
+            log(`[video] 发送失败 ${key}：${error?.message ?? error}`);
+            sendJson({ ok: false, reason: 'send_failed', error: `发视频失败：${error?.message ?? error}` }, 502);
+          } finally {
+            await fs.promises.rm(videoPath, { force: true }).catch(() => {});
           }
           return;
         }
@@ -10055,7 +10800,9 @@ async function main() {
           // 等一个可能卡几十秒的模型回合），但必须挂 catch。裸调用一旦 reject 就是
           // unhandledRejection：Node 会打警告甚至按配置退出进程，而 HTTP 那边已经回了 {ok:true}，
           // 表面上"唤醒成功"，实际上谁也不知道它失败了。
-          void sendWakePromptV2(key, effectiveReason).catch((error) => log(`[reserved2] 手动唤醒异常 ${key}:`, error?.message ?? error));
+          // 首次唤醒会把 reason 升级成 bootstrap（为了带上初始提示词）；操作者这次写的说明
+          // 通过 requestedReason 一起带进去，由 buildWakePromptV2 附在引导段末尾。
+          void sendWakePromptV2(key, effectiveReason, { requestedReason: firstWake ? reason : '' }).catch((error) => log(`[reserved2] 手动唤醒异常 ${key}:`, error?.message ?? error));
           log(`控制台：手动唤醒 ${key}（${effectiveReason}${firstWake && reason !== effectiveReason ? `，首次唤醒，请求原因 ${reason} 已升级为 bootstrap` : ''}）`);
           sendJson({ ok: true, key, reason: effectiveReason, requestedReason: reason, firstWake });
           return;
@@ -10782,6 +11529,58 @@ async function main() {
           return;
         }
 
+        // ── 分享卡片（T-063）：链接 → QQ 结构化卡片（不下载、不发裸链接）────────
+        // 与 send-voice / speak 同一套闸门：卡片也是"我往群里丢了个东西"，
+        // 不能因为它是"分享"就少一道口子（尤其是静默时段）。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/share-card') {
+          const body = await readBody();
+          const token = String(body.token ?? req.headers['x-agent-token'] ?? '').trim();
+          const key = String(body.key ?? body.target ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空（格式 group:群号 或 private:QQ号）' }, 400); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (!token) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
+          if (!agentTokenCoversSend(key, token)) {
+            sendJson({ ok: false, error: 'agent token 无效，或目标会话不在同一互通编号（可在控制台「跨渠道互通」里改编号）' }, 403);
+            return;
+          }
+          if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
+          const keyMatch = /^(group|private):(\d+)$/.exec(key);
+          if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          const kind = keyMatch[1];
+          const id = Number(keyMatch[2]);
+          if (!Number.isFinite(id) || id <= 0 || !modeAllowed(key, kind, id, cfg, currentMode)) {
+            sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return;
+          }
+          const link = String(body.url ?? '').trim();
+          if (!link) { sendJson({ ok: false, error: 'url 不能为空' }, 400); return; }
+          try {
+            captureSendGuard(key)();
+            const built = await buildShareCard({
+              url: link,
+              title: body.title,
+              desc: body.desc,
+              cover: body.cover,
+              tag: body.tag,
+              uin: Number(bot?.selfId) || 0
+            });
+            if (!built.ok) { sendJson({ ok: false, error: built.error }, 400); return; }
+            if (body.dryRun === true) {
+              sendJson({ ok: true, dryRun: true, key, card: built.meta });
+              return;
+            }
+            const sent = await sendCardV2(key, built.ark);
+            recordSentMessagesV2(key, [`[卡片]${built.meta.title}`]);
+            saveSocialV2State();
+            appendActivity({ type: 'share-card', key, title: built.meta.title, url: built.meta.url });
+            scheduleReplyCheckV2(key);
+            sendJson({ ok: true, key, messageId: sent.messageId, card: built.meta });
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+          }
+          return;
+        }
+
         // ── AI 侧 TTS（T-032）：把一句话合成语音条发出去 ─────────────────────
         // 闸门顺序与 /api/socialV2/send-voice **逐条对齐**：语音是「开口说话」的强表达，
         // 不能因为「这次是合成的」就少一道口子。额度检查在 speakV2 内部、合成之前。
@@ -10836,6 +11635,97 @@ async function main() {
           } catch (error) {
             // 按错误类型给状态码：文本问题 400、额度 429、引擎问题 503（引擎失败不是
             // 调用方写错了参数，回 400 会让模型以为改参数就能好）。
+            const code = error?.code;
+            const message = error?.message ?? String(error);
+            if (code === 'empty' || code === 'too_long' || code === 'bad_args' || code === 'busy' || code === 'bad_voice' || code === 'bad_tone') {
+              sendJson({ ok: false, error: message, reason: code }, 400);
+              return;
+            }
+            if (/语音发送频率超限/.test(message)) { sendJson({ ok: false, error: message, reason: 'budget' }, 429); return; }
+            if (code === 'timeout') { sendJson({ ok: false, error: message, reason: 'tts_timeout' }, 503); return; }
+            if (code === 'tts_unavailable' || code === 'tts_failed') { sendJson({ ok: false, error: message, reason: 'tts_unavailable' }, 503); return; }
+            sendJson({ ok: false, error: message, reason: 'error' }, 500);
+          }
+          return;
+        }
+
+        // ── 唱歌（T-062）：把一段旋律唱成一条语音 ───────────────────────────
+        // 闸门与上面的 /api/socialV2/speak **逐条对齐**：唱歌也是"自己开口"，token / 范围 /
+        // 静默 / 工具开关一样都不能少；只多一个 dryRun —— 只算计划和音高，不合成也不发送，
+        // 让模型先把旋律看一眼再决定要不要真唱（省掉一整轮 TTS + ffmpeg）。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/sing') {
+          const body = await readBody();
+          const token = String(body.token ?? req.headers['x-agent-token'] ?? '').trim();
+          const key = String(body.key ?? body.target ?? '').trim();
+          const voice = voiceCfg();
+          if (!voice.enabled) { sendJson({ ok: false, error: '语音功能已关闭', reason: 'disabled' }, 403); return; }
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空（格式 group:群号 或 private:QQ号）', reason: 'bad_key' }, 400); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用', reason: 'mode' }, 403); return; }
+          if (!token) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token', reason: 'token' }, 403); return; }
+          if (!agentTokenCoversSend(key, token)) {
+            sendJson({ ok: false, error: 'agent token 无效，或目标会话不在同一互通编号（可在控制台「跨渠道互通」里改编号）', reason: 'token' }, 403);
+            return;
+          }
+          if (!v2ToolEnabled('sing')) { sendJson({ ok: false, error: '工具未启用：qq_sing', reason: 'tool' }, 403); return; }
+          if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内', reason: 'scope' }, 403); return; }
+          if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送', reason: 'silent' }, 403); return; }
+          const keyMatch = /^(group|private):(\d+)$/.exec(key);
+          if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号', reason: 'bad_key' }, 400); return; }
+          const kind = keyMatch[1];
+          const id = Number(keyMatch[2]);
+          if (!Number.isFinite(id) || id <= 0 || !modeAllowed(key, kind, id, cfg, currentMode)) {
+            sendJson({ ok: false, error: '目标不在当前模式允许范围内', reason: 'scope' }, 403);
+            return;
+          }
+          if (body.dryRun === true) {
+            // dryRun 走和真唱同一套归一，所以参数错的报错文字与真唱完全一致 —— 模型按它改参数即可。
+            try {
+              const planned = resolveSingRequest({
+                song: body.song,
+                notes: body.notes,
+                lyrics: cleanSingLyrics(body.lyrics, { maxChars: singCfg().maxLyricsChars }),
+                bpm: body.bpm,
+                baseMidi: body.baseMidi
+              });
+              if (planned.error) { sendJson({ ok: false, error: planned.error, reason: 'bad_args' }, 400); return; }
+              sendJson({
+                ok: true,
+                dryRun: true,
+                key,
+                source: planned.source,
+                bpm: planned.plan.bpm,
+                beatSeconds: planned.plan.beatSeconds,
+                baseMidi: planned.plan.baseMidi,
+                seconds: planned.plan.totalSeconds,
+                syllables: planned.plan.syllables,
+                // 每段带上原 token（R 就是休止符）和半音差，模型据此判断旋律对不对
+                segments: planned.plan.segments.map((seg) => ({
+                  index: seg.index,
+                  rest: seg.rest,
+                  syllable: seg.syllable,
+                  midi: seg.midi,
+                  token: planned.notes[seg.index]?.token ?? null,
+                  beats: seg.beats,
+                  seconds: seg.seconds,
+                  semitones: seg.semitones
+                }))
+              });
+            } catch (error) {
+              sendJson({ ok: false, error: error?.message ?? String(error), reason: error?.code ?? 'bad_args' }, 400);
+            }
+            return;
+          }
+          try {
+            const sung = await singV2(key, {
+              song: body.song,
+              notes: body.notes,
+              lyrics: body.lyrics,
+              bpm: body.bpm,
+              voice: body.voice
+            });
+            sendJson({ ok: true, key, ...sung });
+          } catch (error) {
+            // 状态码口径同 speak：参数/文本问题 400、额度 429、引擎问题 503。
             const code = error?.code;
             const message = error?.message ?? String(error);
             if (code === 'empty' || code === 'too_long' || code === 'bad_args' || code === 'busy' || code === 'bad_voice' || code === 'bad_tone') {
@@ -13782,7 +14672,10 @@ async function main() {
         modelSeenSeqs: new Set(),
         activeTopics: [],
         pendingThoughts: [],
-        memberImpressions: {}
+        memberImpressions: {},
+        // 回合忙时暂存的唤醒原因（见 sendWakePromptV2 / schedulePendingWakeDrainV2）。
+        // 会随状态落盘：桥接重启后这批「想说但没说」还在，不至于静默丢光。
+        pendingWakeReasons: []
       };
       rememberAgentToken(key, st.agentToken);
       socialV2.conversations.set(key, st);
@@ -13856,6 +14749,14 @@ async function main() {
             modelSeenSeqs: new Set(),
             activeTopics: Array.isArray(val.activeTopics) ? val.activeTopics : [],
             pendingThoughts: Array.isArray(val.pendingThoughts) ? val.pendingThoughts : [],
+            // 积压的唤醒原因：旧状态文件里可能没有这个键，也可能混进 null / 超长文案。
+            // 过滤规则与 replayPendingWakeReasonsV2 一致（非对象、空 reason 一律丢）。
+            pendingWakeReasons: Array.isArray(val.pendingWakeReasons)
+              ? val.pendingWakeReasons
+                .filter((r) => r && typeof r === 'object' && typeof r.reason === 'string' && r.reason)
+                .slice(-20)
+                .map((r) => ({ reason: String(r.reason).slice(0, 2000), seq: Number(r.seq) || 0 }))
+              : [],
             memberImpressions: (() => {
               const rawImp = (val.memberImpressions && typeof val.memberImpressions === 'object') ? val.memberImpressions : {};
               const clean = {};
@@ -13949,6 +14850,14 @@ async function main() {
           crossHintWake: st.crossHintWake || 0,
           activeTopics: Array.isArray(st.activeTopics) ? st.activeTopics.slice(-50) : [],
           pendingThoughts: Array.isArray(st.pendingThoughts) ? st.pendingThoughts.slice(-50) : [],
+          // 积压的唤醒原因要落盘（上限 20 条 / 单条 2000 字）：只在内存里的话，桥接一重启
+          // 这批「当时想说但没发出去」的话就全丢了 —— 2026-11-09 那次断连正好撞上。
+          pendingWakeReasons: Array.isArray(st.pendingWakeReasons)
+            ? st.pendingWakeReasons
+              .filter((r) => r && typeof r === 'object' && typeof r.reason === 'string' && r.reason)
+              .slice(-20)
+              .map((r) => ({ reason: String(r.reason).slice(0, 2000), seq: Number(r.seq) || 0 }))
+            : [],
           memberImpressions: st.memberImpressions && typeof st.memberImpressions === 'object' ? st.memberImpressions : {},
           seenForwardIds: Array.from(seenForwardIds.get(key) || []).slice(-1000)
         };
@@ -16879,10 +17788,14 @@ async function main() {
     return `${head}\n${picked.join('\n')}\n\n`;
   }
 
-  function buildWakePromptV2(key, reason) {
+  function buildWakePromptV2(key, reason, options = {}) {
     const roleLine = currentRoleLine(key);
     const identityLine = selfIdentityTextV2();
     const st = getSocialV2State(key);
+    // 操作者这一次唤醒的原始请求。只有在 reason 被升级成 bootstrap 时才非空 ——
+    // 首次唤醒必须走 bootstrap（初始提示词只有这一趟能注入），但「这次想让它做的事」
+    // 不能跟着一起消失，否则操作者写的说明只留在日志里（2026-11-09 两次踩到）。
+    const requestedReason = String(options.requestedReason ?? st.pendingBootstrapNote ?? '').trim();
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
     const memoryText = formatSharedMemoryV2(key);
     const memoryLine = memoryText ? `${memoryText}\n\n` : '';
@@ -16969,7 +17882,13 @@ async function main() {
     const triggeredAgo = triggeredMsg ? describeAge(triggeredMsg.time, Date.now()) : '';
     const triggeredLine = triggeredAgo ? `（触发这条是 ${triggeredAgo} 前发的${triggeredMsg?.sender ? `，来自「${triggeredMsg.sender}」` : ''}，不是刚刚）` : '';
     if (reason === 'bootstrap') {
-      return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
+      // 把操作者的原始请求原样附在引导段后面：它和「初始提示词」不是一回事
+      // （那份是长期背景，这份是这一趟要做的事），所以单独一段、且用完即清。
+      const requestLine = requestedReason && requestedReason !== 'bootstrap'
+        ? `\n\n【操作者补充说明】本次唤醒的原始请求：${requestedReason}`
+        : '';
+      if (st.pendingBootstrapNote) st.pendingBootstrapNote = '';
+      return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。${requestLine}`;
     }
     if (reason === 'timeout') {
       return `${base}【唤醒】${key}\n原因：你设置的有限潜水时间已到；在你规定的时间内没有任何一项条件被触发，只是因为时间到了所以你被唤醒。\n你可以查看消息，或继续设置新的唤醒条件。`;
@@ -17000,7 +17919,7 @@ async function main() {
     return `${roleLine}${identityLine}${tokenLine}【提醒】你还没有完成回合收尾。请调用 qq_set_wake_config 设置下一次唤醒条件（例如继续潜水多久、@/名字/关键词/提问/概率/指定成员等），或者调用 qq_mark_read 表示你看过且决定不接。这是为了防止你忘记收尾后进入“永眠”。注意：设置潜水前先用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成沉睡前观察；等待期间有人说话时查看 newMessages，判断不需要你参与即可收尾。`;
   }
 
-  async function sendWakePromptV2(key, reason) {
+  async function sendWakePromptV2(key, reason, options = {}) {
     if (cfg.socialV2?.enabled === false) return;
     if (currentMode !== 'reserved2' || socialV2.paused) return;
     if (!isSessionAllowedInCurrentMode(key)) {
@@ -17019,6 +17938,13 @@ async function main() {
         if (st.pendingWakeReasons.length > 20) st.pendingWakeReasons.splice(0, st.pendingWakeReasons.length - 20);
       }
       log(`[reserved2] 会话繁忙，暂存唤醒原因 ${key}（${reason}@seq${seq}，原因=${busyReasonV2(key, st)}）`);
+      // 首次唤醒撞上繁忙时，操作者这次的说明先挂在状态上：bootstrap 那一枪迟早要打，
+      // 等它真打出去时再由 buildWakePromptV2 取用（否则说明会随升级一起消失）。
+      if (options.requestedReason) st.pendingBootstrapNote = String(options.requestedReason).slice(0, 2000);
+      // 暂存不等于会被补发：补发原本只在回合结束时发生，一旦这个回合其实已经死了
+      // （租约到期 / turn-end 丢失 / DSH 侧没回事件），队列就会一直躺着。挂一个排空定时器，
+      // 会话一旦不再忙就把积压的原因按顺序放出去。
+      schedulePendingWakeDrainV2(key);
       return;
     }
     // 唤醒频率硬限制：超限则**延后重试**，不能直接丢弃。直接 return 的后果：
@@ -17053,7 +17979,7 @@ async function main() {
             log(`[reserved2] 限频重试前发现未读已清空，跳过 ${key}（${reason}）`);
             return;
           }
-          void sendWakePromptV2(key, reason).catch((error) => log(`[reserved2] 限频重试唤醒异常 ${key}:`, error?.message ?? error));
+          void sendWakePromptV2(key, reason, options).catch((error) => log(`[reserved2] 限频重试唤醒异常 ${key}:`, error?.message ?? error));
         }, waitMs);
         st.rateLimitRetryTimer.unref?.();
       }
@@ -17089,7 +18015,7 @@ async function main() {
     // 上下文太长的会话先退役重建：此刻没有在途 turn，且必须在 buildWakePromptV2 之前
     // 完成，否则提示词里携带的旧会话令牌会指向刚退役的会话。
     maybeRotateOversizedSessionV2(key);
-    const promptText = buildWakePromptV2(key, reason);
+    const promptText = buildWakePromptV2(key, reason, options);
     log(`[reserved2] 唤醒 ${key}（${reason}）`);
     const rollbackWakeTime = () => {
       const idx = st.wakeTimes.lastIndexOf(wakeTime);
@@ -17254,6 +18180,7 @@ async function main() {
         if (st.pendingWakeReasons.length > 20) st.pendingWakeReasons.splice(0, st.pendingWakeReasons.length - 20);
       }
       log(`[reserved2] 会话繁忙，暂存唤醒原因 ${key}（${reason}@seq${seq}，原因=${busyReasonV2(key, st)}）`);
+      schedulePendingWakeDrainV2(key);
       return;
     }
     cancelReplyCheckV2(key); // 真实唤醒已接管，取消普通回复检查，避免 30s 后再补一刀
@@ -17290,7 +18217,14 @@ async function main() {
    */
   function replayPendingWakeReasonsV2(key) {
     const st = getSocialV2State(key);
-    if (!Array.isArray(st.pendingWakeReasons) || !st.pendingWakeReasons.length) return null;
+    if (!Array.isArray(st.pendingWakeReasons)) return null;
+    // 队列里可能混进 null（历史数据 / 序列化异常）：先剔掉，否则它会一直占着队头，
+    // 让「还有积压」的判断永远为真，排空器就变成每分钟空转一次。
+    if (st.pendingWakeReasons.some((r) => !r || typeof r !== 'object')) {
+      st.pendingWakeReasons = st.pendingWakeReasons.filter((r) => r && typeof r === 'object');
+      saveSocialV2State();
+    }
+    if (!st.pendingWakeReasons.length) return null;
     const item = st.pendingWakeReasons.shift();
     if (!item || typeof item !== 'object') return null;
     if (isTimerWakeReason(item.reason)) {
@@ -17317,6 +18251,44 @@ async function main() {
     }
     log(`[reserved2] ${key} 繁忙期间唤醒 ${item.reason}@seq${item.seq} 已被当前回合处理，跳过补发`);
     return { reason: item.reason, action: 'skipped' };
+  }
+
+  /**
+   * 积压唤醒的排空器。
+   *
+   * 补发原本只在回合结束时发生（replayPendingWakeReasonsV2），但「暂存」不一定等得到回合结束：
+   * 回合可能根本没起来（pendingWakeKeys 租约 30 分钟才释放）、turn-end 可能丢、DSH 可能重启。
+   * 2026-11-09 20:08–20:18 实测出现过 10 分钟积压：连续 6 次唤醒全部入队，期间没有任何
+   * 回合结束来触发补发。这里每分钟看一次：会话不忙就放一条出去，还忙就重排。
+   */
+  const PENDING_WAKE_DRAIN_MS = 60 * 1000;
+  function schedulePendingWakeDrainV2(key) {
+    const st = getSocialV2State(key);
+    if (!Array.isArray(st.pendingWakeReasons) || !st.pendingWakeReasons.length) return;
+    if (st.pendingDrainTimer) return;
+    st.pendingDrainTimer = setTimeout(() => {
+      st.pendingDrainTimer = null;
+      try {
+        if (socialV2.paused || currentMode !== 'reserved2') return;
+        if (!Array.isArray(st.pendingWakeReasons) || !st.pendingWakeReasons.length) return;
+        if (!isSessionAllowedInCurrentMode(key)) return;
+        if (isConversationBusyV2(key, st)) {
+          const busy = busyReasonV2(key, st);
+          if (st.pendingDrainLoggedFor !== busy) {
+            st.pendingDrainLoggedFor = busy;
+            log(`[reserved2] ${key} 有 ${st.pendingWakeReasons.length} 条积压唤醒，会话仍忙（${busy}），稍后再试`);
+          }
+          schedulePendingWakeDrainV2(key);
+          return;
+        }
+        st.pendingDrainLoggedFor = null;
+        replayPendingWakeReasonsV2(key);
+        if (Array.isArray(st.pendingWakeReasons) && st.pendingWakeReasons.length) schedulePendingWakeDrainV2(key);
+      } catch (error) {
+        log(`[reserved2] 排空积压唤醒异常 ${key}: ${error?.message ?? error}`);
+      }
+    }, PENDING_WAKE_DRAIN_MS);
+    st.pendingDrainTimer.unref?.();
   }
 
   function setupSleepTimerV2(key) {
@@ -17517,7 +18489,19 @@ async function main() {
     const resolveReply = (messageId) => resolveReplyInfo(kind, id, messageId, event.self_id);
     // textContent 带引用对象信息，供 DSH 判断“这句话在对谁说”；
     // plainContent 只保留当前消息自己的文字，用于命令/指向性判断，避免被引用原文干扰。
-    let textContent = await segmentsToText(event.message ?? [], { resolveAtName, resolveReply });
+    let textContent = await segmentsToText(event.message ?? [], {
+      resolveAtName,
+      resolveReply,
+      // 语音转写（ASR）：**只有这一处**注入 resolveRecord —— plainContent 那次调用不传，
+      // 否则同一条语音会被转写两遍（模型只读 textContent，plainContent 只服务命令判断）。
+      resolveRecord: (data, meta) => transcribeIncomingRecord(data, {
+        cfg,
+        kind,
+        id,
+        messageRef: String(event.message_id ?? event.msg_id ?? event.message_seq ?? ''),
+        index: meta?.index ?? 0
+      })
+    });
     const plainContent = await segmentsToText(event.message ?? [], { resolveAtName, includeReply: false });
     const mediaList = extractMediaFromSegments(event.message ?? []);
     const fileList = extractFilesFromSegments(event.message ?? []);
