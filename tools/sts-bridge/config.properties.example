@@ -1,0 +1,22 @@
+# CommunicationMod 1.2.1 settings.
+# This file lives here because ModTheSpire maps "%APPDATA%"/"%LOCALAPPDATA%" to
+#   <LOCALAPPDATA>\ModTheSpire  (ConfigUtils.CONFIG_DIR), NOT to the mods folder.
+# Note: the mod rewrites this file through java.util.Properties, so keep the
+# contents ASCII-only and keep every backslash doubled.
+#
+# command = the sidecar process to spawn. CommunicationMod does
+#   getString("command").trim().split("\\s+")
+# so it is split on whitespace and there is no shell: quotes/quoted paths are NOT
+# supported. "C:\Program Files\nodejs\node.exe" therefore has to be addressed via
+# its 8.3 short name (PROGRA~1); verify with:
+#   cmd /c for %I in ("C:\Program Files\nodejs\node.exe") do @echo %~sI
+# In .properties every backslash is an escape character, hence the doubled ones.
+command=C\:\\PROGRA~1\\nodejs\\node.exe D\:\\code\\qq-bridge\\tools\\sts-bridge\\bridge.mjs
+# Start the sidecar as soon as the mod initializes, i.e. no need to click the
+# "Start communication process" button in the mod settings panel every launch.
+runAtGameStart=true
+# verbose=true prints every state message to the ModTheSpire log; handy while
+# bringing the bridge up, turn it off later if the log gets noisy.
+verbose=true
+# Seconds the game may hang waiting for the sidecar's "Ready" handshake line.
+maxInitializationTimeout=10
