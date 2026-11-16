@@ -236,6 +236,11 @@ const tests = [
   // 逐字节对拍、透明/处置方式/隔行扫描的合成、抽样与预算、PNG 编码、以及接进 media-normalize
   // 之后的出口（动图 → 网格 PNG；静态大 GIF → 缩图，不再整张退回）。
   'test-gif-read.mjs',
+  // 2026-11-07 新增的三条能力，各自带离线回归网（都不联网、不碰真 QQ/DSH）：
+  //   share-card（B站/通用网页 → QQ 结构化卡片，重点是 SSRF 闸门必须拦住 127.0.0.1 这类回环地址）、
+  //   sing（音符 → 变调合成的计划与滤镜，重点是 24k 源必须先 aresample 再 asetrate）、
+  //   asr-core（语音转写的配置钳制/文件头嗅探/哈希缓存/并发闸门，默认只跑离线部分）。
+  'test-share-card.mjs', 'test-sing.mjs', 'test-asr-core.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

@@ -22,6 +22,7 @@ import {
   planNormalization,
   sniffImage
 } from '../src/media-normalize.js';
+import { resetFfmpegProbe } from '../src/voice-core.js';
 import { bridgeHarness } from './audit-bridge-harness.mjs';
 
 let failures = 0;
@@ -204,16 +205,35 @@ await test('解码失败（超预算 + 没 ffmpeg）也不崩：退回首帧 + �
   // 都不存在时会回退到 PATH 里的 ffmpeg（这是语音功能就有的既定行为）。
   // 这里改成「自带解码器拒绝解码」：把画布改成 5000×5000（>16Mi 预算），字节仍然只有几十字节。
   // 验证的是**失败路径的契约**：不抛异常、小图按原样提供、note 说清两层原因。
-  const huge = Buffer.from(GIF_2);
-  huge.writeUInt16LE(5000, 6);
-  huge.writeUInt16LE(5000, 8);
-  assert.equal(sniffImage(huge)?.frames, 2, '夹具仍应被认成 2 帧动图');
+  //
+  // 2026-11-07 补：这台机器后来装了真 ffmpeg（E:\tools\ffbin），「本机没有 ffmpeg」不再是默认前提——
+  // 自带解码器放弃之后会落到 ffmpeg 那一层，图真被解开了，这条用例就从「失败路径」变成
+  // 「成功路径」，断言自然对不上。所以这里**显式把 ffmpeg 摘掉**（清环境变量 + PATH 指向空目录），
+  // 跑完原样恢复；探针有进程内缓存，前后各 reset 一次，避免把「没有 ffmpeg」的结论留给别的用例。
+  const emptyBin = path.join(tmp, 'no-ffmpeg-on-purpose');
+  fs.mkdirSync(emptyBin, { recursive: true });
+  const savedEnv = { ffmpeg: process.env.FFMPEG_PATH, ffprobe: process.env.FFPROBE_PATH, pathEnv: process.env.PATH };
+  delete process.env.FFMPEG_PATH;
+  delete process.env.FFPROBE_PATH;
+  process.env.PATH = emptyBin;
+  resetFfmpegProbe();
+  try {
+    const huge = Buffer.from(GIF_2);
+    huge.writeUInt16LE(5000, 6);
+    huge.writeUInt16LE(5000, 8);
+    assert.equal(sniffImage(huge)?.frames, 2, '夹具仍应被认成 2 帧动图');
 
-  const out = await normalizeImageForModel(huge, 'image/gif', { ...MEDIA_DEFAULTS, tmpDir: tmp });
-  assert.equal(out.ok, true);
-  assert.equal(out.buffer, huge, '压不动时小图按原样提供（不阻断对话）');
-  assert.match(out.note, /只提供首帧/);
-  assert.match(out.note, /解码预算/, 'note 里要写清是哪一层失败的');
+    const out = await normalizeImageForModel(huge, 'image/gif', { ...MEDIA_DEFAULTS, tmpDir: tmp });
+    assert.equal(out.ok, true);
+    assert.equal(out.buffer, huge, '压不动时小图按原样提供（不阻断对话）');
+    assert.match(out.note, /只提供首帧/);
+    assert.match(out.note, /解码预算/, 'note 里要写清是哪一层失败的');
+  } finally {
+    if (savedEnv.ffmpeg === undefined) delete process.env.FFMPEG_PATH; else process.env.FFMPEG_PATH = savedEnv.ffmpeg;
+    if (savedEnv.ffprobe === undefined) delete process.env.FFPROBE_PATH; else process.env.FFPROBE_PATH = savedEnv.ffprobe;
+    process.env.PATH = savedEnv.pathEnv;
+    resetFfmpegProbe();
+  }
 });
 
 // ── 5. 桥接集成：出图出口会归一化，收藏表情仍拿原始字节 ────────────────────

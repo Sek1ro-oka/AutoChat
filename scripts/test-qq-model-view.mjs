@@ -164,7 +164,13 @@ test('MCP validates/forwards read watermarks and wait purposes against an isolat
     // 少一个 fixture 里的 server 在 import 阶段就退出，整条用例会以 Connection closed 失败。
     await Promise.all(['mcp-snowluma-safe.js', 'qq-model-view.js', 'sensitive.js', 'identity-core.js',
       'heybox-tools.js', 'heybox-core.js', 'qzone-post.js', 'device-tools.js', 'device-core.js', 'device-grant.js',
-      'reach-tools.js', 'reach-core.js', 'reach-browser.js'].map((name) =>
+      'reach-tools.js', 'reach-core.js', 'reach-browser.js',
+      // video-tools 是 T-061 的发视频 / 看视频工具（mcp-snowluma-safe.js 静态 import），
+      // 同样少一个就在 import 阶段退出，整条用例以 Connection closed 失败。
+      'video-tools.js',
+      // song-tools 是 T-062 的唱歌工具（同上，静态 import）；它只依赖 zod，但少这一个
+      // 文件照样会让 fixture 里的 server 起不来。
+      'song-tools.js'].map((name) =>
       fs.copyFile(path.join(ROOT, 'src', name), path.join(fixture, 'src', name))));
     await fs.writeFile(path.join(fixture, 'config.json'), JSON.stringify({ consolePort: api.address().port }));
     const transport = new StdioClientTransport({

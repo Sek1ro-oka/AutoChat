@@ -31,6 +31,10 @@ import { registerDeviceTools } from './device-tools.js';
 // 三平台只读检索的 3 个 reach_* 工具（T-027）：B站 / 小红书 / 小黑盒的统一入口。
 // 同样挂在 snowluma 上，`reach.enabled === false` 时整个不注册（见文件末尾）。
 import { registerReachTools } from './reach-tools.js';
+// 发视频（T-061）：qq_send_video。下载/转码在这边做，发送仍走桥接 /api/send/video。
+import { registerVideoTools } from './video-tools.js';
+// 唱歌（T-062）：qq_sing。合成/变调/拼接全在桥接里，这边只转发一次 POST /api/socialV2/sing。
+import { registerSongTools } from './song-tools.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -2450,6 +2454,27 @@ try {
   if (reachCfg.enabled !== false) registerReachTools(server);
 } catch (err) {
   console.error('[reach] 工具注册失败：' + (err?.message || err));
+}
+
+// 发视频（T-061）：qq_send_video。与 reach/device 同一层兜底 —— 这个工具要 spawn
+// yt-dlp / ffmpeg，机器上没装的时候应该只是"少一个工具"，不是整台 server 起不来。
+try {
+  if (loadConfig().socialV2?.video?.enabled !== false) {
+    registerVideoTools(server, { root: ROOT, getConfig: loadConfig, agentApi });
+  }
+} catch (err) {
+  console.error('[video] 工具注册失败：' + (err?.message || err));
+}
+
+// 唱歌（T-062）：qq_sing。同样 try/catch 兜住 —— 合成要用 ffmpeg 和 edge-tts，
+// 机器上缺任何一个都只该表现为"少一个工具"，不能让整个 MCP server 起不来。
+// 条件与 qq_speak 一致：语音库总开关 + 工具开关，任一关掉就不注册（模型看不见比看得见却永远 403 省 token）。
+try {
+  if (loadConfig().socialV2?.voice?.enabled !== false && loadConfig().socialV2?.tools?.sing !== false) {
+    registerSongTools(server, { root: ROOT, getConfig: loadConfig, agentApi });
+  }
+} catch (err) {
+  console.error('[sing] 工具注册失败：' + (err?.message || err));
 }
 
 // 张雪峰视角（T-030）：拿「张雪峰的思维框架 / 决策启发式 / 表达方式」当参考，用来组织
