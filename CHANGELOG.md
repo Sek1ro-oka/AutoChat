@@ -5,6 +5,19 @@
 
 ## [Unreleased]
 
+### 一键启动改走 `stack-control.mjs`：三件套无窗口拉起，重启覆盖 SnowLuma（2026-11-15）
+
+- **事故**：11:58 桥接（3100）在跑、DSH（3080）在跑，但 **3001/3000 没人监听**——SnowLuma 在 00:14:08 被 Ctrl+C / 关窗口（`logs/snowluma.out` 末尾 `Shutting down (SIGINT)`）之后就一直没起来。桥接从那时起每 30 秒 `SnowLuma 连接断开（code=1006）` + `token 自救失败：连不上 OneBot HTTP API（http://127.0.0.1:3000）`。同一天上午为了止住「每 2–5 分钟弹一个 Windows Terminal」已经把 5 个周期任务 Disabled（`Bridge supervisor` / `SnowLuma supervisor` / 三个 keeper），于是没有任何东西会把它拉起来——这不是桥接的问题。
+- **新增 `scripts/stack-control.mjs`**（`start|stop|restart|status`，退出码 0 全部就绪 / 1 有服务没起 / 2 用法错误）：`start` 缺什么起什么再体检（三个端口 + OneBot `get_login_info` + 桥接 `/api/status` 的 `snowluma.connected`）；`restart` 只停 SnowLuma + 桥接（**先杀 `cmd /c start.bat` 守护窗口再杀 node**，否则 `:loop` 5 秒后原地重拉）后重跑 `start`，DSH 不动；`stop` / `status` 同理。SnowLuma 目录只从 `config.json` 的 `snowluma.homeDir` 读，不写死盘符；已有 node 进程但端口 60 秒不开按卡死处理（`recover`）。
+- **新增 `scripts/run-hidden.vbs`**：`WScript.Shell.Run cmd, 0, False`。**`spawn(..., {detached:true, windowsHide:true})` 是拦不住弹窗的**——detached 子进程本就没有控制台，`cmd.exe` 会自己 `AllocConsole` 再要一个，实测以 Windows Terminal 标签页形式出现（标题 `node  ./index.mjs`），`windowsHide` 只管首次创建控制台那一次。改成 wscript 用 `SW_HIDE` 建隐藏控制台、`.bat` 里的 node 继承它。两个坑：① 整串命令行带内层引号（`cmd /d /c launcher.bat >> "…" 2>&1`）会让 WScript 解析不了 Node 加的 `\"`，什么都不启动也不留痕——所以只传简单命令行，重定向由 VBS 自己拼；② `spawn` wscript 后立刻 `unref()` 走人，会把还没 fork 出 cmd 的 wscript 一起带走（同样静默），现在等它的 `exit`（约 130ms）再往下走。
+- **重写 `启动全部.cmd`**：删掉两段「`schtasks /Run` + 等 60 秒」——**已禁用的任务 `schtasks /Run` 直接报 `ERROR: The scheduled task "..." could not run because it is disabled.`**，那段纯粹白等两分钟。现在只做 `node scripts\stack-control.mjs start`，成功打印 `All three services are up`。保持纯 ASCII + 不写盘符（`scripts/test-audit-setup-guards.mjs` 会断言）。
+- **重写 `restart.bat`**：旧版只重启桥接、完全没碰 SnowLuma，正是这次「QQ 未连接」的盲点。现在 `node scripts\stack-control.mjs restart`，失败时 pause 并指路 `logs\launcher.log`。
+- **`start.bat` 一处修正**：`:loop` 里的 `timeout /t 5 /nobreak >nul` 改成 `ping -n 6 127.0.0.1 >nul`。无窗口启动时 stdin 是 NUL，`timeout` 会立刻报 `ERROR: Input redirection is not supported` 退出，`goto loop` 就退化成死循环空转（launcher 注释里早写过 "ping instead of timeout"，这里漏了）。
+- **`/api/status` 才是可信的连接状态**：原先读 `state/bridge.log` 找最后一条「SnowLuma 已连接」，但该文件是 `createCappedLogger(BRIDGE_LOG, 2000)`（`src/bridge.js:1653` / `:1688`），到 2000 行会 rename 成 `bridge.log.1`——轮转恰好把启动那几行搬走，刚重启完反而查不到，误报「可能仍在重连」。改用 `GET /api/status`（handler `src/bridge.js:6888`）：不带令牌 401，`Cookie: consoleToken=…` 也 401，只有请求头 `x-console-token: <state/console-token>` 返回 200（`x-agent-token` 会落到受限视图，没有 `snowluma` 字段）。
+- **修掉 `process.exit()` 撞 undici 的崩溃**：两次运行末尾都出现 `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c, line 94`（退出码 0xC0000409）。改成 `node:http`（`agent: false` + `Connection: close`）发请求、结束处只设 `process.exitCode` 让事件循环自然退出，不再强杀。
+- **实测**：`status` 2.1 秒、退出码 0；`restart` 9.3 秒（SnowLuma 1 秒起、桥接 1 秒起），体检三端口 ✅ + `QQ 账号 3928753720（南溟）` + `桥接→网关 ✅ SnowLuma 已连接，账号在线，DSH 就绪`；`cmd /c 启动全部.cmd` 退出 0。全过程桌面没有新增可见窗口（只剩用户自己那个 Windows Terminal）。
+- **README「运行与运维」重写**：原来整段讲「靠计划任务两层守护」，现在改为 `stack-control.mjs` 的用法 + 一节「计划任务：那 5 个周期任务已禁用（2026-11-15）」，写清代价（不再自愈）、怎么 `Enable-ScheduledTask` 恢复、怎么删、以及为什么 `schtasks /Run` 不再管用。
+
 ### SnowLuma 失联 4h38m 之后：网关与桥接各加一层常驻，唤醒不再丢（2026-11-09）
 
 - **事故**：14:26:34 之后 SnowLuma 的 node 进程消失（自身日志停在一条正常 `get_status`，无崩溃栈）。Windows System 日志在 14:21:03 / 14:26:21 各有一条 `Microsoft-Windows-Resource-Exhaustion-Detector` Id 2004「low virtual memory condition」——机器提交上限 49.7GB、当时空闲虚拟内存 9.1GB，前台 WindowsTerminal / DSH Desktop 各占 2.9GB / 1.9GB，网关是被内存压力收走的。桥接（pid 未变）从 14:27:03 起每 30 秒 `SnowLuma 连接断开（code=1006）` + `token 自愈失败…连不上 OneBot HTTP API`，一直空转到 19:05 才被手工拉起，**4h38m**。期间 agent 仍在醒、仍在写回复，只是发不出去（`state/qq-activity.log` 里 16:38–18:37 一串「QQ 发送失败 … fetch failed」）；`historySync` 关着，那段群/私聊消息没有回补。

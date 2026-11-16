@@ -15,5 +15,7 @@ if "%code%"=="2" (
     exit /b 2
 )
 echo [%date% %time%] bridge exited (code %code%), restarting in 5 seconds...
-timeout /t 5 /nobreak >nul
+rem ping, not "timeout": timeout refuses to run when stdin is redirected (which is
+rem exactly what happens when the launcher starts this file with no window).
+ping -n 6 127.0.0.1 >nul
 goto loop

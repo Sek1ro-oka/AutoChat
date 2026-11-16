@@ -1,26 +1,23 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-echo Stopping old guard windows...
-powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='cmd.exe'\" | Where-Object { $_.CommandLine -like '*start.bat*' -and $_.CommandLine -notlike '*restart.bat*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
-echo Stopping old bridge processes...
-rem 注意：start.bat 是以**相对路径**启动的（node src/bridge.js），所以
-rem Win32_Process.CommandLine 里根本不含仓库绝对路径 —— 旧版按
-rem '*%~dp0src\bridge.js*' 匹配永远匹配不上，于是「重启」只是又起了一个实例，
-rem 旧桥接继续跑（state/bridge.log 里 04:54 出现过两个实例同时加入 DSH 事件流，
-rem 只因控制台端口冲突才被挡下，其中一个还把 social-v2.json 用旧快照覆盖了回去）。
-rem 这里改成按 PID（读锁文件）+ 按 *bridge.js* 兜底两条路一起杀。
-powershell -NoProfile -Command "$lock = Join-Path '%~dp0' 'state\bridge.lock'; $pids = @(); if (Test-Path $lock) { $raw = (Get-Content $lock -Raw).Trim(); if ($raw -match '^\d+$') { $pids += [int]$raw } }; Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { $_.CommandLine -like '*bridge.js*' -and $_.CommandLine -notlike '*mcp-*' -and $_.CommandLine -notlike '*node_modules*' } | ForEach-Object { $pids += $_.ProcessId }; $pids | Sort-Object -Unique | ForEach-Object { Write-Host ('  kill PID ' + $_); Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }"
-rem 等旧实例真的退出（并放开控制台端口）再删锁；否则「锁删了但进程还活着」就是双实例。
-timeout /t 3 /nobreak >nul
-powershell -NoProfile -Command "$live = Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { $_.CommandLine -like '*bridge.js*' -and $_.CommandLine -notlike '*mcp-*' -and $_.CommandLine -notlike '*node_modules*' }; if ($live) { Write-Host '仍有桥接进程存活：'; $live | ForEach-Object { Write-Host ('  PID ' + $_.ProcessId + '  ' + $_.CommandLine) }; exit 1 } else { exit 0 }"
+rem 一键重启：SnowLuma + 桥接全停再起（DSH web 不动，它有自己的登录守护任务）。
+rem 具体动作在 scripts\stack-control.mjs restart 里：
+rem   ① 先杀 cmd /c start.bat 守护窗口，再按 state\bridge.lock 的 PID + 命令行含
+rem      bridge.js（排除 mcp-* / node_modules）杀桥接，等 3100 真的释放再删锁；
+rem   ② 杀 node index.mjs 和它的 launcher.bat 窗口，等 3001 释放；
+rem   ③ 隐藏启动（无窗口，输出照旧写 logs\snowluma.out / logs\bridge.out）；
+rem   ④ 最后查 OneBot get_login_info，确认 QQ 真的在线，而不是只看端口开着。
+rem 旧版本只重启桥接、完全没碰 SnowLuma —— 2026-11-15 的「QQ 机器人未连接」正是
+rem SnowLuma 没在运行（3001/3000 无监听），光重启桥接只会继续 code=1006 空转。
+node "%~dp0scripts\stack-control.mjs" restart
 if errorlevel 1 (
     echo.
-    echo 重启已中止：避免出现双实例互相抢消息、互相覆盖 state。
-    echo 请手动结束上面列出的 PID 后重试。
+    echo 重启失败，日志：logs\launcher.log / logs\snowluma.out / logs\bridge.out
     pause
     exit /b 1
 )
-del state\bridge.lock 2>nul
-start "" cmd /c start.bat
-echo Guard window started.
+echo.
+echo 重启完成。
+ping -n 6 127.0.0.1 >nul
+exit /b 0

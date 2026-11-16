@@ -110,6 +110,6 @@
 ## 事故与兜底
 
 - 群友诱导 agent 时，preset 的工具限制和目标白名单是主要硬边界。发送工具仍可能造成白名单内的误发；敏感信息正则属于启发式审计，不能识别任意秘密或保证“最多只发一条”。账号和会话隔离仍需结合实际运行模式使用。
-- 想彻底关闭机器人：先建 `state\snowluma-supervisor.pause` 和 `state\bridge-supervisor.pause` 让两层守护停手（否则 SnowLuma 15 秒内、桥接 60 秒内会被重新拉起来），再停止桥接进程（start.bat 窗口 Ctrl+C）或 SnowLuma；删掉两个 `pause` 文件即恢复自动守护。
+- 想彻底关闭机器人：`node scripts\stack-control.mjs stop`（停 SnowLuma + 桥接，DSH 不动），要回来就 `node scripts\stack-control.mjs start`（或双击 `启动全部.cmd`）。2026-11-15 起那 5 个周期任务都已禁用（见 `README.md` 的「计划任务」一节），不再有守护会把停掉的服务拉回来；但若你手动 `Enable-ScheduledTask` 恢复了某一层，就得先建 `state\snowluma-supervisor.pause` / `state\bridge-supervisor.pause` 让它停手，删掉这两个文件即恢复自动守护。
 - 修改白名单/角色/owner 后保存即热更新（控制台写入 config.json / state/*.json 后即时生效）；修改 preset（权威源在 `dsh/agent-presets/`，改完跑 `node scripts/build-agent-preset-patches.mjs` 重新生成 bundle patch）后重启 DSH 生效。
 - ⚠️ 桥接只能运行一个实例：消息异常时先检查任务管理器里是否有多余的 `node ...bridge.js`。
