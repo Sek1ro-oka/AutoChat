@@ -161,7 +161,7 @@ await test('normalizeImageForModel：压不动的垃圾字节 ⇒ ok:false 且�
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qqb-media-test-'));
 const ff = (args) => spawnSync('ffmpeg', ['-v', 'error', '-y', ...args], { stdio: 'ignore' });
 
-await test('真实动图 → 抽帧拼图（单张 JPEG + 帧数说明）', async () => {
+await test('真实动图 → 抽帧拼图（单张静态图 + 帧数说明）', async () => {
   if (!hasFfmpeg) throw skip('本机没有 ffmpeg');
   const gif = path.join(tmp, 'anim.gif');
   const made = ff(['-f', 'lavfi', '-i', 'testsrc2=size=160x120:rate=10:duration=1', '-vf',
@@ -173,7 +173,10 @@ await test('真实动图 → 抽帧拼图（单张 JPEG + 帧数说明）', asyn
 
   const out = await normalizeImageForModel(src, 'image/gif', { ...MEDIA_DEFAULTS, tmpDir: tmp });
   assert.equal(out.ok, true, out.error);
-  assert.equal(out.mimeType, 'image/jpeg', '拼图必须是模型能吃的单帧 JPEG');
+  // 拼图的编码取决于谁解得动：自带 GIF 解码器出 PNG（src/gif-read.js:560），
+  // ffmpeg 那一层出 JPEG（src/media-normalize.js:407）。两者模型都能吃，
+  // 这里只要求「静态单帧 + 是模型认得的图片类型」。
+  assert.match(out.mimeType, /^image\/(jpeg|png)$/, `拼图必须是模型能吃的静态图，实际 ${out.mimeType}`);
   assert.equal(sniffImage(out.buffer)?.frames, 1, '拼图结果不能再是动图');
   assert.match(out.note, /动图 \d+ 帧/);
   assert.match(out.note, /网格/);
