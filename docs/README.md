@@ -28,6 +28,7 @@
 | [guides/ZHANGXUEFENG.md](guides/ZHANGXUEFENG.md) | `zx_perspective`：把「张雪峰视角」skill 当参考资料取用（咨询模式，不换人格）；只在 `group:1131654608` 可用 | ✅ 2026-10-23 新增（T-030） |
 | [guides/ROLE-BINDING.md](guides/ROLE-BINDING.md) | 按互通组配置人格卡：三种选项、作用域 `cross:<gid>` 与 `isolated:<key>`、三个管理端点、生效时机 | ✅ 2026-10-25 新增（T-035） |
 | [guides/SOCIAL-CHAINS.md](guides/SOCIAL-CHAINS.md) | 模式与链路边界：四个模式（chat / closed-agent / reserved / reserved2）× 三条链（被动回复 / 主动社交 v1+v2 / 黑话学习），状态存哪、改哪个开关才生效、排障对照表 | ✅ 2026-11-02 新增 |
+| [guides/MIGRATION.md](guides/MIGRATION.md) | **换电脑 / 重装系统**：哪些算「数据」（日记、跨会话回忆、黑话表、收藏表情、语音库、托管文件…各存在哪个文件）、`scripts/migrate-export.mjs` 打包参数、新机器还原步骤、必须核对的绝对路径、验证与回滚 | ✅ 2026-11-16 新增 |
 
 ## guides/ —— DSH 适配与内部主链
 
@@ -56,6 +57,7 @@
 | --- | --- |
 | 搞懂整体架构 / 全部配置项 | [../README.md](../README.md)（能力与配置概览）、[FOLDER_MAP.md](FOLDER_MAP.md)（目录与脚本） |
 | 在新设备上把 qq-bridge 接进 DSH | [guides/DSH_SETUP.md](guides/DSH_SETUP.md)、[guides/DSH_021_ADAPTATION.md](guides/DSH_021_ADAPTATION.md) |
+| 把它整个搬到另一台电脑（连日记、记忆一起） | [guides/MIGRATION.md](guides/MIGRATION.md) |
 | 发语音 / 换 QQ 账号后语音工具 401 | [guides/VOICE.md](guides/VOICE.md) |
 | 看 AI 烧了多少钱 / 计价口径 | [guides/TOKEN_USAGE_CONSOLE.md](guides/TOKEN_USAGE_CONSOLE.md) |
 | 改控制台界面并做离线回归 | [guides/CONSOLE-UI-TESTING.md](guides/CONSOLE-UI-TESTING.md) |
