@@ -160,7 +160,10 @@ await test('快照头部带 now 与 newestAgo，消息体带 at/ago 且不再有
     assert.equal(snapshot.newestAgo, '25m');
     for (const message of snapshot.messages) {
       assert.equal(message.time, undefined, '快照里不该再有裸 epoch');
-      assert.match(message.at, /^\d{2}:\d{2}$/);
+      // 同一天 → HH:MM；跨天 → MM-DD HH:MM（qq-model-view 的既有约定）。这条用例的
+      // 消息是「NOW 往前推 25 分钟」，凌晨跑（比如 00:01）就自然跨到了昨天，所以两种
+      // 形态都得接受——只认 HH:MM 会在午夜附近挂掉。
+      assert.match(message.at, /^(?:\d{2}:\d{2}|\d{2}-\d{2} \d{2}:\d{2})$/);
       assert.match(message.ago, /^\d+[smhd]$/);
     }
     assert.equal(snapshot.messages[1].ago, '25m');
