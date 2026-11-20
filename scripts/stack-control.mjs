@@ -48,6 +48,16 @@ const CONFIG = readConfig();
 const SNOWLUMA_DIR = String(CONFIG?.snowluma?.homeDir ?? '').trim();
 const ONEBOT_HTTP = String(CONFIG?.snowluma?.httpUrl ?? 'http://127.0.0.1:3000').replace(/\/+$/, '');
 const ONEBOT_TOKEN = String(CONFIG?.snowluma?.accessToken ?? '').trim();
+// OneBot 的 HTTP 端口（默认 3000）。它不是独立服务，和 3001 同一个 SnowLuma 进程，
+// 所以单独探一下只是为了让报错指到「3000 没开」而不是笼统的「账号不在线」。
+const ONEBOT_PORT = (() => {
+  try {
+    const url = new URL(ONEBOT_HTTP);
+    return Number(url.port) || (url.protocol === 'https:' ? 443 : 80);
+  } catch {
+    return 3000;
+  }
+})();
 
 // ── 输出 / 日志 ────────────────────────────────────────────────────────────
 // 屏幕给正在看窗口的人，launcher.log 给事后排查的人：同一行两边都写。
@@ -172,6 +182,56 @@ function killPids(targets, label) {
   }
 }
 
+// ── QQ 客户端（SnowLuma 的前置条件）──────────────────────────────────────
+// SnowLuma 不是独立网桥：它把自己注入 QQNT，再由 QQ 去连服务器。所以 **QQ 没运行就
+// 没有 3000/3001** —— 这是「一键启动完 QQ 机器人还是没连上」最常见的真因。
+// 2026-11-20 早上就是这样：SnowLuma 进程在、WebUI 5099 在，3000/3001 一个都没开，
+// 因为 QQ.exe 没开；旧逻辑会把它当「卡死」，白等 60 秒再杀掉重拉，本来就没错的进程
+// 被杀了两回。路径优先读 config.json 的 snowluma.qqExe，其次探测 QQNT 默认位置。
+const QQ_CANDIDATES = Object.freeze([
+  'C:\\Program Files\\Tencent\\QQNT\\QQ.exe',
+  'C:\\Program Files (x86)\\Tencent\\QQNT\\QQ.exe',
+]);
+const QQ_EXE = String(CONFIG?.snowluma?.qqExe ?? '').trim() || QQ_CANDIDATES.find((p) => fs.existsSync(p)) || '';
+
+function qqRunning() {
+  const out = execOut('(Get-Process -Name QQ -ErrorAction SilentlyContinue | Measure-Object).Count');
+  return Number.parseInt(out.trim(), 10) > 0;
+}
+
+/** QQ 必须在**可见**窗口里跑：首次用或掉登录时要扫码/确认，藏起来就没法操作了。 */
+async function ensureQq() {
+  if (qqRunning()) return { state: 'running' };
+  if (!QQ_EXE) {
+    return { state: 'unknown', detail: '找不到 QQ.exe（可在 config.json 里加 snowluma.qqExe 指定路径）' };
+  }
+  try {
+    const child = spawn(QQ_EXE, [], { detached: true, stdio: 'ignore', cwd: path.dirname(QQ_EXE) });
+    child.unref();
+  } catch (error) {
+    return { state: 'unknown', detail: `启动 QQ 失败：${error?.message ?? error}` };
+  }
+  const started = Date.now();
+  while (Date.now() - started < 60000) {
+    if (qqRunning()) return { state: 'started', ms: Date.now() - started };
+    await sleep(500);
+  }
+  return { state: 'unknown', detail: 'QQ.exe 起了但 60 秒没等到进程，可能被安全软件拦了' };
+}
+
+function describeQq(state) {
+  switch (state.state) {
+    case 'running':
+      return '已在运行';
+    case 'started':
+      return `已拉起（${seconds(state.ms)} 出窗口，要扫码就扫）`;
+    case 'skipped':
+      return '没有配置 SnowLuma，跳过';
+    default:
+      return state.detail ?? '未知状态';
+  }
+}
+
 // ── 启动 ──────────────────────────────────────────────────────────────────
 // node 用 detached + windowsHide：不弹窗口，而且本窗口关掉之后子进程不会被一起收走
 // （这正是 2026-11-05 DSH 被「连进程树一起杀掉」的那个坑）。node 自己不会申请控制台，
@@ -258,18 +318,59 @@ async function stopBridge() {
 async function ensureSnowLuma(recover) {
   if (await portOpen(PORTS.snowluma)) return { state: 'running' };
   const nodes = processes().filter(isSnowLumaNode);
+  // node 已经没了、launcher.bat 那个窗口却还停在 `pause`：它一直攥着 logs/snowluma.out 的
+  // 写入句柄（`>> snowluma.out` 是 cmd 自己开的），新的一轮 `>> snowluma.out` 会因共享冲突
+  // 直接失败，cmd 悄悄退出、日志里一个字都不会多。所以先把这些「死掉的守护窗口」收掉。
+  const staleGuards = processes().filter(isSnowLumaGuard);
+  if (!nodes.length && staleGuards.length) {
+    say(`  收掉上次遗留的 launcher 窗口（PID ${staleGuards.map((p) => p.pid).join(', ')}）：它停在 pause 上占着日志文件`);
+    killPids(staleGuards, 'SnowLuma 旧启动窗口');
+    await sleep(400);
+  }
   if (nodes.length) {
-    const ms = await waitPort(PORTS.snowluma, 60000);
+    // 先给它 10 秒（刚被别的路径拉起来的正常启动）。还没开就查 QQ：QQ 没跑时它永远
+    // 不会开 3001，这时候「卡死重拉」是错的判断。
+    const ms = await waitPort(PORTS.snowluma, 10000);
     if (ms >= 0) return { state: 'booting', ms };
+    if (!qqRunning()) {
+      const qq = await ensureQq();
+      if (qq.state !== 'started' && qq.state !== 'running') {
+        return { state: 'noqq', detail: qq.detail || 'QQ 客户端没在运行（SnowLuma 要注入它才会开 3000/3001）' };
+      }
+      say(`  [先决] QQ 客户端已起来，等 SnowLuma 注入（最多 90 秒）…`);
+      const injected = await waitPort(PORTS.snowluma, 90000);
+      if (injected >= 0) return { state: 'qqinjected', ms: injected };
+      return { state: 'noqq', detail: 'QQ 起来了但 3001 还是没开：确认 QQ 已经登录账号 3928753720（没登录就不会注入）' };
+    }
     if (!recover) return { state: 'hung', pids: nodes.map((p) => p.pid) };
-    say(`  SnowLuma 进程在（PID ${nodes.map((p) => p.pid).join(', ')}）但 60 秒没开 3001，按卡死处理，重拉`);
+    say(`  SnowLuma 进程在（PID ${nodes.map((p) => p.pid).join(', ')}）但端口没开、QQ 也在跑，按卡死处理重拉`);
     await stopSnowLuma();
   }
   const launcher = SNOWLUMA_DIR ? path.join(SNOWLUMA_DIR, 'launcher.bat') : '';
   if (!launcher || !fs.existsSync(launcher)) {
     return { state: 'nodir', detail: launcher || 'config.json 的 snowluma.homeDir 为空' };
   }
+  // 起 SnowLuma 之前先把 QQ 备好：否则 90 秒等的是一个永远不会开的端口。
+  if (!qqRunning()) {
+    const qq = await ensureQq();
+    if (qq.state !== 'started' && qq.state !== 'running') {
+      return { state: 'noqq', detail: qq.detail || 'QQ 客户端没在运行（先登录 QQ 再启动 SnowLuma）' };
+    }
+  }
   await spawnHidden('cmd /d /c launcher.bat', SNOWLUMA_DIR, path.join(LOG_DIR, 'snowluma.out'));
+  // 确认真的起来了：launcher.bat 若在启动阶段就失败（日志被占、node 版本检查不过），
+  // cmd 会不留痕迹地退出。等 15 秒还没有任何进程出现就直接报错，不要白等 90 秒。
+  let appeared = false;
+  for (let i = 0; i < 20; i += 1) {
+    if (processes().some((p) => isSnowLumaNode(p) || isSnowLumaGuard(p))) {
+      appeared = true;
+      break;
+    }
+    await sleep(500);
+  }
+  if (!appeared) {
+    return { state: 'launchfail', detail: '拉起命令没有产生任何进程：logs/snowluma.out 可能被别的窗口占着，或 launcher.bat 自身启动失败' };
+  }
   const ms = await waitPort(PORTS.snowluma, 90000);
   if (ms < 0) return { state: 'failed' };
   return { state: nodes.length ? 'recovered' : 'started', ms };
@@ -410,10 +511,16 @@ function describe(state, kind) {
       return `卡死后重拉（${seconds(state.ms)} 后监听）`;
     case 'booting':
       return `本来就在，等 ${seconds(state.ms)} 后监听`;
+    case 'qqinjected':
+      return `QQ 拉起后注入成功（${seconds(state.ms)} 后监听）`;
+    case 'noqq':
+      return `没起来：${state.detail}`;
     case 'hung':
       return `进程在（PID ${state.pids.join(', ')}）但端口没开 —— 跑 restart 或 stop 再 start`;
     case 'nodir':
       return `没启动：${state.detail}`;
+    case 'launchfail':
+      return `没起来：${state.detail}`;
     case 'failed':
       return `没起来（看 ${kind === 'snowluma' ? 'logs/snowluma.out' : 'logs/bridge.out'}）`;
     default:
@@ -429,19 +536,26 @@ async function report() {
     ['桥接', PORTS.bridge],
   ];
   let allUp = true;
+  const openByPort = new Map();
   for (const [name, port] of rows) {
     const open = await portOpen(port);
+    openByPort.set(port, open);
     if (!open) allUp = false;
     const pid = owners.get(port);
     say(`  ${padLabel(name, 9)} 127.0.0.1:${port}  ${open ? `✅ 监听中（PID ${pid ?? '?'}）` : '❌ 未监听'}`);
   }
   const login = await oneBotLogin();
+  const oneBotUp = await portOpen(ONEBOT_PORT);
+  if (!oneBotUp) allUp = false;
   if (login.ok) {
     say(`  QQ 账号  ${login.userId}${login.nickname ? `（${login.nickname}）` : ''}  ✅ OneBot HTTP 正常`);
+  } else if (!oneBotUp) {
+    say(`  QQ 账号  ❌ 端口 ${ONEBOT_PORT} 没在监听：SnowLuma 没注入到 QQ（QQ 没运行或没登录）`);
   } else {
     say(`  QQ 账号  ❌ ${login.detail}`);
   }
-  const conn = allUp ? await bridgeStatus() : { ok: false, detail: '桥接没在跑' };
+  // 桥接自己开着就一定要问它——3000 挂了不代表桥接不在跑，两者要分开报。
+  const conn = openByPort.get(PORTS.bridge) ? await bridgeStatus() : { ok: false, detail: '桥接没在跑' };
   if (conn.ok) {
     const snap = conn.body?.snowluma ?? {};
     const icon = snap.connected ? '✅' : '⚠️';
@@ -455,14 +569,32 @@ async function report() {
 async function doStart() {
   say(`== 启动 AutoChat（${ROOT}） ==`);
 
+  // ① QQ 客户端。它是 SnowLuma 的宿主：QQ 不在，3000/3001 永远不会开。
+  const wantsSnowLuma = Boolean(SNOWLUMA_DIR && fs.existsSync(SNOWLUMA_DIR));
+  const qq = wantsSnowLuma ? await ensureQq() : { state: 'skipped' };
+  say(`[1/4] QQ 客户端 ${describeQq(qq)}`);
+  if (wantsSnowLuma && qq.state !== 'running' && qq.state !== 'started') {
+    say('      ⚠️ QQ 没起来，SnowLuma 就没有可注入的进程（3000/3001 不会监听）。登录 QQ 后再跑一次。');
+  }
+
+  // ② SnowLuma：自己会再确认一次 QQ（走别的路径进来时也成立）。
   const snow = await ensureSnowLuma(true);
-  say(`[1/3] SnowLuma  ${describe(snow, 'snowluma')}`);
+  say(`[2/4] SnowLuma  ${describe(snow, 'snowluma')}`);
 
+  // ②' OneBot HTTP 3000 与 3001 同一个进程，偶尔晚几秒才开，单独等一下更好定位。
+  if (!['failed', 'launchfail', 'noqq', 'nodir'].includes(snow.state)) {
+    if ((await waitPort(ONEBOT_PORT, 20000)) < 0) {
+      say(`      ⚠️ 3001 开了但 ${ONEBOT_PORT} 还没开：OneBot HTTP 没起来，QQ 账号那一行会报错`);
+    }
+  }
+
+  // ③ DSH web（机器人的脑子）
   const dsh = await ensureDsh();
-  say(`[2/3] DSH web   ${describe(dsh, 'dsh')}`);
+  say(`[3/4] DSH web   ${describe(dsh, 'dsh')}`);
 
+  // ④ 桥接
   const bridge = await ensureBridge(true);
-  say(`[3/3] 桥接      ${describe(bridge, 'bridge')}`);
+  say(`[4/4] 桥接      ${describe(bridge, 'bridge')}`);
 
   // 桥接起来之后还要跟网关握一次手：端口在 ≠ 连上了，最多等 20 秒。
   if (bridge.state !== 'failed') {
@@ -480,7 +612,7 @@ async function doStart() {
 }
 
 async function doRestart() {
-  say('== 重启 SnowLuma + 桥接（DSH web 不动） ==');
+  say('== 重启 SnowLuma + 桥接（DSH web 不动：它是你正在用的界面） ==');
   if (await portOpen(PORTS.bridge)) say('  停桥接…');
   await stopBridge();
   if (await portOpen(PORTS.snowluma)) say('  停 SnowLuma…');

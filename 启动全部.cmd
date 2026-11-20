@@ -3,6 +3,9 @@
 :: (start / stop / restart / status); this file is only the double-click entry.
 ::
 :: What it starts, all hidden, no window per service:
+::   0) QQ client (config.json snowluma.qqExe, else Tencent\QQNT default). SnowLuma
+::      works by being injected INTO QQNT, so without a running QQ there is no
+::      3000/3001 at all - the launcher checks and starts it first.
 ::   1) SnowLuma  (dir from config.json snowluma.homeDir) -> OneBot 3000/3001
 ::   2) DSH web   (profile web, through scripts\dsh-web-supervisor.mjs) -> 3080
 ::   3) Bridge    (this repo, start.bat guard loop)        -> 3100
@@ -36,7 +39,7 @@ node "%ROOT%\scripts\stack-control.mjs" start
 if errorlevel 1 goto failed
 
 echo.
-echo All three services are up. This window can be closed.
+echo All services are up. This window can be closed.
 ping -n 5 127.0.0.1 >nul
 exit /b 0
 

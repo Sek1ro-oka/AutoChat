@@ -5,6 +5,25 @@
 
 ## [Unreleased]
 
+### 换电脑迁移：`migrate-export.mjs` + `guides/MIGRATION.md`（2026-11-16）
+
+- **新增 `scripts/migrate-export.mjs`**：一条命令把「这个 bot 的全部家当」打成一个目录（或 `--zip` 压缩包）——`config.json` + `state/`（日记、跨会话回忆、`social-v2.json`、`slang.json`、`stickers.json`、`sessions.json`、`affect.json`、`identity-map.json`、`current-role.json`、`console-token` …）+ `audio/` + `files/` + `roles/`；`--with-snowluma` 连 SnowLuma 整目录（含 QQ 登录态）一起搬，`--with-logs` 才带日志，`--dry-run` 只列清单。
+- **跳过的东西都是有意的**：`node_modules`（新机器 `npm install`）、`.git`（用 clone）、`work/`（开发临时文件）、以及 `*.pid` / `*.lock` / `*.spawn` —— 这些进程残留搬过去会让新机器误判「已经在运行」。
+- **产出可核对、可回滚**：`MANIFEST.json` 记逐文件 sha256、来源机器/Node/git 版本、**待改的绝对路径清单**；`RESTORE.md` 是要在新机器上照着走的一步步清单。
+- **新增 `docs/guides/MIGRATION.md`**（已挂到 `docs/README.md` 的 guides 与「想找什么」两张表）：什么算数据、打包参数、新机器环境、7 项绝对路径对照表、`setup-dsh.mjs` 必须重跑的原因、验证清单、常见坑与回滚。
+- **实测**：`--dry-run --with-snowluma` 193 个文件 143.6 MB（snowluma 68/128.1 MB、files 5/13.7 MB、state 110/1.5 MB、audio 3/226 KB、roles 6/83 KB、config 1/11.4 KB）；实际打包 48.6 MB zip，`config.json` 的 sha256 与源一致。
+
+### 一键启动补上「QQ 先决」：没开 QQ 时不再把 SnowLuma 误判成卡死（2026-11-20）
+
+- **事故形态**：早上机器重启后 `启动全部.cmd` 起不来 QQ 机器人——SnowLuma 的 node 进程在、WebUI 5099 也活着，但 **3000/3001 一个都没监听**。真因不是 SnowLuma 卡死：它是**注入到 QQNT 进程里工作**的，`QQ.exe` 没运行时没有可注入的宿主，自然不开 OneBot 端口。旧逻辑见「进程在、端口 60 秒不开」就按卡死处理，把好端端的 SnowLuma 杀掉重拉，再白等 90 秒，最后报「没起来」。
+- **`stack-control.mjs` 新增 QQ 前置判定**：`qqRunning()`（`Get-Process -Name QQ` 计数）→ `ensureQq()`（路径优先 `config.json` 的 `snowluma.qqExe`，缺省探测 `C:\Program Files\Tencent\QQNT\QQ.exe` 与 x86 版本；拉起来要**可见窗口**，因为可能要扫码，最多等 60 秒）。`start` 现在四步：`[1/4] QQ 客户端 → [2/4] SnowLuma → [3/4] DSH web → [4/4] 桥接`。
+- **`ensureSnowLuma` 的判断顺序改了**：端口没开 → 先等 10 秒（别的路径刚拉起时的正常启动）→ **先查 QQ**，QQ 不在就先拉 QQ、再等注入（最多 90 秒），状态记为 `qqinjected`；QQ 也在跑、端口还不开才认「卡死」重拉。起全新实例之前同样先确认 QQ，免得 90 秒等一个永远不会开的端口。
+- **`report()` 把「3000 没开」单列**：以前只报 `QQ 账号 ❌ <登录失败原因>`，现在先探 OneBot HTTP 的 `3000`，没监听就直接说「SnowLuma 没注入到 QQ（QQ 没运行或没登录）」，不再让人以为是泛泛的账号问题。
+- **实测**：`status` / `start` / `restart` / `cmd /c 启动全部.cmd` 全部退出 0；`[1/4] QQ 客户端 已在运行`，`restart` 11 秒内三端口全部 ✅ + `QQ 账号 3928753720（南溟）` + `桥接→网关 ✅ SnowLuma 已连接，账号在线，DSH 就绪`。
+- **再挖出一个坑（同一天实测）**：SnowLuma 的 node 自己死掉（或被单独杀掉）之后，`launcher.bat` 那个窗口并不会重拉，而是停在末尾的 `pause` 上——它一直攥着 `logs/snowluma.out` 的写入句柄（`>> snowluma.out` 是 cmd 自己打开的）。这时再 `start`，新一轮 `cmd /d /c launcher.bat >> snowluma.out` 会因为**共享冲突直接失败**：cmd 悄悄退出，日志里一个字都不多，人只能看到「等了 90 秒没起来」。现在 `ensureSnowLuma()` 先把「有 launcher 窗口、却没有 node」的残留守护窗口收掉，并在拉起后 15 秒内校验进程是否真的出现，没出现就立刻报 `launchfail`（附一句「logs/snowluma.out 可能被别的窗口占着」），不再白等。
+- **这条链的实测证据**：杀掉 SnowLuma 的 node 后 `status` 报 `QQ 账号 ❌ 端口 3000 没在监听：SnowLuma 没注入到 QQ（QQ 没运行或没登录）`，而桥接那行仍然被查询（`⚠️ SnowLuma 未连接，账号在线，DSH 就绪`），退出码 1；`start` 收掉残留 launcher（PID 27452）后 1 秒起来，17 秒全绿退出 0；`restart.bat` 15 秒、`启动全部.cmd` 均退出 0。
+- **文档**：README「运行与运维」补上四步说明、`snowluma.qqExe` 配置项、`stop` 不动 QQ，以及「SnowLuma 进程在、3001 不开 → 先看 QQ」这条排查结论。
+
 ### 一键启动改走 `stack-control.mjs`：三件套无窗口拉起，重启覆盖 SnowLuma（2026-11-15）
 
 - **事故**：11:58 桥接（3100）在跑、DSH（3080）在跑，但 **3001/3000 没人监听**——SnowLuma 在 00:14:08 被 Ctrl+C / 关窗口（`logs/snowluma.out` 末尾 `Shutting down (SIGINT)`）之后就一直没起来。桥接从那时起每 30 秒 `SnowLuma 连接断开（code=1006）` + `token 自救失败：连不上 OneBot HTTP API（http://127.0.0.1:3000）`。同一天上午为了止住「每 2–5 分钟弹一个 Windows Terminal」已经把 5 个周期任务 Disabled（`Bridge supervisor` / `SnowLuma supervisor` / 三个 keeper），于是没有任何东西会把它拉起来——这不是桥接的问题。

@@ -226,15 +226,16 @@ node scripts/setup-dsh.mjs
 
 ```bash
 npm start             # 前台跑桥接（崩溃不自动重启，Ctrl+C 停）
-双击 启动全部.cmd     # 一键起三件套：SnowLuma(3001) + DSH web(3080) + 桥接(3100)
+双击 启动全部.cmd     # 一键四步：QQ 客户端 → SnowLuma(3001) → DSH web(3080) → 桥接(3100)
 双击 restart.bat      # 只重启 SnowLuma + 桥接，DSH 不动
 ```
 
-三件套的启停都走同一个脚本 `scripts/stack-control.mjs`（`start|stop|restart|status`），`启动全部.cmd` / `restart.bat` 只是它的双击入口：
+四步的启停都走同一个脚本 `scripts/stack-control.mjs`（`start|stop|restart|status`），`启动全部.cmd` / `restart.bat` 只是它的双击入口：
 
 - `start`：缺什么起什么，起完再体检一遍——三个端口、OneBot 的 `get_login_info`（QQ 真的在线吗）、桥接 `/api/status` 里的 `snowluma.connected`（端口开着 ≠ 连上网关了）。幂等，重复跑没有副作用。
-- `restart`：先停 SnowLuma + 桥接再起。停的时候**先杀 `cmd /c start.bat` 守护窗口、再杀 node**，反过来的话 `:loop` 会在 5 秒后把刚杀掉的桥接又拉起来。DSH web 不动（它掉线桥接会自己排队等）。
-- `stop`：只停 SnowLuma + 桥接。`status`：只查不动手。
+- **`start` 会先确认 QQ 客户端在跑**：SnowLuma 是注入到 QQNT 进程里工作的，**QQ 没运行就没有 3000/3001**。路径读 `snowluma.qqExe`，缺省探测 `C:\Program Files\Tencent\QQNT\QQ.exe`；没跑就拉起来（可见窗口，要扫码就扫）。所以机器重启后只要 QQ 记得密码、自动登录，双击一下就能全起来。
+- `restart`：先停 SnowLuma + 桥接再起。停的时候**先杀 `cmd /c start.bat` 守护窗口、再杀 node**，反过来的话 `:loop` 会在 5 秒后把刚杀掉的桥接又拉起来。DSH web 不动（它是你正在用的界面；它掉线桥接会自己排队等）。
+- `stop`：只停 SnowLuma + 桥接，**不动 QQ**。`status`：只查不动手。
 - 三个服务全部**无窗口后台启动**：SnowLuma 走它自己的 `launcher.bat`、桥接走 `start.bat`、DSH 走 `scripts/dsh-web-supervisor.mjs`，统一经 `scripts/run-hidden.vbs`（`WScript.Shell.Run cmd, 0, False`）拉起。
 - 日志：`logs\launcher.log`（脚本自己的动作，每次启停都有记录）、`logs\snowluma.out`、`logs\bridge.out`、`logs\dsh-web.out`、`logs\dsh-web-supervisor.log`。
 
@@ -242,6 +243,8 @@ npm start             # 前台跑桥接（崩溃不自动重启，Ctrl+C 停）
 - **桥接只能运行一个实例**（单实例锁 `state\bridge.lock`，重复启动会被拒绝并提示"已有实例在运行"）。
 - 桥接崩溃由 `start.bat` 的 `:loop` 兜（5 秒后原地重拉）；**窗口被关/进程树被杀之后不会再自动起来**——重新双击 `启动全部.cmd` 或 `restart.bat`。
 - 消息无反应时先跑 `node scripts\stack-control.mjs status`：它把「端口没开」「QQ 不在线」「桥接在、但网关没连上」分开报。2026-11-15 那次「QQ 机器人未连接」就是 SnowLuma 的窗口被 Ctrl+C 关掉后再没人拉起来，桥接从 00:14 一路 `code=1006` 重连。
+- **SnowLuma 进程在、3001 却没开，先看 QQ 在不在**（2026-11-20 的现场：SnowLuma 进程和 WebUI 5099 都活着，3000/3001 一个没开，原因是 QQ 没启动、没得注入）。`start` 现在会自己判断这一条，不会再把这个状态误判成「卡死」然后杀掉重拉。
+- **SnowLuma 的 node 死了之后，别指望它的窗口自己重拉**：`launcher.bat` 末尾是 `pause`，node 一退它就停在那儿，还占着 `logs\snowluma.out` 的写入句柄——这时再启动会因为日志被占而**静默失败**（cmd 直接退出，日志一个字不多）。`stack-control.mjs start` 现在会先收掉这种「有 launcher 窗口、没有 node」的残留窗口，并在拉起后 15 秒内确认进程真的出现，否则直接报 `launchfail`。
 - **重启 DSH 通常不需要动桥接**：每 5 秒探活，DSH 不可用期间收到的 QQ 消息在桥接进程内排队（最多 50 条/会话，满后丢最旧项），恢复后尝试补投。桥接进程退出会丢失内存队列；断线期间已经结束的回复暂不保证补发。
 - 修改 `config.json` / `roles/` / `state/current-role.json` 后重启桥接生效；修改 `dsh/agent-presets/`（改完要跑 `node scripts/build-agent-preset-patches.mjs` 重新生成 bundle patch）或 MCP 配置后重启 DSH 生效。
 
